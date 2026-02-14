@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from lens.core.models import Episode, EvidenceRef, Hit, Insight
+from lens.core.models import (
+    AgentAnswer,
+    Episode,
+    GroundTruth,
+    Question,
+    QuestionResult,
+)
 
 
 @pytest.fixture
@@ -26,31 +32,47 @@ def sample_episodes() -> list[Episode]:
 
 
 @pytest.fixture
-def sample_insights() -> list[Insight]:
-    """Create sample insights with valid evidence refs."""
-    return [
-        Insight(
-            text="Test pattern across multiple episodes",
-            confidence=0.8,
-            evidence=[
-                EvidenceRef(episode_id="test_ep_000", quote="evidence_fragment_0"),
-                EvidenceRef(episode_id="test_ep_001", quote="evidence_fragment_1"),
-                EvidenceRef(episode_id="test_ep_002", quote="evidence_fragment_2"),
-            ],
-            falsifier="Pattern not found in future episodes",
+def sample_question() -> Question:
+    """A sample question for testing."""
+    return Question(
+        question_id="test_q01",
+        persona_id="test_persona",
+        checkpoint_after=10,
+        question_type="longitudinal",
+        prompt="What patterns have emerged?",
+        ground_truth=GroundTruth(
+            canonical_answer="A pattern of topic evolution was found.",
+            required_evidence_refs=["test_ep_001", "test_ep_003", "test_ep_005"],
+            key_facts=["pattern_alpha", "evidence_fragment"],
+            related_pattern_id="tp_01",
         ),
-        Insight(
-            text="Another pattern with strong support",
-            confidence=0.6,
-            evidence=[
-                EvidenceRef(episode_id="test_ep_003", quote="evidence_fragment_3"),
-                EvidenceRef(episode_id="test_ep_004", quote="evidence_fragment_4"),
-                EvidenceRef(episode_id="test_ep_005", quote="evidence_fragment_5"),
-                EvidenceRef(episode_id="test_ep_006", quote="evidence_fragment_6"),
-            ],
-            falsifier="Contradicted by episodes after ep_010",
-        ),
-    ]
+    )
+
+
+@pytest.fixture
+def sample_answer() -> AgentAnswer:
+    """A sample agent answer for testing."""
+    return AgentAnswer(
+        question_id="test_q01",
+        answer_text="Based on the data, pattern_alpha was found across multiple episodes with evidence_fragment references.",
+        turns=[{"role": "assistant", "content": "answer"}],
+        tool_calls_made=3,
+        total_tokens=300,
+        wall_time_ms=150.0,
+        budget_violations=[],
+        refs_cited=["test_ep_001", "test_ep_003"],
+    )
+
+
+@pytest.fixture
+def sample_question_result(sample_question, sample_answer) -> QuestionResult:
+    """A sample question result for testing."""
+    return QuestionResult(
+        question=sample_question,
+        answer=sample_answer,
+        retrieved_ref_ids=["test_ep_001", "test_ep_003"],
+        valid_ref_ids=["test_ep_001", "test_ep_003"],
+    )
 
 
 @pytest.fixture

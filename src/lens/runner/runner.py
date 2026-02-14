@@ -7,62 +7,71 @@ from pathlib import Path
 
 from lens.adapters.base import MemoryAdapter
 from lens.adapters.registry import get_adapter
-from lens.core.config import BudgetConfig, RunConfig
-from lens.core.errors import LatencyExceededError, atomic_write
+from lens.agent.budget_enforcer import QuestionBudget
+from lens.agent.harness import AgentHarness
+from lens.agent.llm_client import BaseLLMClient, MockLLMClient
+from lens.core.config import RunConfig
+from lens.core.errors import atomic_write
 from lens.core.logging import LensLogger, Verbosity
 from lens.core.models import (
     CheckpointResult,
     Episode,
     PersonaResult,
+    Question,
+    QuestionResult,
     RunResult,
 )
 from lens.runner.anticheat import EpisodeVault
-from lens.runner.budget import BudgetedLLM, BudgetTracker
-from lens.runner.validator import OutputValidator
 
 
 class RunEngine:
-    """Orchestrates a benchmark run: episodes -> checkpoints -> artifacts."""
+    """Orchestrates a benchmark run: episodes -> checkpoints -> agent questions -> artifacts."""
 
     def __init__(
         self,
         config: RunConfig,
         logger: LensLogger | None = None,
+        llm_client: BaseLLMClient | None = None,
     ) -> None:
         self.config = config
         self.logger = logger or LensLogger(Verbosity.NORMAL)
         self.vault = EpisodeVault()
-        self.tracker = BudgetTracker()
-        self.budgeted_llm = BudgetedLLM(config.budget, self.tracker)
-        self.validator = OutputValidator(
-            self.vault,
-            max_evidence_episodes=config.budget.max_evidence_episodes,
-        )
         self.run_id = uuid.uuid4().hex[:12]
+        self.llm_client = llm_client or MockLLMClient()
 
-    def run(self, personas: dict[str, list[Episode]]) -> RunResult:
+    def run(
+        self,
+        personas: dict[str, list[Episode]],
+        questions: list[Question] | None = None,
+    ) -> RunResult:
         """Execute the full benchmark run across all personas."""
         self.logger.info(
             f"Starting run [bold]{self.run_id}[/bold] "
-            f"adapter={self.config.adapter} budget={self.config.budget.preset}"
+            f"adapter={self.config.adapter} budget={self.config.agent_budget.preset}"
         )
 
         adapter_cls = get_adapter(self.config.adapter)
         adapter = adapter_cls()
-        adapter.set_budgeted_llm(self.budgeted_llm)
+
+        # Group questions by persona_id and checkpoint
+        questions = questions or []
+        q_index: dict[str, dict[int, list[Question]]] = {}
+        for q in questions:
+            q_index.setdefault(q.persona_id, {}).setdefault(q.checkpoint_after, []).append(q)
 
         persona_results: list[PersonaResult] = []
 
         for persona_id, episodes in personas.items():
             self.logger.info(f"Persona [bold]{persona_id}[/bold]: {len(episodes)} episodes")
-            result = self._run_persona(adapter, persona_id, episodes)
+            persona_questions = q_index.get(persona_id, {})
+            result = self._run_persona(adapter, persona_id, episodes, persona_questions)
             persona_results.append(result)
 
         run_result = RunResult(
             run_id=self.run_id,
             adapter=self.config.adapter,
             dataset_version="",  # Set by caller
-            budget_preset=self.config.budget.preset,
+            budget_preset=self.config.agent_budget.preset,
             personas=persona_results,
         )
 
@@ -74,23 +83,17 @@ class RunEngine:
         adapter: MemoryAdapter,
         persona_id: str,
         episodes: list[Episode],
+        questions_by_checkpoint: dict[int, list[Question]],
     ) -> PersonaResult:
         """Run the benchmark for a single persona."""
-        # Sort episodes by timestamp
         episodes = sorted(episodes, key=lambda e: e.timestamp)
-
-        # Reset adapter state
         adapter.reset(persona_id)
         checkpoints_done: list[CheckpointResult] = []
 
         for idx, episode in enumerate(episodes, start=1):
-            # Store in vault for evidence validation
             self.vault.store(episode.episode_id, episode.text)
 
-            # Ingest with timing check
-            self.budgeted_llm.set_context("ingest", "ingest")
             self.logger.start_step("ingest")
-
             t0 = time.monotonic()
             adapter.ingest(
                 episode_id=episode.episode_id,
@@ -100,30 +103,30 @@ class RunEngine:
                 meta=episode.meta,
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
-
             self.logger.end_step(
                 message=f"episode {episode.episode_id}",
                 persona_id=persona_id,
                 elapsed=elapsed_ms,
             )
 
-            if elapsed_ms > self.config.budget.ingest.max_latency_ms:
+            if elapsed_ms > self.config.agent_budget.ingest_max_latency_ms:
                 self.logger.warn(
                     f"Ingest latency {elapsed_ms:.0f}ms exceeds "
-                    f"{self.config.budget.ingest.max_latency_ms}ms cap"
+                    f"{self.config.agent_budget.ingest_max_latency_ms}ms cap"
                 )
 
             # Check if this is a checkpoint
             if idx in self.config.checkpoints:
                 checkpoint_result = self._run_checkpoint(
-                    adapter, persona_id, idx
+                    adapter, persona_id, idx, questions_by_checkpoint.get(idx, [])
                 )
                 checkpoints_done.append(checkpoint_result)
 
         # Also run checkpoint at final episode if not already done
-        if len(episodes) not in self.config.checkpoints:
+        final = len(episodes)
+        if final not in self.config.checkpoints:
             checkpoint_result = self._run_checkpoint(
-                adapter, persona_id, len(episodes)
+                adapter, persona_id, final, questions_by_checkpoint.get(final, [])
             )
             checkpoints_done.append(checkpoint_result)
 
@@ -134,61 +137,58 @@ class RunEngine:
         adapter: MemoryAdapter,
         persona_id: str,
         checkpoint: int,
+        questions: list[Question],
     ) -> CheckpointResult:
-        """Execute refresh + core + search at a checkpoint."""
+        """Execute prepare + agent questions at a checkpoint."""
         self.logger.info(f"  Checkpoint {checkpoint} for {persona_id}")
         errors: list[str] = []
         timing: dict[str, float] = {}
 
-        # Phase A: refresh (offline, metered)
-        self.budgeted_llm.set_context("refresh", "refresh")
+        # Optional prepare hook
         t0 = time.monotonic()
-        adapter.refresh(persona_id, checkpoint)
-        timing["refresh_ms"] = (time.monotonic() - t0) * 1000
+        adapter.prepare(persona_id, checkpoint)
+        timing["prepare_ms"] = (time.monotonic() - t0) * 1000
 
-        # Phase B: core (online, budgeted)
-        self.budgeted_llm.set_context("core", "core")
-        t0 = time.monotonic()
-        insights = adapter.core(persona_id, self.config.core_k, checkpoint)
-        core_ms = (time.monotonic() - t0) * 1000
-        timing["core_ms"] = core_ms
+        # Build agent budget from config
+        budget = QuestionBudget(
+            max_turns=self.config.agent_budget.max_turns,
+            max_payload_bytes=self.config.agent_budget.max_payload_bytes,
+            max_latency_per_call_ms=self.config.agent_budget.max_latency_per_call_ms,
+            max_total_tool_calls=self.config.agent_budget.max_tool_calls,
+            max_agent_tokens=self.config.agent_budget.max_agent_tokens,
+        )
+        harness = AgentHarness(self.llm_client, budget)
 
-        if core_ms > self.config.budget.core.max_latency_ms:
-            errors.append(
-                f"core latency {core_ms:.0f}ms exceeds "
-                f"{self.config.budget.core.max_latency_ms}ms"
-            )
+        question_results: list[QuestionResult] = []
+        for question in questions:
+            self.logger.verbose(f"    Question: {question.question_id}")
 
-        # Validate insights
-        validation_errors = self.validator.validate_insights(insights)
-        errors.extend(validation_errors)
-
-        # Phase B: search (online, budgeted)
-        search_results: dict[str, list] = {}
-        for query in self.config.search_queries:
-            self.budgeted_llm.set_context("search", "search")
             t0 = time.monotonic()
-            hits = adapter.search(persona_id, query, self.config.search_k, checkpoint)
-            search_ms = (time.monotonic() - t0) * 1000
-            timing[f"search_{query}_ms"] = search_ms
+            answer = harness.answer(
+                question_prompt=question.prompt,
+                adapter=adapter,
+                question_id=question.question_id,
+            )
+            q_ms = (time.monotonic() - t0) * 1000
+            timing[f"question_{question.question_id}_ms"] = q_ms
 
-            if search_ms > self.config.budget.search.max_latency_ms:
-                errors.append(
-                    f"search latency {search_ms:.0f}ms exceeds "
-                    f"{self.config.budget.search.max_latency_ms}ms"
-                )
+            # Validate refs against vault
+            retrieved = answer.refs_cited
+            valid = [r for r in retrieved if self.vault.has(r)]
 
-            hit_errors = self.validator.validate_hits(hits)
-            errors.extend(hit_errors)
-            search_results[query] = hits
+            question_results.append(QuestionResult(
+                question=question,
+                answer=answer,
+                retrieved_ref_ids=retrieved,
+                valid_ref_ids=valid,
+            ))
 
         return CheckpointResult(
             persona_id=persona_id,
             checkpoint=checkpoint,
-            insights=insights,
-            search_results=search_results,
+            question_results=question_results,
             validation_errors=errors,
-            budget_used=self.tracker.summary(),
+            budget_used={},
             timing=timing,
         )
 
@@ -218,25 +218,14 @@ class RunEngine:
                 cp_dir = persona_dir / f"checkpoint_{cp.checkpoint}"
                 cp_dir.mkdir(parents=True, exist_ok=True)
 
-                with atomic_write(cp_dir / "insights.json") as tmp:
+                with atomic_write(cp_dir / "question_results.json") as tmp:
                     tmp.write_text(json.dumps(
-                        [i.to_dict() for i in cp.insights], indent=2
+                        [qr.to_dict() for qr in cp.question_results], indent=2
                     ))
-
-                for query, hits in cp.search_results.items():
-                    safe_query = query.replace(" ", "_")[:50]
-                    with atomic_write(cp_dir / f"search_{safe_query}.json") as tmp:
-                        tmp.write_text(json.dumps(
-                            [h.to_dict() for h in hits], indent=2
-                        ))
 
                 if cp.validation_errors:
                     with atomic_write(cp_dir / "validation.json") as tmp:
                         tmp.write_text(json.dumps(cp.validation_errors, indent=2))
-
-        # Budget report
-        with atomic_write(out / "budget_report.json") as tmp:
-            tmp.write_text(json.dumps(self.tracker.summary(), indent=2))
 
         self.logger.success(f"Artifacts saved to {out}")
         return out

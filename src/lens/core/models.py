@@ -5,72 +5,139 @@ from datetime import datetime
 
 
 # ---------------------------------------------------------------------------
-# Evidence & Insight models (adapter output)
+# Ground truth & question models (dataset)
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class EvidenceRef:
-    """Reference to a specific quote within an episode."""
-
-    episode_id: str
-    quote: str  # Must be exact substring of episode text
-
-    def to_dict(self) -> dict:
-        return {"episode_id": self.episode_id, "quote": self.quote}
-
-    @classmethod
-    def from_dict(cls, d: dict) -> EvidenceRef:
-        return cls(episode_id=d["episode_id"], quote=d["quote"])
-
-
 @dataclass
-class Insight:
-    """A longitudinal insight produced by a memory system."""
+class GroundTruth:
+    """Ground truth for a benchmark question."""
 
-    text: str
-    confidence: float  # [0, 1]
-    evidence: list[EvidenceRef]  # min 3 recommended
-    falsifier: str  # What would disprove this insight
-
-    def __post_init__(self) -> None:
-        if not 0.0 <= self.confidence <= 1.0:
-            msg = f"confidence must be in [0, 1], got {self.confidence}"
-            raise ValueError(msg)
+    canonical_answer: str
+    required_evidence_refs: list[str]  # episode_ids the answer should draw from
+    key_facts: list[str]  # factual claims that must appear
+    related_pattern_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
-            "text": self.text,
-            "confidence": self.confidence,
-            "evidence": [e.to_dict() for e in self.evidence],
-            "falsifier": self.falsifier,
+            "canonical_answer": self.canonical_answer,
+            "required_evidence_refs": self.required_evidence_refs,
+            "key_facts": self.key_facts,
+            "related_pattern_id": self.related_pattern_id,
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> Insight:
+    def from_dict(cls, d: dict) -> GroundTruth:
         return cls(
-            text=d["text"],
-            confidence=d["confidence"],
-            evidence=[EvidenceRef.from_dict(e) for e in d["evidence"]],
-            falsifier=d["falsifier"],
+            canonical_answer=d["canonical_answer"],
+            required_evidence_refs=d["required_evidence_refs"],
+            key_facts=d["key_facts"],
+            related_pattern_id=d.get("related_pattern_id"),
         )
 
 
-@dataclass(frozen=True)
-class Hit:
-    """A search result from the memory system."""
+@dataclass
+class Question:
+    """A benchmark question to be answered by the agent."""
 
-    id: str
-    kind: str  # e.g. "episode", "insight", "fragment"
-    text: str
-    score: float
+    question_id: str
+    persona_id: str
+    checkpoint_after: int
+    question_type: str  # "longitudinal" | "null_hypothesis" | "action_recommendation"
+    prompt: str
+    ground_truth: GroundTruth
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "kind": self.kind, "text": self.text, "score": self.score}
+        return {
+            "question_id": self.question_id,
+            "persona_id": self.persona_id,
+            "checkpoint_after": self.checkpoint_after,
+            "question_type": self.question_type,
+            "prompt": self.prompt,
+            "ground_truth": self.ground_truth.to_dict(),
+        }
 
     @classmethod
-    def from_dict(cls, d: dict) -> Hit:
-        return cls(id=d["id"], kind=d["kind"], text=d["text"], score=d["score"])
+    def from_dict(cls, d: dict) -> Question:
+        return cls(
+            question_id=d["question_id"],
+            persona_id=d["persona_id"],
+            checkpoint_after=d["checkpoint_after"],
+            question_type=d["question_type"],
+            prompt=d["prompt"],
+            ground_truth=GroundTruth.from_dict(d["ground_truth"]),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Agent answer models (agent output)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentAnswer:
+    """The agent's answer to a benchmark question."""
+
+    question_id: str
+    answer_text: str
+    turns: list[dict] = field(default_factory=list)
+    tool_calls_made: int = 0
+    total_tokens: int = 0
+    wall_time_ms: float = 0.0
+    budget_violations: list[str] = field(default_factory=list)
+    refs_cited: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "question_id": self.question_id,
+            "answer_text": self.answer_text,
+            "turns": self.turns,
+            "tool_calls_made": self.tool_calls_made,
+            "total_tokens": self.total_tokens,
+            "wall_time_ms": self.wall_time_ms,
+            "budget_violations": self.budget_violations,
+            "refs_cited": self.refs_cited,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> AgentAnswer:
+        return cls(
+            question_id=d["question_id"],
+            answer_text=d["answer_text"],
+            turns=d.get("turns", []),
+            tool_calls_made=d.get("tool_calls_made", 0),
+            total_tokens=d.get("total_tokens", 0),
+            wall_time_ms=d.get("wall_time_ms", 0.0),
+            budget_violations=d.get("budget_violations", []),
+            refs_cited=d.get("refs_cited", []),
+        )
+
+
+@dataclass
+class QuestionResult:
+    """Result of a single question answered by the agent."""
+
+    question: Question
+    answer: AgentAnswer
+    retrieved_ref_ids: list[str] = field(default_factory=list)
+    valid_ref_ids: list[str] = field(default_factory=list)  # subset that exist in vault
+
+    def to_dict(self) -> dict:
+        return {
+            "question": self.question.to_dict(),
+            "answer": self.answer.to_dict(),
+            "retrieved_ref_ids": self.retrieved_ref_ids,
+            "valid_ref_ids": self.valid_ref_ids,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> QuestionResult:
+        return cls(
+            question=Question.from_dict(d["question"]),
+            answer=AgentAnswer.from_dict(d["answer"]),
+            retrieved_ref_ids=d.get("retrieved_ref_ids", []),
+            valid_ref_ids=d.get("valid_ref_ids", []),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -255,8 +322,7 @@ class CheckpointResult:
 
     persona_id: str
     checkpoint: int
-    insights: list[Insight] = field(default_factory=list)
-    search_results: dict[str, list[Hit]] = field(default_factory=dict)  # query -> hits
+    question_results: list[QuestionResult] = field(default_factory=list)
     validation_errors: list[str] = field(default_factory=list)
     budget_used: dict = field(default_factory=dict)
     timing: dict = field(default_factory=dict)
@@ -265,10 +331,7 @@ class CheckpointResult:
         return {
             "persona_id": self.persona_id,
             "checkpoint": self.checkpoint,
-            "insights": [i.to_dict() for i in self.insights],
-            "search_results": {
-                q: [h.to_dict() for h in hits] for q, hits in self.search_results.items()
-            },
+            "question_results": [qr.to_dict() for qr in self.question_results],
             "validation_errors": self.validation_errors,
             "budget_used": self.budget_used,
             "timing": self.timing,
@@ -279,11 +342,9 @@ class CheckpointResult:
         return cls(
             persona_id=d["persona_id"],
             checkpoint=d["checkpoint"],
-            insights=[Insight.from_dict(i) for i in d.get("insights", [])],
-            search_results={
-                q: [Hit.from_dict(h) for h in hits]
-                for q, hits in d.get("search_results", {}).items()
-            },
+            question_results=[
+                QuestionResult.from_dict(qr) for qr in d.get("question_results", [])
+            ],
             validation_errors=d.get("validation_errors", []),
             budget_used=d.get("budget_used", {}),
             timing=d.get("timing", {}),

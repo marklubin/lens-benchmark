@@ -8,6 +8,7 @@ from lens.datasets.loader import (
     get_search_queries,
     load_dataset,
     load_episodes,
+    load_questions,
     load_smoke_dataset,
     load_truth_patterns,
 )
@@ -55,6 +56,76 @@ class TestDatasetSchema:
         errors = validate_dataset(data)
         assert any("duplicate" in e for e in errors)
 
+    def test_valid_questions(self):
+        data = {
+            "version": "1.0.0",
+            "personas": [],
+            "questions": [
+                {
+                    "question_id": "q01",
+                    "persona_id": "p1",
+                    "checkpoint_after": 10,
+                    "question_type": "longitudinal",
+                    "prompt": "What?",
+                    "ground_truth": {
+                        "canonical_answer": "A",
+                        "required_evidence_refs": [],
+                        "key_facts": [],
+                    },
+                }
+            ],
+        }
+        errors = validate_dataset(data)
+        assert errors == []
+
+    def test_invalid_question_type(self):
+        data = {
+            "version": "1.0.0",
+            "personas": [],
+            "questions": [
+                {
+                    "question_id": "q01",
+                    "persona_id": "p1",
+                    "checkpoint_after": 10,
+                    "question_type": "invalid_type",
+                    "prompt": "What?",
+                    "ground_truth": {
+                        "canonical_answer": "A",
+                        "required_evidence_refs": [],
+                        "key_facts": [],
+                    },
+                }
+            ],
+        }
+        errors = validate_dataset(data)
+        assert any("invalid question_type" in e for e in errors)
+
+    def test_missing_question_keys(self):
+        data = {
+            "version": "1.0.0",
+            "personas": [],
+            "questions": [{"question_id": "q01"}],
+        }
+        errors = validate_dataset(data)
+        assert any("missing required key" in e for e in errors)
+
+    def test_duplicate_question_ids(self):
+        q = {
+            "question_id": "dup",
+            "persona_id": "p1",
+            "checkpoint_after": 10,
+            "question_type": "longitudinal",
+            "prompt": "Q?",
+            "ground_truth": {
+                "canonical_answer": "A",
+                "required_evidence_refs": [],
+                "key_facts": [],
+            },
+        }
+        data = {"version": "1.0.0", "personas": [], "questions": [q, q]}
+        errors = validate_dataset(data)
+        assert any("duplicate question_id" in e for e in errors)
+
 
 class TestDatasetLoader:
     def test_load_smoke_dataset(self):
@@ -73,6 +144,17 @@ class TestDatasetLoader:
         patterns = load_truth_patterns(smoke_dataset)
         assert len(patterns) == 2
         assert patterns[0].pattern_id == "smoke_tp_01"
+
+    def test_load_questions(self, smoke_dataset):
+        questions = load_questions(smoke_dataset)
+        assert len(questions) == 6
+        types = {q.question_type for q in questions}
+        assert types == {"longitudinal", "null_hypothesis", "action_recommendation"}
+
+    def test_load_questions_empty(self):
+        data = {"version": "1.0.0", "personas": []}
+        questions = load_questions(data)
+        assert questions == []
 
     def test_get_version(self, smoke_dataset):
         assert get_dataset_version(smoke_dataset) == "0.1.0-smoke"

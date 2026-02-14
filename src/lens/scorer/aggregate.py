@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from lens.core.models import MetricResult, ScoreCard
 
-# Default v0 composite weights
+# Default v2 composite weights
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "evidence_validity": 0.35,
-    "multi_episode_support": 0.15,
-    "non_locality": 0.10,
-    "confidence_discipline": 0.10,
-    "survival_at_k": 0.20,
+    "evidence_grounding": 0.10,
+    "fact_recall": 0.10,
+    "evidence_coverage": 0.10,
     "budget_compliance": 0.10,
+    "answer_quality": 0.15,
+    "insight_depth": 0.15,
+    "reasoning_quality": 0.10,
+    "longitudinal_advantage": 0.15,
+    "action_quality": 0.05,
 }
 
 

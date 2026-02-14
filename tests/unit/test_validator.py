@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from lens.core.errors import EvidenceError
-from lens.core.models import EvidenceRef, Insight
 from lens.runner.anticheat import EpisodeVault
 from lens.runner.validator import OutputValidator
 
@@ -23,84 +21,22 @@ def validator(vault: EpisodeVault) -> OutputValidator:
 
 
 class TestOutputValidator:
-    def test_valid_insights(self, validator):
-        insights = [
-            Insight(
-                text="valid insight",
-                confidence=0.8,
-                evidence=[
-                    EvidenceRef(episode_id="ep_001", quote="evidence_fragment_1"),
-                    EvidenceRef(episode_id="ep_002", quote="evidence_fragment_2"),
-                    EvidenceRef(episode_id="ep_003", quote="evidence_fragment_3"),
-                ],
-                falsifier="test falsifier",
-            )
-        ]
-        errors = validator.validate_insights(insights)
-        assert errors == []
+    def test_validate_refs_all_valid(self, validator):
+        valid, invalid = validator.validate_refs(["ep_001", "ep_002", "ep_003"])
+        assert valid == ["ep_001", "ep_002", "ep_003"]
+        assert invalid == []
 
-    def test_invalid_quote(self, validator):
-        insights = [
-            Insight(
-                text="insight with bad quote",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="ep_001", quote="nonexistent_text"),
-                ],
-                falsifier="test",
-            )
-        ]
-        errors = validator.validate_insights(insights)
-        assert any("quote not found" in e for e in errors)
+    def test_validate_refs_some_invalid(self, validator):
+        valid, invalid = validator.validate_refs(["ep_001", "ep_999", "ep_002"])
+        assert valid == ["ep_001", "ep_002"]
+        assert invalid == ["ep_999"]
 
-    def test_unknown_episode(self, validator):
-        insights = [
-            Insight(
-                text="insight with unknown episode",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="ep_999", quote="text"),
-                ],
-                falsifier="test",
-            )
-        ]
-        errors = validator.validate_insights(insights)
-        assert any("unknown episode_id" in e for e in errors)
+    def test_validate_refs_all_invalid(self, validator):
+        valid, invalid = validator.validate_refs(["ep_998", "ep_999"])
+        assert valid == []
+        assert invalid == ["ep_998", "ep_999"]
 
-    def test_empty_text(self, validator):
-        insights = [
-            Insight(
-                text="",
-                confidence=0.5,
-                evidence=[],
-                falsifier="test",
-            )
-        ]
-        errors = validator.validate_insights(insights)
-        assert any("empty text" in e for e in errors)
-
-    def test_empty_falsifier(self, validator):
-        insights = [
-            Insight(
-                text="insight",
-                confidence=0.5,
-                evidence=[],
-                falsifier="",
-            )
-        ]
-        errors = validator.validate_insights(insights)
-        assert any("empty falsifier" in e for e in errors)
-
-    def test_validate_and_raise(self, validator):
-        insights = [
-            Insight(
-                text="test",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="ep_001", quote="nonexistent"),
-                ],
-                falsifier="test",
-            )
-        ]
-        with pytest.raises(EvidenceError):
-            validator.validate_and_raise(insights)
+    def test_validate_refs_empty(self, validator):
+        valid, invalid = validator.validate_refs([])
+        assert valid == []
+        assert invalid == []

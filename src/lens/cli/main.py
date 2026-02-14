@@ -32,34 +32,35 @@ cli.add_command(metrics)
 @cli.command()
 def smoke() -> None:
     """Quick sanity check with bundled dataset + null adapter."""
-    from lens.core.config import RunConfig
+    from lens.agent.llm_client import MockLLMClient
+    from lens.core.config import AgentBudgetConfig, RunConfig
     from lens.core.logging import LensLogger, Verbosity
-    from lens.datasets.loader import load_episodes, load_smoke_dataset
+    from lens.datasets.loader import load_episodes, load_questions, load_smoke_dataset
     from lens.runner.runner import RunEngine
     from lens.scorer.engine import ScorerEngine
 
     logger = LensLogger(Verbosity.NORMAL)
-    logger.info("Running smoke test with null adapter...")
+    logger.info("Running smoke test with null adapter + mock LLM...")
 
     data = load_smoke_dataset()
     episodes = load_episodes(data)
+    questions = load_questions(data)
 
     config = RunConfig(
         adapter="null",
-        budget=RunConfig.__dataclass_fields__["budget"].default_factory(),
+        agent_budget=AgentBudgetConfig.fast(),
         checkpoints=[5, 10],
-        search_queries=data.get("search_queries", ["test query"]),
     )
 
-    engine = RunEngine(config, logger)
-    result = engine.run(episodes)
+    engine = RunEngine(config, logger, llm_client=MockLLMClient())
+    result = engine.run(episodes, questions=questions)
     result.dataset_version = data.get("version", "smoke")
 
     scorer = ScorerEngine(logger=logger)
     scorecard = scorer.score(result)
 
     console.print()
-    console.print(f"[bold green]Smoke test passed![/bold green]")
+    console.print("[bold green]Smoke test passed![/bold green]")
     console.print(f"Composite score: {scorecard.composite_score:.4f} (expected ~0.0 for null adapter)")
 
 

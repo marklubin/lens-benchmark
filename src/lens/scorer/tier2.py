@@ -1,44 +1,18 @@
 from __future__ import annotations
 
-from lens.core.models import Insight, MetricResult, RunResult
-from lens.matcher.base import BaseMatcher
-from lens.matcher.embedding import EmbeddingMatcher
+from lens.core.models import MetricResult, RunResult
 from lens.scorer.base import BaseMetric
 from lens.scorer.registry import register_metric
+from lens.scorer.tier1 import _all_question_results
 
 
-def _get_matcher() -> BaseMatcher:
-    """Get the default matcher for stability metrics."""
-    return EmbeddingMatcher()
-
-
-def _consecutive_checkpoint_pairs(
-    result: RunResult,
-) -> list[tuple[list[Insight], list[Insight]]]:
-    """Extract consecutive checkpoint insight pairs across all personas."""
-    pairs: list[tuple[list[Insight], list[Insight]]] = []
-    for persona in result.personas:
-        cps = sorted(persona.checkpoints, key=lambda c: c.checkpoint)
-        for i in range(len(cps) - 1):
-            pairs.append((cps[i].insights, cps[i + 1].insights))
-    return pairs
-
-
-@register_metric("survival_at_k")
-class SurvivalAtK(BaseMetric):
-    """Insight Survival@k: overlap of top-k insights between consecutive checkpoints.
-
-    Uses a pluggable matcher to determine if two insights are "the same".
-    Default: embedding cosine similarity >= 0.85 threshold.
-    """
-
-    def __init__(self, k: int = 10, matcher: BaseMatcher | None = None) -> None:
-        self.k = k
-        self.matcher = matcher or _get_matcher()
+@register_metric("answer_quality")
+class AnswerQuality(BaseMetric):
+    """Overall correctness proxy — average fact recall per question."""
 
     @property
     def name(self) -> str:
-        return "survival_at_k"
+        return "answer_quality"
 
     @property
     def tier(self) -> int:
@@ -46,58 +20,78 @@ class SurvivalAtK(BaseMetric):
 
     @property
     def description(self) -> str:
-        return f"Overlap of top-{self.k} insights between consecutive checkpoints"
+        return "Overall answer correctness (fact-recall heuristic proxy)"
 
     def compute(self, result: RunResult) -> MetricResult:
-        pairs = _consecutive_checkpoint_pairs(result)
-        if not pairs:
+        qrs = _all_question_results(result)
+        if not qrs:
             return MetricResult(name=self.name, tier=self.tier, value=0.0)
 
-        survival_rates: list[float] = []
-
-        for prev_insights, curr_insights in pairs:
-            prev_top = prev_insights[: self.k]
-            curr_top = curr_insights[: self.k]
-
-            if not prev_top or not curr_top:
-                survival_rates.append(0.0)
+        scores: list[float] = []
+        for qr in qrs:
+            key_facts = qr.question.ground_truth.key_facts
+            if not key_facts:
+                scores.append(1.0)
                 continue
+            answer_lower = qr.answer.answer_text.lower()
+            found = sum(1 for f in key_facts if f.lower() in answer_lower)
+            scores.append(found / len(key_facts))
 
-            # Count how many prev insights survived into curr
-            survived = 0
-            for prev_insight in prev_top:
-                for curr_insight in curr_top:
-                    if self.matcher.match(prev_insight.text, curr_insight.text):
-                        survived += 1
-                        break
-
-            survival_rates.append(survived / len(prev_top))
-
-        avg_survival = sum(survival_rates) / len(survival_rates)
+        value = sum(scores) / len(scores)
         return MetricResult(
             name=self.name,
             tier=self.tier,
-            value=avg_survival,
+            value=value,
+            details={"num_questions": len(scores)},
+        )
+
+
+@register_metric("insight_depth")
+class InsightDepth(BaseMetric):
+    """Cross-episode reasoning — fraction of questions citing refs from 2+ distinct episodes."""
+
+    @property
+    def name(self) -> str:
+        return "insight_depth"
+
+    @property
+    def tier(self) -> int:
+        return 2
+
+    @property
+    def description(self) -> str:
+        return "Fraction of questions where the agent cited refs from 2+ distinct episodes"
+
+    def compute(self, result: RunResult) -> MetricResult:
+        qrs = _all_question_results(result)
+        if not qrs:
+            return MetricResult(name=self.name, tier=self.tier, value=0.0)
+
+        multi_episode_count = 0
+        for qr in qrs:
+            distinct_refs = set(qr.retrieved_ref_ids)
+            if len(distinct_refs) >= 2:
+                multi_episode_count += 1
+
+        value = multi_episode_count / len(qrs)
+        return MetricResult(
+            name=self.name,
+            tier=self.tier,
+            value=value,
             details={
-                "k": self.k,
-                "num_pairs": len(pairs),
-                "survival_rates": survival_rates,
+                "num_questions": len(qrs),
+                "multi_episode_questions": multi_episode_count,
             },
         )
 
 
-@register_metric("churn_at_k")
-class ChurnAtK(BaseMetric):
-    """Churn@k = 1 - Survival@k. Measures instability."""
-
-    def __init__(self, k: int = 10, matcher: BaseMatcher | None = None) -> None:
-        self.k = k
-        self.matcher = matcher or _get_matcher()
-        self._survival = SurvivalAtK(k=k, matcher=self.matcher)
+@register_metric("reasoning_quality")
+class ReasoningQuality(BaseMetric):
+    """Logical coherence proxy — fraction of questions with substantive answers and tool use."""
 
     @property
     def name(self) -> str:
-        return "churn_at_k"
+        return "reasoning_quality"
 
     @property
     def tier(self) -> int:
@@ -105,13 +99,22 @@ class ChurnAtK(BaseMetric):
 
     @property
     def description(self) -> str:
-        return f"1 - Survival@{self.k} — measures insight instability"
+        return "Fraction of questions with answer > 50 chars and tool_calls > 0"
 
     def compute(self, result: RunResult) -> MetricResult:
-        survival = self._survival.compute(result)
+        qrs = _all_question_results(result)
+        if not qrs:
+            return MetricResult(name=self.name, tier=self.tier, value=0.0)
+
+        qualified = 0
+        for qr in qrs:
+            if len(qr.answer.answer_text) > 50 and qr.answer.tool_calls_made > 0:
+                qualified += 1
+
+        value = qualified / len(qrs)
         return MetricResult(
             name=self.name,
             tier=self.tier,
-            value=1.0 - survival.value,
-            details=survival.details,
+            value=value,
+            details={"num_questions": len(qrs), "qualified": qualified},
         )

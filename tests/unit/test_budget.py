@@ -2,78 +2,94 @@ from __future__ import annotations
 
 import pytest
 
-from lens.core.config import BudgetConfig
-from lens.core.errors import BudgetExceededError
-from lens.runner.budget import BudgetTracker, BudgetedLLM
+from lens.agent.budget_enforcer import BudgetEnforcement, BudgetViolation, QuestionBudget
 
 
-class TestBudgetedLLM:
-    def test_fast_blocks_core_calls(self):
-        config = BudgetConfig.fast()
-        llm = BudgetedLLM(config)
-        llm.set_context("core", "core")
-        with pytest.raises(BudgetExceededError, match="llm_calls"):
-            llm.complete("test prompt")
+class TestQuestionBudget:
+    def test_defaults(self):
+        budget = QuestionBudget()
+        assert budget.max_turns == 10
+        assert budget.max_total_tool_calls == 20
+        assert budget.max_agent_tokens == 8192
 
-    def test_standard_allows_one_core_call(self):
-        config = BudgetConfig.standard()
-        llm = BudgetedLLM(config)
-        llm.set_context("core", "core")
-        result = llm.complete("test prompt", max_tokens=100)
-        assert isinstance(result, str)
-
-    def test_standard_blocks_second_core_call(self):
-        config = BudgetConfig.standard()
-        llm = BudgetedLLM(config)
-        llm.set_context("core", "core")
-        llm.complete("first call", max_tokens=100)
-        with pytest.raises(BudgetExceededError, match="llm_calls"):
-            llm.complete("second call", max_tokens=100)
-
-    def test_refresh_allows_many_calls(self):
-        config = BudgetConfig.standard()
-        llm = BudgetedLLM(config)
-        llm.set_context("refresh", "refresh")
-        for _ in range(100):
-            llm.complete("call", max_tokens=10)
-
-    def test_ingest_blocks_all_calls(self):
-        config = BudgetConfig.standard()
-        llm = BudgetedLLM(config)
-        llm.set_context("ingest", "ingest")
-        with pytest.raises(BudgetExceededError):
-            llm.complete("test")
-
-    def test_calls_remaining(self):
-        config = BudgetConfig.standard()
-        llm = BudgetedLLM(config)
-        llm.set_context("core", "core")
-        assert llm.calls_remaining == 1
-        llm.complete("call", max_tokens=100)
-        assert llm.calls_remaining == 0
+    def test_custom(self):
+        budget = QuestionBudget(max_turns=5, max_total_tool_calls=10)
+        assert budget.max_turns == 5
+        assert budget.max_total_tool_calls == 10
 
 
-class TestBudgetTracker:
-    def test_tracks_usage(self):
-        config = BudgetConfig.standard()
-        tracker = BudgetTracker()
-        llm = BudgetedLLM(config, tracker)
+class TestBudgetEnforcement:
+    def test_check_turn_within_limit(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_turns=5))
+        enforcer.check_turn(3)  # Should not raise
 
-        llm.set_context("refresh", "refresh")
-        llm.complete("prompt", max_tokens=50)
-        llm.complete("prompt", max_tokens=50)
+    def test_check_turn_exceeds_limit(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_turns=5))
+        with pytest.raises(BudgetViolation, match="Turn limit exceeded"):
+            enforcer.check_turn(6)
+        assert len(enforcer.violations) == 1
 
-        assert tracker.total_calls == 2
-        assert len(tracker.by_phase("refresh")) == 2
+    def test_check_tool_call_within_limit(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_total_tool_calls=3))
+        enforcer.record_tool_call()
+        enforcer.record_tool_call()
+        enforcer.check_tool_call()  # 2 < 3, should not raise
+
+    def test_check_tool_call_exceeds_limit(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_total_tool_calls=2))
+        enforcer.record_tool_call()
+        enforcer.record_tool_call()
+        with pytest.raises(BudgetViolation, match="Tool call limit exceeded"):
+            enforcer.check_tool_call()
+
+    def test_check_tokens_within_limit(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_agent_tokens=1000))
+        enforcer.check_tokens(500)  # Should not raise
+        assert enforcer.total_tokens == 500
+
+    def test_check_tokens_exceeds_limit(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_agent_tokens=1000))
+        enforcer.check_tokens(500)
+        with pytest.raises(BudgetViolation, match="Token limit exceeded"):
+            enforcer.check_tokens(600)
+
+    def test_check_payload_records_warning(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_payload_bytes=100))
+        enforcer.check_payload(200)  # Should warn but not raise
+        assert len(enforcer.violations) == 1
+        assert enforcer.total_payload_bytes == 200
+
+    def test_record_turn(self):
+        enforcer = BudgetEnforcement(QuestionBudget())
+        assert enforcer.turns_used == 0
+        enforcer.record_turn()
+        assert enforcer.turns_used == 1
+
+    def test_is_exhausted_turns(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_turns=2))
+        assert not enforcer.is_exhausted
+        enforcer.record_turn()
+        enforcer.record_turn()
+        assert enforcer.is_exhausted
+
+    def test_is_exhausted_tool_calls(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_total_tool_calls=1))
+        enforcer.record_tool_call()
+        assert enforcer.is_exhausted
+
+    def test_is_exhausted_tokens(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_agent_tokens=100))
+        enforcer.record_tokens(100)
+        assert enforcer.is_exhausted
 
     def test_summary(self):
-        config = BudgetConfig.standard()
-        tracker = BudgetTracker()
-        llm = BudgetedLLM(config, tracker)
-
-        llm.set_context("refresh", "refresh")
-        llm.complete("prompt", max_tokens=50)
-
-        summary = tracker.summary()
-        assert summary["total_calls"] == 1
-        assert "refresh" in summary["by_phase"]
+        enforcer = BudgetEnforcement(QuestionBudget(max_turns=5))
+        enforcer.record_turn()
+        enforcer.record_tool_call()
+        enforcer.record_tokens(50)
+        summary = enforcer.summary()
+        assert summary["turns_used"] == 1
+        assert summary["tool_calls_used"] == 1
+        assert summary["total_tokens"] == 50
+        assert summary["violations"] == []
+        assert not summary["is_exhausted"]

@@ -20,7 +20,7 @@ def load_run_result(run_dir: str | Path) -> RunResult:
     manifest = load_run_manifest(run_dir)
     run_dir = Path(run_dir)
 
-    from lens.core.models import CheckpointResult, Hit, Insight, PersonaResult
+    from lens.core.models import CheckpointResult, PersonaResult, QuestionResult
 
     personas_dir = run_dir / "personas"
     persona_results: list[PersonaResult] = []
@@ -39,24 +39,14 @@ def load_run_result(run_dir: str | Path) -> RunResult:
 
                 checkpoint_num = int(cp_path.name.split("_", 1)[1])
 
-                # Load insights
-                insights_file = cp_path / "insights.json"
-                insights = []
-                if insights_file.exists():
-                    insights = [
-                        Insight.from_dict(i)
-                        for i in json.loads(insights_file.read_text())
+                # Load question results
+                qr_file = cp_path / "question_results.json"
+                question_results = []
+                if qr_file.exists():
+                    question_results = [
+                        QuestionResult.from_dict(qr)
+                        for qr in json.loads(qr_file.read_text())
                     ]
-
-                # Load search results
-                search_results: dict[str, list[Hit]] = {}
-                for search_file in cp_path.glob("search_*.json"):
-                    query = search_file.stem.replace("search_", "").replace("_", " ")
-                    hits = [
-                        Hit.from_dict(h)
-                        for h in json.loads(search_file.read_text())
-                    ]
-                    search_results[query] = hits
 
                 # Load validation errors
                 validation_errors: list[str] = []
@@ -67,8 +57,7 @@ def load_run_result(run_dir: str | Path) -> RunResult:
                 checkpoints.append(CheckpointResult(
                     persona_id=persona_id,
                     checkpoint=checkpoint_num,
-                    insights=insights,
-                    search_results=search_results,
+                    question_results=question_results,
                     validation_errors=validation_errors,
                 ))
 

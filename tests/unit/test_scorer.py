@@ -1,27 +1,74 @@
 from __future__ import annotations
 
 from lens.core.models import (
+    AgentAnswer,
     CheckpointResult,
-    EvidenceRef,
-    Insight,
+    GroundTruth,
     MetricResult,
     PersonaResult,
+    Question,
+    QuestionResult,
     RunResult,
 )
 from lens.scorer.aggregate import compute_composite
 from lens.scorer.registry import list_metrics
 from lens.scorer.tier1 import (
     BudgetCompliance,
-    ConfidenceDiscipline,
-    EvidenceSufficiency,
-    EvidenceValidity,
-    MultiEpisodeSupport,
-    NonLocality,
+    EvidenceCoverage,
+    EvidenceGrounding,
+    FactRecall,
+)
+from lens.scorer.tier2 import (
+    AnswerQuality,
+    InsightDepth,
+    ReasoningQuality,
+)
+from lens.scorer.tier3 import (
+    ActionQuality,
+    LongitudinalAdvantage,
 )
 
 
-def _make_run(insights: list[Insight], validation_errors: list[str] | None = None) -> RunResult:
-    """Helper to create a RunResult with given insights."""
+def _make_qr(
+    question_type: str = "longitudinal",
+    answer_text: str = "",
+    key_facts: list[str] | None = None,
+    required_refs: list[str] | None = None,
+    retrieved: list[str] | None = None,
+    valid: list[str] | None = None,
+    budget_violations: list[str] | None = None,
+    tool_calls: int = 2,
+) -> QuestionResult:
+    """Helper to create a QuestionResult for testing."""
+    return QuestionResult(
+        question=Question(
+            question_id="test_q",
+            persona_id="p1",
+            checkpoint_after=10,
+            question_type=question_type,
+            prompt="Test?",
+            ground_truth=GroundTruth(
+                canonical_answer="canonical",
+                required_evidence_refs=required_refs or [],
+                key_facts=key_facts or [],
+            ),
+        ),
+        answer=AgentAnswer(
+            question_id="test_q",
+            answer_text=answer_text,
+            tool_calls_made=tool_calls,
+            total_tokens=100,
+            wall_time_ms=50.0,
+            budget_violations=budget_violations or [],
+            refs_cited=retrieved or [],
+        ),
+        retrieved_ref_ids=retrieved or [],
+        valid_ref_ids=valid or [],
+    )
+
+
+def _make_run(question_results: list[QuestionResult]) -> RunResult:
+    """Helper to create a RunResult with given question results."""
     return RunResult(
         run_id="test",
         adapter="test",
@@ -34,8 +81,7 @@ def _make_run(insights: list[Insight], validation_errors: list[str] | None = Non
                     CheckpointResult(
                         persona_id="p1",
                         checkpoint=10,
-                        insights=insights,
-                        validation_errors=validation_errors or [],
+                        question_results=question_results,
                     )
                 ],
             )
@@ -43,219 +89,246 @@ def _make_run(insights: list[Insight], validation_errors: list[str] | None = Non
     )
 
 
-class TestEvidenceValidity:
+class TestEvidenceGrounding:
     def test_all_valid(self):
-        insights = [
-            Insight(
-                text="test",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="ep_001", quote="quote1"),
-                    EvidenceRef(episode_id="ep_002", quote="quote2"),
-                ],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights, [])
-        metric = EvidenceValidity()
-        mr = metric.compute(result)
+        qr = _make_qr(retrieved=["ep_001", "ep_002"], valid=["ep_001", "ep_002"])
+        result = _make_run([qr])
+        mr = EvidenceGrounding().compute(result)
         assert mr.value == 1.0
 
-    def test_one_invalid(self):
-        insights = [
-            Insight(
-                text="test",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="ep_001", quote="good"),
-                    EvidenceRef(episode_id="ep_002", quote="bad"),
-                ],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(
-            insights,
-            ["insight[0].evidence[1]: quote not found in episode 'ep_002'"],
-        )
-        metric = EvidenceValidity()
-        mr = metric.compute(result)
+    def test_half_valid(self):
+        qr = _make_qr(retrieved=["ep_001", "ep_002"], valid=["ep_001"])
+        result = _make_run([qr])
+        mr = EvidenceGrounding().compute(result)
         assert mr.value == 0.5
 
-    def test_empty(self):
+    def test_no_refs(self):
+        qr = _make_qr(retrieved=[], valid=[])
+        result = _make_run([qr])
+        mr = EvidenceGrounding().compute(result)
+        assert mr.value == 0.0
+
+    def test_empty_run(self):
         result = _make_run([])
-        metric = EvidenceValidity()
-        mr = metric.compute(result)
+        mr = EvidenceGrounding().compute(result)
         assert mr.value == 0.0
 
 
-class TestEvidenceSufficiency:
-    def test_sufficient(self):
-        insights = [
-            Insight(
-                text="t",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="e1", quote="q1"),
-                    EvidenceRef(episode_id="e2", quote="q2"),
-                    EvidenceRef(episode_id="e3", quote="q3"),
-                ],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights)
-        assert EvidenceSufficiency().compute(result).value == 1.0
+class TestFactRecall:
+    def test_all_facts_found(self):
+        qr = _make_qr(
+            answer_text="The pattern_alpha evolved and evidence_fragment was found",
+            key_facts=["pattern_alpha", "evidence_fragment"],
+        )
+        result = _make_run([qr])
+        mr = FactRecall().compute(result)
+        assert mr.value == 1.0
 
-    def test_insufficient(self):
-        insights = [
-            Insight(
-                text="t",
-                confidence=0.5,
-                evidence=[EvidenceRef(episode_id="e1", quote="q1")],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights)
-        assert EvidenceSufficiency().compute(result).value == 0.0
+    def test_no_facts_found(self):
+        qr = _make_qr(
+            answer_text="Nothing relevant was found",
+            key_facts=["pattern_alpha", "evidence_fragment"],
+        )
+        result = _make_run([qr])
+        mr = FactRecall().compute(result)
+        assert mr.value == 0.0
 
+    def test_partial_facts(self):
+        qr = _make_qr(
+            answer_text="Found pattern_alpha but nothing else",
+            key_facts=["pattern_alpha", "evidence_fragment"],
+        )
+        result = _make_run([qr])
+        mr = FactRecall().compute(result)
+        assert mr.value == 0.5
 
-class TestMultiEpisodeSupport:
-    def test_multi_episode(self):
-        insights = [
-            Insight(
-                text="t",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="e1", quote="q1"),
-                    EvidenceRef(episode_id="e2", quote="q2"),
-                ],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights)
-        assert MultiEpisodeSupport().compute(result).value == 1.0
+    def test_case_insensitive(self):
+        qr = _make_qr(
+            answer_text="PATTERN_ALPHA was observed",
+            key_facts=["pattern_alpha"],
+        )
+        result = _make_run([qr])
+        mr = FactRecall().compute(result)
+        assert mr.value == 1.0
 
-    def test_single_episode(self):
-        insights = [
-            Insight(
-                text="t",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="e1", quote="q1"),
-                    EvidenceRef(episode_id="e1", quote="q2"),
-                ],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights)
-        assert MultiEpisodeSupport().compute(result).value == 0.0
+    def test_empty(self):
+        result = _make_run([])
+        mr = FactRecall().compute(result)
+        assert mr.value == 0.0
 
 
-class TestNonLocality:
-    def test_non_local(self):
-        insights = [
-            Insight(
-                text="t",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="e1", quote="q1"),
-                    EvidenceRef(episode_id="e2", quote="q2"),
-                    EvidenceRef(episode_id="e3", quote="q3"),
-                    EvidenceRef(episode_id="e4", quote="q4"),
-                    EvidenceRef(episode_id="e5", quote="q5"),
-                ],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights)
-        assert NonLocality().compute(result).value == 1.0
+class TestEvidenceCoverage:
+    def test_full_coverage(self):
+        qr = _make_qr(
+            required_refs=["ep_001", "ep_002"],
+            retrieved=["ep_001", "ep_002", "ep_003"],
+        )
+        result = _make_run([qr])
+        mr = EvidenceCoverage().compute(result)
+        assert mr.value == 1.0
 
-    def test_local(self):
-        insights = [
-            Insight(
-                text="t",
-                confidence=0.5,
-                evidence=[
-                    EvidenceRef(episode_id="e1", quote="q1"),
-                    EvidenceRef(episode_id="e1", quote="q2"),
-                    EvidenceRef(episode_id="e1", quote="q3"),
-                    EvidenceRef(episode_id="e1", quote="q4"),
-                    EvidenceRef(episode_id="e2", quote="q5"),
-                ],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights)
-        # e1 has 4/5 = 80%, so this is NOT non-local
-        assert NonLocality().compute(result).value == 0.0
+    def test_partial_coverage(self):
+        qr = _make_qr(
+            required_refs=["ep_001", "ep_002"],
+            retrieved=["ep_001"],
+        )
+        result = _make_run([qr])
+        mr = EvidenceCoverage().compute(result)
+        assert mr.value == 0.5
 
-
-class TestConfidenceDiscipline:
-    def test_well_grounded_high_confidence(self):
-        insights = [
-            Insight(
-                text="t",
-                confidence=0.8,
-                evidence=[
-                    EvidenceRef(episode_id="e1", quote="q1"),
-                    EvidenceRef(episode_id="e2", quote="q2"),
-                    EvidenceRef(episode_id="e3", quote="q3"),
-                ],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights)
-        mr = ConfidenceDiscipline().compute(result)
-        assert mr.value > 0.7  # Well-grounded, so low penalty
-
-    def test_poorly_grounded_high_confidence(self):
-        insights = [
-            Insight(
-                text="t",
-                confidence=0.95,
-                evidence=[],
-                falsifier="f",
-            )
-        ]
-        result = _make_run(insights)
-        mr = ConfidenceDiscipline().compute(result)
-        assert mr.value < 0.2  # Poorly grounded + high confidence = big penalty
+    def test_no_coverage(self):
+        qr = _make_qr(
+            required_refs=["ep_001", "ep_002"],
+            retrieved=["ep_003"],
+        )
+        result = _make_run([qr])
+        mr = EvidenceCoverage().compute(result)
+        assert mr.value == 0.0
 
 
 class TestBudgetCompliance:
-    def test_all_compliant(self):
-        result = _make_run([])
+    def test_no_violations(self):
+        qr = _make_qr(budget_violations=[])
+        result = _make_run([qr])
         mr = BudgetCompliance().compute(result)
         assert mr.value == 1.0
+
+    def test_one_violation(self):
+        qr = _make_qr(budget_violations=["turn limit exceeded"])
+        result = _make_run([qr])
+        mr = BudgetCompliance().compute(result)
+        assert mr.value == 0.9
+
+    def test_many_violations(self):
+        qr = _make_qr(budget_violations=[f"v{i}" for i in range(15)])
+        result = _make_run([qr])
+        mr = BudgetCompliance().compute(result)
+        assert mr.value == 0.0
+
+
+class TestAnswerQuality:
+    def test_matches_fact_recall(self):
+        qr = _make_qr(
+            answer_text="Found pattern_alpha and evidence_fragment",
+            key_facts=["pattern_alpha", "evidence_fragment"],
+        )
+        result = _make_run([qr])
+        assert AnswerQuality().compute(result).value == 1.0
+
+
+class TestInsightDepth:
+    def test_multi_refs(self):
+        qr = _make_qr(retrieved=["ep_001", "ep_002"])
+        result = _make_run([qr])
+        mr = InsightDepth().compute(result)
+        assert mr.value == 1.0
+
+    def test_single_ref(self):
+        qr = _make_qr(retrieved=["ep_001"])
+        result = _make_run([qr])
+        mr = InsightDepth().compute(result)
+        assert mr.value == 0.0
+
+
+class TestReasoningQuality:
+    def test_substantive_answer(self):
+        qr = _make_qr(
+            answer_text="A" * 60,
+            tool_calls=3,
+        )
+        result = _make_run([qr])
+        mr = ReasoningQuality().compute(result)
+        assert mr.value == 1.0
+
+    def test_short_answer(self):
+        qr = _make_qr(answer_text="Short", tool_calls=3)
+        result = _make_run([qr])
+        mr = ReasoningQuality().compute(result)
+        assert mr.value == 0.0
+
+    def test_no_tool_calls(self):
+        qr = _make_qr(answer_text="A" * 60, tool_calls=0)
+        result = _make_run([qr])
+        mr = ReasoningQuality().compute(result)
+        assert mr.value == 0.0
+
+
+class TestLongitudinalAdvantage:
+    def test_positive_advantage(self):
+        long_qr = _make_qr(
+            question_type="longitudinal",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["different_fact"],
+        )
+        result = _make_run([long_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 1.0  # 1.0 - 0.0
+
+    def test_no_longitudinal_questions(self):
+        qr = _make_qr(question_type="null_hypothesis")
+        result = _make_run([qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 0.0
+
+
+class TestActionQuality:
+    def test_action_questions(self):
+        qr = _make_qr(
+            question_type="action_recommendation",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        result = _make_run([qr])
+        mr = ActionQuality().compute(result)
+        assert mr.value == 1.0
+
+    def test_no_action_questions(self):
+        qr = _make_qr(question_type="longitudinal")
+        result = _make_run([qr])
+        mr = ActionQuality().compute(result)
+        assert mr.value == 0.0
 
 
 class TestMetricRegistry:
     def test_all_tier1_registered(self):
         metrics = list_metrics()
         tier1_names = {
-            "evidence_validity",
-            "evidence_sufficiency",
-            "multi_episode_support",
-            "non_locality",
-            "confidence_discipline",
+            "evidence_grounding",
+            "fact_recall",
+            "evidence_coverage",
             "budget_compliance",
         }
         assert tier1_names.issubset(set(metrics.keys()))
 
     def test_tier2_registered(self):
         metrics = list_metrics()
-        assert "survival_at_k" in metrics
-        assert "churn_at_k" in metrics
+        assert "answer_quality" in metrics
+        assert "insight_depth" in metrics
+        assert "reasoning_quality" in metrics
+
+    def test_tier3_registered(self):
+        metrics = list_metrics()
+        assert "longitudinal_advantage" in metrics
+        assert "action_quality" in metrics
 
 
 class TestCompositeScore:
     def test_composite(self):
         metrics = [
-            MetricResult(name="evidence_validity", tier=1, value=1.0),
-            MetricResult(name="multi_episode_support", tier=1, value=0.8),
-            MetricResult(name="non_locality", tier=1, value=0.6),
-            MetricResult(name="confidence_discipline", tier=1, value=0.9),
-            MetricResult(name="survival_at_k", tier=2, value=0.7),
+            MetricResult(name="evidence_grounding", tier=1, value=1.0),
+            MetricResult(name="fact_recall", tier=1, value=0.8),
+            MetricResult(name="evidence_coverage", tier=1, value=0.6),
             MetricResult(name="budget_compliance", tier=1, value=1.0),
+            MetricResult(name="answer_quality", tier=2, value=0.7),
+            MetricResult(name="insight_depth", tier=2, value=0.5),
+            MetricResult(name="reasoning_quality", tier=2, value=0.9),
+            MetricResult(name="longitudinal_advantage", tier=3, value=0.3),
+            MetricResult(name="action_quality", tier=3, value=0.4),
         ]
         score = compute_composite(metrics)
         assert 0.0 < score < 1.0

@@ -14,7 +14,7 @@ console = Console()
 @click.option("--adapter", default="null", help="Adapter name")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config JSON file")
 @click.option("--out", "output_dir", default="output", help="Output directory")
-@click.option("--budget", default="standard", type=click.Choice(["fast", "standard"]))
+@click.option("--budget", default="standard", type=click.Choice(["fast", "standard", "extended"]))
 @click.option("--seed", default=42, type=int)
 @click.option("-v", "--verbose", count=True, help="Increase verbosity")
 def run(
@@ -27,9 +27,15 @@ def run(
     verbose: int,
 ) -> None:
     """Run the LENS benchmark against a memory adapter."""
-    from lens.core.config import BudgetConfig, RunConfig
+    from lens.agent.llm_client import MockLLMClient
+    from lens.core.config import AgentBudgetConfig, RunConfig
     from lens.core.logging import LensLogger, Verbosity
-    from lens.datasets.loader import get_dataset_version, get_search_queries, load_dataset, load_episodes
+    from lens.datasets.loader import (
+        get_dataset_version,
+        load_dataset,
+        load_episodes,
+        load_questions,
+    )
     from lens.runner.runner import RunEngine
 
     verbosity = Verbosity(min(verbose + 1, 3))
@@ -44,7 +50,7 @@ def run(
             adapter=adapter,
             dataset=dataset,
             output_dir=output_dir,
-            budget=BudgetConfig.from_preset(budget),
+            agent_budget=AgentBudgetConfig.from_preset(budget),
             seed=seed,
         )
 
@@ -52,11 +58,11 @@ def run(
     logger.info(f"Loading dataset from {dataset}")
     data = load_dataset(dataset)
     episodes = load_episodes(data)
-    config.search_queries = get_search_queries(data)
+    questions = load_questions(data)
 
     # Run
-    engine = RunEngine(config, logger)
-    result = engine.run(episodes)
+    engine = RunEngine(config, logger, llm_client=MockLLMClient())
+    result = engine.run(episodes, questions=questions)
     result.dataset_version = get_dataset_version(data)
 
     # Save artifacts

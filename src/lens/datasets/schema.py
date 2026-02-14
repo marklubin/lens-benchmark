@@ -12,6 +12,14 @@ PERSONA_REQUIRED_KEYS = {"persona_id", "episodes"}
 # Required keys per episode
 EPISODE_REQUIRED_KEYS = {"episode_id", "persona_id", "timestamp", "text"}
 
+# Required keys per question
+QUESTION_REQUIRED_KEYS = {
+    "question_id", "persona_id", "checkpoint_after", "question_type", "prompt", "ground_truth",
+}
+
+# Required keys in ground_truth
+GROUND_TRUTH_REQUIRED_KEYS = {"canonical_answer", "required_evidence_refs", "key_facts"}
+
 
 def validate_dataset(data: dict) -> list[str]:
     """Validate a dataset dictionary against the expected schema.
@@ -79,6 +87,47 @@ def validate_dataset(data: dict) -> list[str]:
                 for key in ("pattern_id", "persona_id", "canonical_insight"):
                     if key not in tp:
                         errors.append(f"{tp_prefix}: missing required key {key!r}")
+
+    # Validate questions if present
+    if "questions" in data:
+        if not isinstance(data["questions"], list):
+            errors.append("'questions' must be a list")
+        else:
+            valid_question_types = {"longitudinal", "null_hypothesis", "action_recommendation"}
+            seen_question_ids: set[str] = set()
+            for i, q in enumerate(data["questions"]):
+                q_prefix = f"questions[{i}]"
+                if not isinstance(q, dict):
+                    errors.append(f"{q_prefix}: must be a dict")
+                    continue
+
+                for key in QUESTION_REQUIRED_KEYS:
+                    if key not in q:
+                        errors.append(f"{q_prefix}: missing required key {key!r}")
+
+                qid = q.get("question_id")
+                if qid and qid in seen_question_ids:
+                    errors.append(f"{q_prefix}: duplicate question_id {qid!r}")
+                if qid:
+                    seen_question_ids.add(qid)
+
+                qtype = q.get("question_type")
+                if qtype and qtype not in valid_question_types:
+                    errors.append(
+                        f"{q_prefix}: invalid question_type {qtype!r}, "
+                        f"must be one of {valid_question_types}"
+                    )
+
+                gt = q.get("ground_truth")
+                if gt is not None:
+                    if not isinstance(gt, dict):
+                        errors.append(f"{q_prefix}.ground_truth: must be a dict")
+                    else:
+                        for key in GROUND_TRUTH_REQUIRED_KEYS:
+                            if key not in gt:
+                                errors.append(
+                                    f"{q_prefix}.ground_truth: missing required key {key!r}"
+                                )
 
     return errors
 

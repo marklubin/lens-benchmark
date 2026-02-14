@@ -44,3 +44,4 @@ def _ensure_builtins() -> None:
     """Import built-in metric modules to trigger @register_metric decorators."""
     import lens.scorer.tier1  # noqa: F401
     import lens.scorer.tier2  # noqa: F401
+    import lens.scorer.tier3  # noqa: F401

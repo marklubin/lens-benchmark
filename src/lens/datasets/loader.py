@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from lens.core.errors import DatasetError
-from lens.core.models import Episode, TruthPattern
+from lens.core.models import Episode, Question, TruthPattern
 from lens.datasets.schema import validate_or_raise
 
 
@@ -44,6 +44,13 @@ def load_truth_patterns(data: dict) -> list[TruthPattern]:
     if "truth_patterns" not in data:
         return []
     return [TruthPattern.from_dict(tp) for tp in data["truth_patterns"]]
+
+
+def load_questions(data: dict) -> list[Question]:
+    """Extract questions from a dataset dict."""
+    if "questions" not in data:
+        return []
+    return [Question.from_dict(q) for q in data["questions"]]
 
 
 def load_smoke_dataset() -> dict:

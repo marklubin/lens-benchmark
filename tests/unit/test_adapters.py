@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from lens.adapters.base import CapabilityManifest, SearchResult
 from lens.adapters.null import NullAdapter
 from lens.adapters.registry import get_adapter, list_adapters
 
@@ -15,19 +16,31 @@ class TestNullAdapter:
         adapter = NullAdapter()
         adapter.ingest("ep_001", "p1", "2024-01-01T00:00:00", "text")
 
-    def test_refresh(self):
-        adapter = NullAdapter()
-        adapter.refresh("p1", 10)
-
-    def test_core_returns_empty(self):
-        adapter = NullAdapter()
-        result = adapter.core("p1", 10, 10)
-        assert result == []
-
     def test_search_returns_empty(self):
         adapter = NullAdapter()
-        result = adapter.search("p1", "query", 10, 10)
+        result = adapter.search("query")
         assert result == []
+
+    def test_search_with_filters(self):
+        adapter = NullAdapter()
+        result = adapter.search("query", filters={"type": "episode"}, limit=5)
+        assert result == []
+
+    def test_retrieve_returns_none(self):
+        adapter = NullAdapter()
+        result = adapter.retrieve("ref_001")
+        assert result is None
+
+    def test_get_capabilities(self):
+        adapter = NullAdapter()
+        caps = adapter.get_capabilities()
+        assert isinstance(caps, CapabilityManifest)
+        assert "semantic" in caps.search_modes
+        assert caps.max_results_per_search == 10
+
+    def test_prepare_noop(self):
+        adapter = NullAdapter()
+        adapter.prepare("p1", 10)  # Should not raise
 
 
 class TestAdapterRegistry:
