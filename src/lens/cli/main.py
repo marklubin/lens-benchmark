@@ -21,6 +21,7 @@ from lens.cli.report_commands import report  # noqa: E402
 from lens.cli.compare_commands import compare  # noqa: E402
 from lens.cli.list_commands import adapters, metrics  # noqa: E402
 from lens.cli.human_commands import human  # noqa: E402
+from lens.cli.datagen_commands import generate, compile_cmd, verify  # noqa: E402
 
 cli.add_command(run)
 cli.add_command(score)
@@ -29,6 +30,9 @@ cli.add_command(compare)
 cli.add_command(adapters)
 cli.add_command(metrics)
 cli.add_command(human)
+cli.add_command(generate)
+cli.add_command(compile_cmd, name="compile")
+cli.add_command(verify)
 
 
 @cli.command()

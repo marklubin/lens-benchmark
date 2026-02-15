@@ -1,0 +1,152 @@
+scope_id: cascading_failure_01
+domain: system_logs
+description: "API gateway log summaries showing cascading dependency failure"
+
+# Generation parameters
+generation:
+  temperature: 0.7
+  seed: 42
+
+# Episode structure
+episodes:
+  count: 30
+  timeline:
+    start: "2024-01-15"
+    interval: "1d"
+  format: "Daily API gateway log summary with endpoint stats, error rates, latencies, and on-call notes"
+  target_words: 150
+
+# Scenario context (sent to the generation LLM)
+scenario:
+  setting: |
+    A microservices e-commerce platform with API gateway logging.
+    Services: checkout (service-C), fraud checks (service-B),
+    third-party geo-lookup API, shared connection pool.
+    The gateway produces daily summaries with endpoint hit counts,
+    p50/p95/p99 latencies, error rates, and on-call engineer notes.
+  voice: |
+    Terse operational log style. Bullet points, metrics,
+    short incident notes. No narrative prose.
+
+# Pattern arc — phases define what signal appears when
+arc:
+  - id: baseline
+    episodes: "1-8"
+    description: "Normal operations. Establish baseline metrics and patterns. All services healthy. Typical traffic patterns, routine deploys, normal latencies."
+    signal_density: none
+
+  - id: early_signal
+    episodes: "9-15"
+    description: "Geo-lookup latency creeping 200ms→400ms. Service-B retries slightly elevated. No user-facing impact yet. The degradation is subtle and buried among normal operational noise."
+    signal_density: low
+
+  - id: red_herring
+    episodes: "14-16"
+    description: "Service-C deploy coincides with first checkout errors. On-call blames deploy. Team focuses investigation on the deploy. This is a red herring — the real issue is the geo-lookup degradation."
+    signal_density: medium
+
+  - id: escalation
+    episodes: "16-22"
+    description: "Checkout failures increasing. Rollback of service-C attempted but doesn't help. Connection pool exhaustion becoming visible in logs. Service-B retry storms amplifying the problem."
+    signal_density: high
+
+  - id: root_cause
+    episodes: "23-30"
+    description: "Geo-lookup at 800ms+. Service-B retry storms fully visible. Full causal chain apparent: geo-lookup degradation → service-B retries → connection pool exhaustion → checkout failures. Resolution begins."
+    signal_density: high
+
+# Noise guidance
+noise:
+  description: "Normal traffic fluctuations, routine deploys, disk alerts, cert renewals, CDN stats, A/B tests, standard monitoring noise"
+  examples:
+    - "CDN cache hit rate 94.2%, within normal range"
+    - "Deployed auth-service v2.3.1, no issues"
+    - "Disk usage alert on metrics-db-02 (82%), cleanup scheduled"
+    - "A/B test 'checkout-v2' at 15% rollout, no anomalies"
+    - "SSL cert renewed for api.example.com, expires 2025-01-14"
+
+# Key facts — the atomic claims scorers check for
+key_facts:
+  - id: geo_latency_degradation
+    fact: "geo-lookup API latency increasing"
+    first_appears: "early_signal:1"
+    reinforced_in:
+      - "early_signal:4"
+      - "escalation:2"
+      - "root_cause:3"
+
+  - id: pool_exhaustion
+    fact: "connection pool exhaustion"
+    first_appears: "escalation:3"
+    reinforced_in:
+      - "escalation:5"
+      - "root_cause:2"
+
+  - id: service_b_retries
+    fact: "service-B retry rate elevated"
+    first_appears: "early_signal:2"
+    reinforced_in:
+      - "escalation:1"
+      - "root_cause:4"
+
+  - id: deploy_red_herring
+    fact: "service-C deploy is not the root cause"
+    first_appears: "red_herring:2"
+    reinforced_in:
+      - "escalation:1"
+
+# Questions at checkpoints
+questions:
+  - id: cf01_q01_longitudinal
+    checkpoint_after: 10
+    type: longitudinal
+    prompt: "Based on the logs so far, are there any concerning patterns in service health?"
+    ground_truth:
+      canonical_answer: "Geo-lookup latency has been gradually increasing. Service-B retry rates are slightly elevated. No user-facing impact yet but worth monitoring."
+      key_facts:
+        - geo_latency_degradation
+        - service_b_retries
+      evidence:
+        - "early_signal:1"
+        - "early_signal:2"
+
+  - id: cf01_q02_null
+    checkpoint_after: 10
+    type: null_hypothesis
+    prompt: "What were the key operational events on January 20th?"
+    ground_truth:
+      canonical_answer: "A routine day of operations as documented in the daily log summary."
+      key_facts: []
+      evidence:
+        - "baseline:6"
+
+  - id: cf01_q03_longitudinal
+    checkpoint_after: 25
+    type: longitudinal
+    prompt: "What is the root cause of the checkout failures?"
+    ground_truth:
+      canonical_answer: "Connection pool exhaustion caused by service-B fraud-check retries against a degrading third-party geo-lookup API. The service-C deploy was a red herring."
+      key_facts:
+        - pool_exhaustion
+        - geo_latency_degradation
+        - service_b_retries
+        - deploy_red_herring
+      evidence:
+        - "early_signal:1"
+        - "escalation:3"
+        - "root_cause:2"
+        - "red_herring:2"
+
+  - id: cf01_q04_action
+    checkpoint_after: 30
+    type: action_recommendation
+    prompt: "What actions should the team take to prevent this from recurring?"
+    ground_truth:
+      canonical_answer: "Separate connection pools for fraud checks and checkout. Add circuit breaker on geo-lookup calls. Monitor third-party API latency with alerting."
+      key_facts:
+        - pool_exhaustion
+        - geo_latency_degradation
+      evidence:
+        - "escalation:3"
+        - "root_cause:2"
+        - "root_cause:5"
