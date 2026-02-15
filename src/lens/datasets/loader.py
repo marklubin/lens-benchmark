@@ -4,15 +4,14 @@ import json
 from pathlib import Path
 
 from lens.core.errors import DatasetError
-from lens.core.models import Episode, Question, TruthPattern
+from lens.core.models import Episode, Question
 from lens.datasets.schema import validate_or_raise
 
 
 def load_dataset(path: str | Path) -> dict:
     """Load and validate a dataset from a JSON file.
 
-    Returns the raw dataset dict with 'scopes', 'episodes' parsed,
-    and optional 'truth_patterns'.
+    Returns the raw dataset dict with 'scopes' and 'episodes' parsed.
     """
     path = Path(path)
     if not path.exists():
@@ -39,13 +38,6 @@ def load_episodes(data: dict) -> dict[str, list[Episode]]:
     return scopes
 
 
-def load_truth_patterns(data: dict) -> list[TruthPattern]:
-    """Extract truth patterns from a dataset dict."""
-    if "truth_patterns" not in data:
-        return []
-    return [TruthPattern.from_dict(tp) for tp in data["truth_patterns"]]
-
-
 def load_questions(data: dict) -> list[Question]:
     """Extract questions from a dataset dict."""
     if "questions" not in data:
@@ -66,6 +58,3 @@ def get_dataset_version(data: dict) -> str:
     return data.get("version", "unknown")
 
 
-def get_search_queries(data: dict) -> list[str]:
-    """Extract search queries from dataset metadata."""
-    return data.get("search_queries", [])

@@ -44,7 +44,6 @@ def sample_question() -> Question:
             canonical_answer="A pattern of topic evolution was found.",
             required_evidence_refs=["test_ep_001", "test_ep_003", "test_ep_005"],
             key_facts=["pattern_alpha", "evidence_fragment"],
-            related_pattern_id="tp_01",
         ),
     )
 
