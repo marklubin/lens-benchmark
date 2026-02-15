@@ -16,14 +16,12 @@ class GroundTruth:
     canonical_answer: str
     required_evidence_refs: list[str]  # episode_ids the answer should draw from
     key_facts: list[str]  # factual claims that must appear
-    related_pattern_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "canonical_answer": self.canonical_answer,
             "required_evidence_refs": self.required_evidence_refs,
             "key_facts": self.key_facts,
-            "related_pattern_id": self.related_pattern_id,
         }
 
     @classmethod
@@ -32,7 +30,6 @@ class GroundTruth:
             canonical_answer=d["canonical_answer"],
             required_evidence_refs=d["required_evidence_refs"],
             key_facts=d["key_facts"],
-            related_pattern_id=d.get("related_pattern_id"),
         )
 
 
@@ -175,74 +172,6 @@ class Episode:
             timestamp=ts,
             text=d["text"],
             meta=d.get("meta", {}),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Dataset ground-truth models
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class EvidenceFragment:
-    """An exact substring expected to appear in a generated episode."""
-
-    episode_id: str
-    fragment: str  # exact substring
-
-    def to_dict(self) -> dict:
-        return {"episode_id": self.episode_id, "fragment": self.fragment}
-
-    @classmethod
-    def from_dict(cls, d: dict) -> EvidenceFragment:
-        return cls(episode_id=d["episode_id"], fragment=d["fragment"])
-
-
-@dataclass
-class TruthPattern:
-    """A planted longitudinal insight with known ground truth."""
-
-    pattern_id: str
-    scope_id: str
-    canonical_insight: str
-    insight_category: str  # trend, correlation, preference_evolution, etc.
-    evidence_episode_ids: list[str]
-    evidence_fragments: list[EvidenceFragment]
-    min_episodes_required: int
-    first_signal_episode: int
-    difficulty: str  # easy, medium, hard
-    expected_confidence: float
-    supersedes: str | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "pattern_id": self.pattern_id,
-            "scope_id": self.scope_id,
-            "canonical_insight": self.canonical_insight,
-            "insight_category": self.insight_category,
-            "evidence_episode_ids": self.evidence_episode_ids,
-            "evidence_fragments": [f.to_dict() for f in self.evidence_fragments],
-            "min_episodes_required": self.min_episodes_required,
-            "first_signal_episode": self.first_signal_episode,
-            "difficulty": self.difficulty,
-            "expected_confidence": self.expected_confidence,
-            "supersedes": self.supersedes,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> TruthPattern:
-        return cls(
-            pattern_id=d["pattern_id"],
-            scope_id=d["scope_id"],
-            canonical_insight=d["canonical_insight"],
-            insight_category=d["insight_category"],
-            evidence_episode_ids=d["evidence_episode_ids"],
-            evidence_fragments=[EvidenceFragment.from_dict(f) for f in d["evidence_fragments"]],
-            min_episodes_required=d["min_episodes_required"],
-            first_signal_episode=d["first_signal_episode"],
-            difficulty=d["difficulty"],
-            expected_confidence=d["expected_confidence"],
-            supersedes=d.get("supersedes"),
         )
 
 

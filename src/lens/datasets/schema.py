@@ -77,17 +77,6 @@ def validate_dataset(data: dict) -> list[str]:
             if eid:
                 seen_episode_ids.add(eid)
 
-    # Validate truth_patterns if present
-    if "truth_patterns" in data:
-        if not isinstance(data["truth_patterns"], list):
-            errors.append("'truth_patterns' must be a list")
-        else:
-            for i, tp in enumerate(data["truth_patterns"]):
-                tp_prefix = f"truth_patterns[{i}]"
-                for key in ("pattern_id", "scope_id", "canonical_insight"):
-                    if key not in tp:
-                        errors.append(f"{tp_prefix}: missing required key {key!r}")
-
     # Validate questions if present
     if "questions" in data:
         if not isinstance(data["questions"], list):

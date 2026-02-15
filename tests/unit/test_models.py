@@ -8,7 +8,6 @@ from lens.core.models import (
     AgentAnswer,
     CheckpointResult,
     Episode,
-    EvidenceFragment,
     GroundTruth,
     MetricResult,
     ScopeResult,
@@ -16,7 +15,6 @@ from lens.core.models import (
     QuestionResult,
     RunResult,
     ScoreCard,
-    TruthPattern,
 )
 
 
@@ -26,24 +24,12 @@ class TestGroundTruth:
             canonical_answer="The answer",
             required_evidence_refs=["ep_001", "ep_002"],
             key_facts=["fact1", "fact2"],
-            related_pattern_id="tp_01",
         )
         d = gt.to_dict()
         restored = GroundTruth.from_dict(d)
         assert restored.canonical_answer == gt.canonical_answer
         assert restored.required_evidence_refs == gt.required_evidence_refs
         assert restored.key_facts == gt.key_facts
-        assert restored.related_pattern_id == gt.related_pattern_id
-
-    def test_optional_pattern_id(self):
-        gt = GroundTruth(
-            canonical_answer="A",
-            required_evidence_refs=[],
-            key_facts=[],
-        )
-        d = gt.to_dict()
-        restored = GroundTruth.from_dict(d)
-        assert restored.related_pattern_id is None
 
 
 class TestQuestion:
@@ -174,28 +160,6 @@ class TestEpisode:
         }
         ep = Episode.from_dict(d)
         assert ep.timestamp == datetime(2024, 1, 15, 10, 0, 0)
-
-
-class TestTruthPattern:
-    def test_round_trip(self):
-        tp = TruthPattern(
-            pattern_id="tp_01",
-            scope_id="p1",
-            canonical_insight="insight text",
-            insight_category="trend",
-            evidence_episode_ids=["ep_001", "ep_002"],
-            evidence_fragments=[
-                EvidenceFragment(episode_id="ep_001", fragment="frag1"),
-            ],
-            min_episodes_required=2,
-            first_signal_episode=1,
-            difficulty="easy",
-            expected_confidence=0.9,
-        )
-        d = tp.to_dict()
-        restored = TruthPattern.from_dict(d)
-        assert restored.pattern_id == tp.pattern_id
-        assert restored.supersedes is None
 
 
 class TestScoreCard:

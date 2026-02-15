@@ -5,12 +5,10 @@ import pytest
 from lens.core.errors import DatasetError
 from lens.datasets.loader import (
     get_dataset_version,
-    get_search_queries,
     load_dataset,
     load_episodes,
     load_questions,
     load_smoke_dataset,
-    load_truth_patterns,
 )
 from lens.datasets.schema import validate_dataset, validate_or_raise
 
@@ -140,11 +138,6 @@ class TestDatasetLoader:
         assert len(episodes["smoke_therapy_01"]) == 10
         assert len(episodes["smoke_product_01"]) == 5
 
-    def test_load_truth_patterns(self, smoke_dataset):
-        patterns = load_truth_patterns(smoke_dataset)
-        assert len(patterns) == 2
-        assert patterns[0].pattern_id == "smoke_tp_01"
-
     def test_load_questions(self, smoke_dataset):
         questions = load_questions(smoke_dataset)
         assert len(questions) == 6
@@ -158,10 +151,6 @@ class TestDatasetLoader:
 
     def test_get_version(self, smoke_dataset):
         assert get_dataset_version(smoke_dataset) == "0.1.0-smoke"
-
-    def test_get_search_queries(self, smoke_dataset):
-        queries = get_search_queries(smoke_dataset)
-        assert "anxiety patterns" in queries
 
     def test_load_nonexistent_raises(self, tmp_path):
         with pytest.raises(DatasetError, match="not found"):
