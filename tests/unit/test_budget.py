@@ -21,12 +21,15 @@ class TestQuestionBudget:
 class TestBudgetEnforcement:
     def test_check_turn_within_limit(self):
         enforcer = BudgetEnforcement(QuestionBudget(max_turns=5))
-        enforcer.check_turn(3)  # Should not raise
+        enforcer.record_turn()  # turns_used = 1
+        enforcer.check_turn()  # 1 < 5, should not raise
 
     def test_check_turn_exceeds_limit(self):
-        enforcer = BudgetEnforcement(QuestionBudget(max_turns=5))
+        enforcer = BudgetEnforcement(QuestionBudget(max_turns=2))
+        enforcer.record_turn()
+        enforcer.record_turn()  # turns_used = 2
         with pytest.raises(BudgetViolation, match="Turn limit exceeded"):
-            enforcer.check_turn(6)
+            enforcer.check_turn()  # 2 >= 2
         assert len(enforcer.violations) == 1
 
     def test_check_tool_call_within_limit(self):
@@ -53,11 +56,19 @@ class TestBudgetEnforcement:
         with pytest.raises(BudgetViolation, match="Token limit exceeded"):
             enforcer.check_tokens(600)
 
-    def test_check_payload_records_warning(self):
+    def test_check_payload_records_warning_not_violation(self):
         enforcer = BudgetEnforcement(QuestionBudget(max_payload_bytes=100))
-        enforcer.check_payload(200)  # Should warn but not raise
-        assert len(enforcer.violations) == 1
+        enforcer.check_payload(200)  # Should warn but not raise or count as violation
+        assert len(enforcer.violations) == 0
+        assert len(enforcer.warnings) == 1
         assert enforcer.total_payload_bytes == 200
+
+    def test_check_latency_records_violation(self):
+        enforcer = BudgetEnforcement(QuestionBudget(max_latency_per_call_ms=100))
+        enforcer.check_latency(50)  # within limit
+        assert len(enforcer.violations) == 0
+        enforcer.check_latency(200)  # exceeds limit
+        assert len(enforcer.violations) == 1
 
     def test_record_turn(self):
         enforcer = BudgetEnforcement(QuestionBudget())
@@ -92,4 +103,5 @@ class TestBudgetEnforcement:
         assert summary["tool_calls_used"] == 1
         assert summary["total_tokens"] == 50
         assert summary["violations"] == []
+        assert summary["warnings"] == []
         assert not summary["is_exhausted"]

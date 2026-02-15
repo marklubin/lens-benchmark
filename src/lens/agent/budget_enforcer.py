@@ -30,11 +30,12 @@ class BudgetEnforcement:
         self.total_payload_bytes: int = 0
         self.total_tokens: int = 0
         self.violations: list[str] = []
+        self.warnings: list[str] = []
 
-    def check_turn(self, turn_number: int) -> None:
-        """Raise BudgetViolation if turn_number exceeds max_turns."""
-        if turn_number > self.budget.max_turns:
-            msg = f"Turn limit exceeded: {turn_number} > {self.budget.max_turns}"
+    def check_turn(self) -> None:
+        """Raise BudgetViolation if turns exceed max_turns."""
+        if self.turns_used >= self.budget.max_turns:
+            msg = f"Turn limit exceeded: {self.turns_used} >= {self.budget.max_turns}"
             self.violations.append(msg)
             raise BudgetViolation(msg)
 
@@ -46,10 +47,19 @@ class BudgetEnforcement:
             raise BudgetViolation(msg)
 
     def check_payload(self, payload_bytes: int) -> None:
-        """Record payload size. Warns but does not raise."""
+        """Record payload size. Warns but does not raise or count as violation."""
         self.total_payload_bytes += payload_bytes
         if payload_bytes > self.budget.max_payload_bytes:
             msg = f"Payload size warning: {payload_bytes} > {self.budget.max_payload_bytes}"
+            self.warnings.append(msg)
+
+    def check_latency(self, latency_ms: float) -> None:
+        """Record a hard violation if a tool call exceeds the latency cap."""
+        if latency_ms > self.budget.max_latency_per_call_ms:
+            msg = (
+                f"Tool call latency exceeded: {latency_ms:.0f}ms "
+                f"> {self.budget.max_latency_per_call_ms:.0f}ms"
+            )
             self.violations.append(msg)
 
     def check_tokens(self, tokens: int) -> None:
@@ -82,13 +92,14 @@ class BudgetEnforcement:
         )
 
     def summary(self) -> dict:
-        """Return a dict of all tracked values and violations."""
+        """Return a dict of all tracked values, violations, and warnings."""
         return {
             "turns_used": self.turns_used,
             "tool_calls_used": self.tool_calls_used,
             "total_payload_bytes": self.total_payload_bytes,
             "total_tokens": self.total_tokens,
             "violations": list(self.violations),
+            "warnings": list(self.warnings),
             "is_exhausted": self.is_exhausted,
             "budget": {
                 "max_turns": self.budget.max_turns,

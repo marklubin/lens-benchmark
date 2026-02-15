@@ -8,7 +8,16 @@ from lens.scorer.tier1 import _all_question_results
 
 @register_metric("answer_quality")
 class AnswerQuality(BaseMetric):
-    """Overall correctness proxy — average fact recall per question."""
+    """Overall answer correctness — requires LLM judge (not yet implemented).
+
+    This metric is intended to use an LLM judge to compare the agent's answer
+    against the ground truth canonical_answer, assessing semantic correctness
+    beyond simple substring matching. Currently returns 0.0 as a stub.
+
+    Once implemented, this will NOT duplicate fact_recall — fact_recall checks
+    for specific factual claims via substring matching, while answer_quality
+    will assess holistic correctness, coherence, and completeness via LLM judge.
+    """
 
     @property
     def name(self) -> str:
@@ -20,29 +29,14 @@ class AnswerQuality(BaseMetric):
 
     @property
     def description(self) -> str:
-        return "Overall answer correctness (fact-recall heuristic proxy)"
+        return "Overall answer correctness via LLM judge (stub — not yet implemented)"
 
     def compute(self, result: RunResult) -> MetricResult:
-        qrs = _all_question_results(result)
-        if not qrs:
-            return MetricResult(name=self.name, tier=self.tier, value=0.0)
-
-        scores: list[float] = []
-        for qr in qrs:
-            key_facts = qr.question.ground_truth.key_facts
-            if not key_facts:
-                scores.append(1.0)
-                continue
-            answer_lower = qr.answer.answer_text.lower()
-            found = sum(1 for f in key_facts if f.lower() in answer_lower)
-            scores.append(found / len(key_facts))
-
-        value = sum(scores) / len(scores)
         return MetricResult(
             name=self.name,
             tier=self.tier,
-            value=value,
-            details={"num_questions": len(scores)},
+            value=0.0,
+            details={"not_implemented": True},
         )
 
 

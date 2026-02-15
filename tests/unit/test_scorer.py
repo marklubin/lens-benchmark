@@ -207,13 +207,16 @@ class TestBudgetCompliance:
 
 
 class TestAnswerQuality:
-    def test_matches_fact_recall(self):
+    def test_stub_returns_zero(self):
+        """answer_quality is an LLM judge stub — always returns 0.0."""
         qr = _make_qr(
             answer_text="Found pattern_alpha and evidence_fragment",
             key_facts=["pattern_alpha", "evidence_fragment"],
         )
         result = _make_run([qr])
-        assert AnswerQuality().compute(result).value == 1.0
+        mr = AnswerQuality().compute(result)
+        assert mr.value == 0.0
+        assert mr.details.get("not_implemented") is True
 
 
 class TestInsightDepth:

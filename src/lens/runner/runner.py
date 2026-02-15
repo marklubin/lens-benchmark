@@ -11,7 +11,7 @@ from lens.agent.budget_enforcer import QuestionBudget
 from lens.agent.harness import AgentHarness
 from lens.agent.llm_client import BaseLLMClient, MockLLMClient
 from lens.core.config import RunConfig
-from lens.core.errors import atomic_write
+from lens.core.errors import ConfigError, atomic_write
 from lens.core.logging import LensLogger, Verbosity
 from lens.core.models import (
     CheckpointResult,
@@ -58,6 +58,22 @@ class RunEngine:
         q_index: dict[str, dict[int, list[Question]]] = {}
         for q in questions:
             q_index.setdefault(q.persona_id, {}).setdefault(q.checkpoint_after, []).append(q)
+
+        # Validate: every question's checkpoint_after must be reachable for its persona
+        persona_reachable: dict[str, set[int]] = {}
+        for persona_id, episodes in personas.items():
+            reachable = set(self.config.checkpoints)
+            reachable.add(len(episodes))  # final episode is always a checkpoint
+            persona_reachable[persona_id] = reachable
+        for q in questions:
+            reachable = persona_reachable.get(q.persona_id, set())
+            if q.checkpoint_after not in reachable:
+                raise ConfigError(
+                    f"Question {q.question_id!r} targets checkpoint_after={q.checkpoint_after} "
+                    f"for persona {q.persona_id!r}, but that checkpoint is not reachable. "
+                    f"Reachable checkpoints: {sorted(reachable)}. "
+                    f"This question would be silently skipped."
+                )
 
         persona_results: list[PersonaResult] = []
 

@@ -16,7 +16,7 @@ from lens.agent.tool_bridge import build_tool_definitions, dispatch_tool_call
 
 
 class TestMockLLMClient:
-    def test_produces_three_turns(self):
+    def test_produces_five_turns_default(self):
         client = MockLLMClient()
 
         def executor(tc: ToolCall) -> ToolResult:
@@ -35,6 +35,58 @@ class TestMockLLMClient:
         assert turns[0].tool_calls is not None
         assert turns[-1].role == "assistant"
         assert turns[-1].content is not None
+
+    def test_respects_max_turns_1(self):
+        """With max_turns=1, should only produce a final answer (no tool calls)."""
+        client = MockLLMClient()
+
+        def executor(tc: ToolCall) -> ToolResult:
+            return ToolResult(tool_call_id=tc.id, content="mock result")
+
+        turns = client.run_agent_loop("sys", "q", [], executor, max_turns=1)
+        assert len(turns) == 1
+        assert turns[0].role == "assistant"
+        assert turns[0].content is not None
+        assert turns[0].tool_calls is None
+
+    def test_respects_max_turns_2(self):
+        """With max_turns=2, should do search + final answer (no capabilities)."""
+        client = MockLLMClient()
+
+        def executor(tc: ToolCall) -> ToolResult:
+            return ToolResult(tool_call_id=tc.id, content="mock result")
+
+        turns = client.run_agent_loop("sys", "q", [], executor, max_turns=2)
+        # 3 items: assistant(search), tool(result), assistant(answer)
+        assert len(turns) == 3
+        assert turns[0].tool_calls is not None
+        assert turns[-1].content is not None
+
+    def test_respects_max_turns_0(self):
+        """With max_turns=0, should produce no turns."""
+        client = MockLLMClient()
+
+        def executor(tc: ToolCall) -> ToolResult:
+            return ToolResult(tool_call_id=tc.id, content="mock result")
+
+        turns = client.run_agent_loop("sys", "q", [], executor, max_turns=0)
+        assert turns == []
+
+    def test_calls_turn_callback(self):
+        """turn_callback should be called for each assistant turn."""
+        client = MockLLMClient()
+        callback_turns: list[AgentTurn] = []
+
+        def executor(tc: ToolCall) -> ToolResult:
+            return ToolResult(tool_call_id=tc.id, content="mock result")
+
+        def callback(turn: AgentTurn) -> None:
+            callback_turns.append(turn)
+
+        turns = client.run_agent_loop("sys", "q", [], executor, max_turns=10, turn_callback=callback)
+        # Should have called back for each assistant turn (3 total)
+        assert len(callback_turns) == 3
+        assert all(t.role == "assistant" for t in callback_turns)
 
     def test_final_answer_contains_text(self):
         client = MockLLMClient()

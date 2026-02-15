@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import time
-from dataclasses import asdict
 
 from lens.agent.budget_enforcer import BudgetEnforcement, BudgetViolation, QuestionBudget
 from lens.agent.llm_client import AgentTurn, BaseLLMClient, ToolCall, ToolResult
@@ -22,6 +20,7 @@ including available search modes and filter fields.
 - Synthesize your findings into a clear, concise answer.
 - Cite evidence by referencing the ref_ids of retrieved documents.
 - If you cannot find sufficient information, say so clearly.
+- You have a limited number of turns and tool calls. Use them efficiently.
 """
 
 
@@ -55,10 +54,9 @@ class AgentHarness:
         tools = build_tool_definitions(adapter)
         enforcer = BudgetEnforcement(self.budget)
         refs_cited: list[str] = []
-        turn_counter = 0
 
         def tool_executor(tool_call: ToolCall) -> ToolResult:
-            nonlocal turn_counter
+            # Pre-flight: check tool call budget
             try:
                 enforcer.check_tool_call()
             except BudgetViolation:
@@ -68,8 +66,14 @@ class AgentHarness:
                     is_error=True,
                 )
 
+            # Execute with latency measurement
+            t0 = time.monotonic()
             result = dispatch_tool_call(adapter, tool_call, self.budget.max_payload_bytes)
+            latency_ms = (time.monotonic() - t0) * 1000
+
+            # Post-flight: record and check
             enforcer.record_tool_call()
+            enforcer.check_latency(latency_ms)
             enforcer.check_payload(len(result.content.encode("utf-8")))
 
             # Track ref_ids from memory_retrieve calls
@@ -80,6 +84,12 @@ class AgentHarness:
 
             return result
 
+        def turn_callback(turn: AgentTurn) -> None:
+            """Called by the LLM client after each assistant turn for budget enforcement."""
+            enforcer.record_turn()
+            enforcer.check_tokens(turn.tokens_used)
+            enforcer.check_turn()
+
         wall_start = time.monotonic()
         try:
             turns = self.llm_client.run_agent_loop(
@@ -88,22 +98,15 @@ class AgentHarness:
                 tools=tools,
                 tool_executor=tool_executor,
                 max_turns=self.budget.max_turns,
+                turn_callback=turn_callback,
             )
         except BudgetViolation:
             turns = []
         wall_ms = (time.monotonic() - wall_start) * 1000
 
-        # Record turn and token usage
-        total_tokens = 0
-        tool_calls_made = 0
-        for turn in turns:
-            if turn.role == "assistant":
-                enforcer.record_turn()
-                total_tokens += turn.tokens_used
-                if turn.tool_calls:
-                    tool_calls_made += len(turn.tool_calls)
-            elif turn.role == "tool":
-                total_tokens += turn.tokens_used
+        # Count tool calls from turns (for reporting)
+        total_tokens = enforcer.total_tokens
+        tool_calls_made = enforcer.tool_calls_used
 
         # Extract final answer text from the last assistant turn
         answer_text = ""
