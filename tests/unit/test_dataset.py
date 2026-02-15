@@ -21,31 +21,31 @@ class TestDatasetSchema:
         assert errors == []
 
     def test_missing_version(self):
-        data = {"personas": []}
+        data = {"scopes": []}
         errors = validate_dataset(data)
         assert any("version" in e for e in errors)
 
-    def test_missing_personas(self):
+    def test_missing_scopes(self):
         data = {"version": "1.0.0"}
         errors = validate_dataset(data)
-        assert any("personas" in e for e in errors)
+        assert any("scopes" in e for e in errors)
 
     def test_duplicate_episode_ids(self):
         data = {
             "version": "1.0.0",
-            "personas": [
+            "scopes": [
                 {
-                    "persona_id": "p1",
+                    "scope_id": "p1",
                     "episodes": [
                         {
                             "episode_id": "dup",
-                            "persona_id": "p1",
+                            "scope_id": "p1",
                             "timestamp": "2024-01-01T00:00:00",
                             "text": "text1",
                         },
                         {
                             "episode_id": "dup",
-                            "persona_id": "p1",
+                            "scope_id": "p1",
                             "timestamp": "2024-01-02T00:00:00",
                             "text": "text2",
                         },
@@ -59,11 +59,11 @@ class TestDatasetSchema:
     def test_valid_questions(self):
         data = {
             "version": "1.0.0",
-            "personas": [],
+            "scopes": [],
             "questions": [
                 {
                     "question_id": "q01",
-                    "persona_id": "p1",
+                    "scope_id": "p1",
                     "checkpoint_after": 10,
                     "question_type": "longitudinal",
                     "prompt": "What?",
@@ -81,11 +81,11 @@ class TestDatasetSchema:
     def test_invalid_question_type(self):
         data = {
             "version": "1.0.0",
-            "personas": [],
+            "scopes": [],
             "questions": [
                 {
                     "question_id": "q01",
-                    "persona_id": "p1",
+                    "scope_id": "p1",
                     "checkpoint_after": 10,
                     "question_type": "invalid_type",
                     "prompt": "What?",
@@ -103,7 +103,7 @@ class TestDatasetSchema:
     def test_missing_question_keys(self):
         data = {
             "version": "1.0.0",
-            "personas": [],
+            "scopes": [],
             "questions": [{"question_id": "q01"}],
         }
         errors = validate_dataset(data)
@@ -112,7 +112,7 @@ class TestDatasetSchema:
     def test_duplicate_question_ids(self):
         q = {
             "question_id": "dup",
-            "persona_id": "p1",
+            "scope_id": "p1",
             "checkpoint_after": 10,
             "question_type": "longitudinal",
             "prompt": "Q?",
@@ -122,7 +122,7 @@ class TestDatasetSchema:
                 "key_facts": [],
             },
         }
-        data = {"version": "1.0.0", "personas": [], "questions": [q, q]}
+        data = {"version": "1.0.0", "scopes": [], "questions": [q, q]}
         errors = validate_dataset(data)
         assert any("duplicate question_id" in e for e in errors)
 
@@ -131,7 +131,7 @@ class TestDatasetLoader:
     def test_load_smoke_dataset(self):
         data = load_smoke_dataset()
         assert data["version"] == "0.1.0-smoke"
-        assert len(data["personas"]) == 2
+        assert len(data["scopes"]) == 2
 
     def test_load_episodes(self, smoke_dataset):
         episodes = load_episodes(smoke_dataset)
@@ -152,7 +152,7 @@ class TestDatasetLoader:
         assert types == {"longitudinal", "null_hypothesis", "action_recommendation"}
 
     def test_load_questions_empty(self):
-        data = {"version": "1.0.0", "personas": []}
+        data = {"version": "1.0.0", "scopes": []}
         questions = load_questions(data)
         assert questions == []
 

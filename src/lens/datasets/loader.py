@@ -11,7 +11,7 @@ from lens.datasets.schema import validate_or_raise
 def load_dataset(path: str | Path) -> dict:
     """Load and validate a dataset from a JSON file.
 
-    Returns the raw dataset dict with 'personas', 'episodes' parsed,
+    Returns the raw dataset dict with 'scopes', 'episodes' parsed,
     and optional 'truth_patterns'.
     """
     path = Path(path)
@@ -28,15 +28,15 @@ def load_dataset(path: str | Path) -> dict:
 
 
 def load_episodes(data: dict) -> dict[str, list[Episode]]:
-    """Extract episodes grouped by persona_id from a dataset dict."""
-    personas: dict[str, list[Episode]] = {}
+    """Extract episodes grouped by scope_id from a dataset dict."""
+    scopes: dict[str, list[Episode]] = {}
 
-    for persona in data["personas"]:
-        pid = persona["persona_id"]
-        episodes = [Episode.from_dict(ep) for ep in persona["episodes"]]
-        personas[pid] = episodes
+    for scope in data["scopes"]:
+        pid = scope["scope_id"]
+        episodes = [Episode.from_dict(ep) for ep in scope["episodes"]]
+        scopes[pid] = episodes
 
-    return personas
+    return scopes
 
 
 def load_truth_patterns(data: dict) -> list[TruthPattern]:

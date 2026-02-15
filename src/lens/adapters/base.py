@@ -125,21 +125,21 @@ class MemoryAdapter(ABC):
     # --- Data loading (called by runner) ---
 
     @abstractmethod
-    def reset(self, persona_id: str) -> None:
-        """Clear all state for a persona. Called once before episode stream begins."""
+    def reset(self, scope_id: str) -> None:
+        """Clear all state for a scope. Called once before episode stream begins."""
 
     @abstractmethod
     def ingest(
         self,
         episode_id: str,
-        persona_id: str,
+        scope_id: str,
         timestamp: str,
         text: str,
         meta: dict | None = None,
     ) -> None:
         """Ingest a single episode. Must complete within 200ms, no LLM calls allowed."""
 
-    def prepare(self, persona_id: str, checkpoint: int) -> None:
+    def prepare(self, scope_id: str, checkpoint: int) -> None:
         """Optional hook called before questions at a checkpoint.
 
         Replaces the old refresh(). Adapters may use this to build indices

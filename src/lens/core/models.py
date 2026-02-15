@@ -41,7 +41,7 @@ class Question:
     """A benchmark question to be answered by the agent."""
 
     question_id: str
-    persona_id: str
+    scope_id: str
     checkpoint_after: int
     question_type: str  # "longitudinal" | "null_hypothesis" | "action_recommendation"
     prompt: str
@@ -50,7 +50,7 @@ class Question:
     def to_dict(self) -> dict:
         return {
             "question_id": self.question_id,
-            "persona_id": self.persona_id,
+            "scope_id": self.scope_id,
             "checkpoint_after": self.checkpoint_after,
             "question_type": self.question_type,
             "prompt": self.prompt,
@@ -61,7 +61,7 @@ class Question:
     def from_dict(cls, d: dict) -> Question:
         return cls(
             question_id=d["question_id"],
-            persona_id=d["persona_id"],
+            scope_id=d["scope_id"],
             checkpoint_after=d["checkpoint_after"],
             question_type=d["question_type"],
             prompt=d["prompt"],
@@ -147,10 +147,10 @@ class QuestionResult:
 
 @dataclass(frozen=True)
 class Episode:
-    """A single episode in a persona's longitudinal stream."""
+    """A single episode in a scope's longitudinal stream."""
 
     episode_id: str
-    persona_id: str
+    scope_id: str
     timestamp: datetime
     text: str
     meta: dict = field(default_factory=dict)
@@ -158,7 +158,7 @@ class Episode:
     def to_dict(self) -> dict:
         return {
             "episode_id": self.episode_id,
-            "persona_id": self.persona_id,
+            "scope_id": self.scope_id,
             "timestamp": self.timestamp.isoformat(),
             "text": self.text,
             "meta": self.meta,
@@ -171,7 +171,7 @@ class Episode:
             ts = datetime.fromisoformat(ts)
         return cls(
             episode_id=d["episode_id"],
-            persona_id=d["persona_id"],
+            scope_id=d["scope_id"],
             timestamp=ts,
             text=d["text"],
             meta=d.get("meta", {}),
@@ -203,7 +203,7 @@ class TruthPattern:
     """A planted longitudinal insight with known ground truth."""
 
     pattern_id: str
-    persona_id: str
+    scope_id: str
     canonical_insight: str
     insight_category: str  # trend, correlation, preference_evolution, etc.
     evidence_episode_ids: list[str]
@@ -217,7 +217,7 @@ class TruthPattern:
     def to_dict(self) -> dict:
         return {
             "pattern_id": self.pattern_id,
-            "persona_id": self.persona_id,
+            "scope_id": self.scope_id,
             "canonical_insight": self.canonical_insight,
             "insight_category": self.insight_category,
             "evidence_episode_ids": self.evidence_episode_ids,
@@ -233,7 +233,7 @@ class TruthPattern:
     def from_dict(cls, d: dict) -> TruthPattern:
         return cls(
             pattern_id=d["pattern_id"],
-            persona_id=d["persona_id"],
+            scope_id=d["scope_id"],
             canonical_insight=d["canonical_insight"],
             insight_category=d["insight_category"],
             evidence_episode_ids=d["evidence_episode_ids"],
@@ -318,9 +318,9 @@ class ScoreCard:
 
 @dataclass
 class CheckpointResult:
-    """Results captured at a single checkpoint for a persona."""
+    """Results captured at a single checkpoint for a scope."""
 
-    persona_id: str
+    scope_id: str
     checkpoint: int
     question_results: list[QuestionResult] = field(default_factory=list)
     validation_errors: list[str] = field(default_factory=list)
@@ -329,7 +329,7 @@ class CheckpointResult:
 
     def to_dict(self) -> dict:
         return {
-            "persona_id": self.persona_id,
+            "scope_id": self.scope_id,
             "checkpoint": self.checkpoint,
             "question_results": [qr.to_dict() for qr in self.question_results],
             "validation_errors": self.validation_errors,
@@ -340,7 +340,7 @@ class CheckpointResult:
     @classmethod
     def from_dict(cls, d: dict) -> CheckpointResult:
         return cls(
-            persona_id=d["persona_id"],
+            scope_id=d["scope_id"],
             checkpoint=d["checkpoint"],
             question_results=[
                 QuestionResult.from_dict(qr) for qr in d.get("question_results", [])
@@ -352,22 +352,22 @@ class CheckpointResult:
 
 
 @dataclass
-class PersonaResult:
-    """All checkpoint results for a single persona."""
+class ScopeResult:
+    """All checkpoint results for a single scope."""
 
-    persona_id: str
+    scope_id: str
     checkpoints: list[CheckpointResult] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
-            "persona_id": self.persona_id,
+            "scope_id": self.scope_id,
             "checkpoints": [c.to_dict() for c in self.checkpoints],
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> PersonaResult:
+    def from_dict(cls, d: dict) -> ScopeResult:
         return cls(
-            persona_id=d["persona_id"],
+            scope_id=d["scope_id"],
             checkpoints=[CheckpointResult.from_dict(c) for c in d.get("checkpoints", [])],
         )
 
@@ -380,7 +380,7 @@ class RunResult:
     adapter: str
     dataset_version: str
     budget_preset: str
-    personas: list[PersonaResult] = field(default_factory=list)
+    scopes: list[ScopeResult] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -388,7 +388,7 @@ class RunResult:
             "adapter": self.adapter,
             "dataset_version": self.dataset_version,
             "budget_preset": self.budget_preset,
-            "personas": [p.to_dict() for p in self.personas],
+            "scopes": [s.to_dict() for s in self.scopes],
         }
 
     @classmethod
@@ -398,5 +398,5 @@ class RunResult:
             adapter=d["adapter"],
             dataset_version=d["dataset_version"],
             budget_preset=d["budget_preset"],
-            personas=[PersonaResult.from_dict(p) for p in d.get("personas", [])],
+            scopes=[ScopeResult.from_dict(s) for s in d.get("scopes", [])],
         )

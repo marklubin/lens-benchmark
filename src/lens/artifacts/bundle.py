@@ -20,20 +20,20 @@ def load_run_result(run_dir: str | Path) -> RunResult:
     manifest = load_run_manifest(run_dir)
     run_dir = Path(run_dir)
 
-    from lens.core.models import CheckpointResult, PersonaResult, QuestionResult
+    from lens.core.models import CheckpointResult, ScopeResult, QuestionResult
 
-    personas_dir = run_dir / "personas"
-    persona_results: list[PersonaResult] = []
+    scopes_dir = run_dir / "scopes"
+    scope_results: list[ScopeResult] = []
 
-    if personas_dir.exists():
-        for persona_path in sorted(personas_dir.iterdir()):
-            if not persona_path.is_dir():
+    if scopes_dir.exists():
+        for scope_path in sorted(scopes_dir.iterdir()):
+            if not scope_path.is_dir():
                 continue
 
-            persona_id = persona_path.name
+            scope_id = scope_path.name
             checkpoints: list[CheckpointResult] = []
 
-            for cp_path in sorted(persona_path.iterdir()):
+            for cp_path in sorted(scope_path.iterdir()):
                 if not cp_path.is_dir() or not cp_path.name.startswith("checkpoint_"):
                     continue
 
@@ -55,14 +55,14 @@ def load_run_result(run_dir: str | Path) -> RunResult:
                     validation_errors = json.loads(val_file.read_text())
 
                 checkpoints.append(CheckpointResult(
-                    persona_id=persona_id,
+                    scope_id=scope_id,
                     checkpoint=checkpoint_num,
                     question_results=question_results,
                     validation_errors=validation_errors,
                 ))
 
-            persona_results.append(PersonaResult(
-                persona_id=persona_id,
+            scope_results.append(ScopeResult(
+                scope_id=scope_id,
                 checkpoints=checkpoints,
             ))
 
@@ -71,7 +71,7 @@ def load_run_result(run_dir: str | Path) -> RunResult:
         adapter=manifest["adapter"],
         dataset_version=manifest.get("dataset_version", "unknown"),
         budget_preset=manifest.get("budget_preset", "standard"),
-        personas=persona_results,
+        scopes=scope_results,
     )
 
 

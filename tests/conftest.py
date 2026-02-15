@@ -21,7 +21,7 @@ def sample_episodes() -> list[Episode]:
     return [
         Episode(
             episode_id=f"test_ep_{i:03d}",
-            persona_id="test_persona",
+            scope_id="test_scope",
             timestamp=datetime(2024, 1, i + 1, 10, 0, 0),
             text=f"This is test episode {i} with some unique content about topic_{i}. "
             f"The episode discusses pattern_alpha and mentions evidence_fragment_{i} explicitly.",
@@ -36,7 +36,7 @@ def sample_question() -> Question:
     """A sample question for testing."""
     return Question(
         question_id="test_q01",
-        persona_id="test_persona",
+        scope_id="test_scope",
         checkpoint_after=10,
         question_type="longitudinal",
         prompt="What patterns have emerged?",

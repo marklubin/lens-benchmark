@@ -4,17 +4,17 @@ from lens.core.errors import DatasetError
 
 
 # Required top-level keys in a dataset JSON file
-REQUIRED_KEYS = {"version", "personas"}
+REQUIRED_KEYS = {"version", "scopes"}
 
-# Required keys per persona
-PERSONA_REQUIRED_KEYS = {"persona_id", "episodes"}
+# Required keys per scope
+SCOPE_REQUIRED_KEYS = {"scope_id", "episodes"}
 
 # Required keys per episode
-EPISODE_REQUIRED_KEYS = {"episode_id", "persona_id", "timestamp", "text"}
+EPISODE_REQUIRED_KEYS = {"episode_id", "scope_id", "timestamp", "text"}
 
 # Required keys per question
 QUESTION_REQUIRED_KEYS = {
-    "question_id", "persona_id", "checkpoint_after", "question_type", "prompt", "ground_truth",
+    "question_id", "scope_id", "checkpoint_after", "question_type", "prompt", "ground_truth",
 }
 
 # Required keys in ground_truth
@@ -33,34 +33,34 @@ def validate_dataset(data: dict) -> list[str]:
         if key not in data:
             errors.append(f"Missing required top-level key: {key!r}")
 
-    if "personas" not in data:
+    if "scopes" not in data:
         return errors
 
-    if not isinstance(data["personas"], list):
-        errors.append("'personas' must be a list")
+    if not isinstance(data["scopes"], list):
+        errors.append("'scopes' must be a list")
         return errors
 
     seen_episode_ids: set[str] = set()
 
-    for i, persona in enumerate(data["personas"]):
-        prefix = f"personas[{i}]"
+    for i, scope in enumerate(data["scopes"]):
+        prefix = f"scopes[{i}]"
 
-        if not isinstance(persona, dict):
+        if not isinstance(scope, dict):
             errors.append(f"{prefix}: must be a dict")
             continue
 
-        for key in PERSONA_REQUIRED_KEYS:
-            if key not in persona:
+        for key in SCOPE_REQUIRED_KEYS:
+            if key not in scope:
                 errors.append(f"{prefix}: missing required key {key!r}")
 
-        if "episodes" not in persona:
+        if "episodes" not in scope:
             continue
 
-        if not isinstance(persona["episodes"], list):
+        if not isinstance(scope["episodes"], list):
             errors.append(f"{prefix}.episodes: must be a list")
             continue
 
-        for j, episode in enumerate(persona["episodes"]):
+        for j, episode in enumerate(scope["episodes"]):
             ep_prefix = f"{prefix}.episodes[{j}]"
 
             if not isinstance(episode, dict):
@@ -84,7 +84,7 @@ def validate_dataset(data: dict) -> list[str]:
         else:
             for i, tp in enumerate(data["truth_patterns"]):
                 tp_prefix = f"truth_patterns[{i}]"
-                for key in ("pattern_id", "persona_id", "canonical_insight"):
+                for key in ("pattern_id", "scope_id", "canonical_insight"):
                     if key not in tp:
                         errors.append(f"{tp_prefix}: missing required key {key!r}")
 

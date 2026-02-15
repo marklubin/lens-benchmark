@@ -6,10 +6,10 @@ from lens.scorer.registry import register_metric
 
 
 def _all_question_results(result: RunResult) -> list[QuestionResult]:
-    """Collect all QuestionResults across all personas and checkpoints."""
+    """Collect all QuestionResults across all scopes and checkpoints."""
     qrs: list[QuestionResult] = []
-    for persona in result.personas:
-        for cp in persona.checkpoints:
+    for scope in result.scopes:
+        for cp in scope.checkpoints:
             qrs.extend(cp.question_results)
     return qrs
 

@@ -40,11 +40,11 @@ class TestEpisodeVault:
         vault.clear()
         assert vault.episode_count == 0
 
-    def test_clear_persona(self):
+    def test_clear_scope(self):
         vault = EpisodeVault()
         vault.store("ep_001", "text1")
         vault.store("ep_002", "text2")
         vault.store("ep_003", "text3")
-        vault.clear_persona(["ep_001", "ep_002"])
+        vault.clear_scope(["ep_001", "ep_002"])
         assert vault.episode_count == 1
         assert vault.has("ep_003")

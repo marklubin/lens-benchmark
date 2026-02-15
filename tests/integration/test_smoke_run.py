@@ -34,11 +34,11 @@ class TestSmokeRun:
         # Verify structure
         assert result.run_id
         assert result.adapter == "null"
-        assert len(result.personas) == 2
+        assert len(result.scopes) == 2
 
-        for persona in result.personas:
-            assert len(persona.checkpoints) >= 1
-            for cp in persona.checkpoints:
+        for scope in result.scopes:
+            assert len(scope.checkpoints) >= 1
+            for cp in scope.checkpoints:
                 assert cp.validation_errors == []
                 # Questions should have been asked
                 if cp.checkpoint in (5, 10):

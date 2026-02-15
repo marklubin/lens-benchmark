@@ -11,7 +11,7 @@ from lens.core.models import (
     EvidenceFragment,
     GroundTruth,
     MetricResult,
-    PersonaResult,
+    ScopeResult,
     Question,
     QuestionResult,
     RunResult,
@@ -50,7 +50,7 @@ class TestQuestion:
     def test_round_trip(self):
         q = Question(
             question_id="q01",
-            persona_id="p1",
+            scope_id="p1",
             checkpoint_after=10,
             question_type="longitudinal",
             prompt="What patterns emerged?",
@@ -99,7 +99,7 @@ class TestQuestionResult:
         qr = QuestionResult(
             question=Question(
                 question_id="q01",
-                persona_id="p1",
+                scope_id="p1",
                 checkpoint_after=10,
                 question_type="null_hypothesis",
                 prompt="What happened?",
@@ -124,13 +124,13 @@ class TestQuestionResult:
 class TestCheckpointResult:
     def test_round_trip_with_question_results(self):
         cp = CheckpointResult(
-            persona_id="p1",
+            scope_id="p1",
             checkpoint=10,
             question_results=[
                 QuestionResult(
                     question=Question(
                         question_id="q01",
-                        persona_id="p1",
+                        scope_id="p1",
                         checkpoint_after=10,
                         question_type="longitudinal",
                         prompt="Q?",
@@ -154,7 +154,7 @@ class TestEpisode:
     def test_round_trip(self):
         ep = Episode(
             episode_id="ep_001",
-            persona_id="p1",
+            scope_id="p1",
             timestamp=datetime(2024, 1, 15, 10, 0, 0),
             text="episode text",
             meta={"key": "value"},
@@ -168,7 +168,7 @@ class TestEpisode:
     def test_from_dict_string_timestamp(self):
         d = {
             "episode_id": "ep_001",
-            "persona_id": "p1",
+            "scope_id": "p1",
             "timestamp": "2024-01-15T10:00:00",
             "text": "text",
         }
@@ -180,7 +180,7 @@ class TestTruthPattern:
     def test_round_trip(self):
         tp = TruthPattern(
             pattern_id="tp_01",
-            persona_id="p1",
+            scope_id="p1",
             canonical_insight="insight text",
             insight_category="trend",
             evidence_episode_ids=["ep_001", "ep_002"],

@@ -16,7 +16,7 @@ from lens.core.logging import LensLogger, Verbosity
 from lens.core.models import (
     CheckpointResult,
     Episode,
-    PersonaResult,
+    ScopeResult,
     Question,
     QuestionResult,
     RunResult,
@@ -41,10 +41,10 @@ class RunEngine:
 
     def run(
         self,
-        personas: dict[str, list[Episode]],
+        scopes: dict[str, list[Episode]],
         questions: list[Question] | None = None,
     ) -> RunResult:
-        """Execute the full benchmark run across all personas."""
+        """Execute the full benchmark run across all scopes."""
         self.logger.info(
             f"Starting run [bold]{self.run_id}[/bold] "
             f"adapter={self.config.adapter} budget={self.config.agent_budget.preset}"
@@ -53,57 +53,57 @@ class RunEngine:
         adapter_cls = get_adapter(self.config.adapter)
         adapter = adapter_cls()
 
-        # Group questions by persona_id and checkpoint
+        # Group questions by scope_id and checkpoint
         questions = questions or []
         q_index: dict[str, dict[int, list[Question]]] = {}
         for q in questions:
-            q_index.setdefault(q.persona_id, {}).setdefault(q.checkpoint_after, []).append(q)
+            q_index.setdefault(q.scope_id, {}).setdefault(q.checkpoint_after, []).append(q)
 
-        # Validate: every question's checkpoint_after must be reachable for its persona
-        persona_reachable: dict[str, set[int]] = {}
-        for persona_id, episodes in personas.items():
+        # Validate: every question's checkpoint_after must be reachable for its scope
+        scope_reachable: dict[str, set[int]] = {}
+        for scope_id, episodes in scopes.items():
             reachable = set(self.config.checkpoints)
             reachable.add(len(episodes))  # final episode is always a checkpoint
-            persona_reachable[persona_id] = reachable
+            scope_reachable[scope_id] = reachable
         for q in questions:
-            reachable = persona_reachable.get(q.persona_id, set())
+            reachable = scope_reachable.get(q.scope_id, set())
             if q.checkpoint_after not in reachable:
                 raise ConfigError(
                     f"Question {q.question_id!r} targets checkpoint_after={q.checkpoint_after} "
-                    f"for persona {q.persona_id!r}, but that checkpoint is not reachable. "
+                    f"for scope {q.scope_id!r}, but that checkpoint is not reachable. "
                     f"Reachable checkpoints: {sorted(reachable)}. "
                     f"This question would be silently skipped."
                 )
 
-        persona_results: list[PersonaResult] = []
+        scope_results: list[ScopeResult] = []
 
-        for persona_id, episodes in personas.items():
-            self.logger.info(f"Persona [bold]{persona_id}[/bold]: {len(episodes)} episodes")
-            persona_questions = q_index.get(persona_id, {})
-            result = self._run_persona(adapter, persona_id, episodes, persona_questions)
-            persona_results.append(result)
+        for scope_id, episodes in scopes.items():
+            self.logger.info(f"Scope [bold]{scope_id}[/bold]: {len(episodes)} episodes")
+            scope_questions = q_index.get(scope_id, {})
+            result = self._run_scope(adapter, scope_id, episodes, scope_questions)
+            scope_results.append(result)
 
         run_result = RunResult(
             run_id=self.run_id,
             adapter=self.config.adapter,
             dataset_version="",  # Set by caller
             budget_preset=self.config.agent_budget.preset,
-            personas=persona_results,
+            scopes=scope_results,
         )
 
         self.logger.success(f"Run {self.run_id} complete")
         return run_result
 
-    def _run_persona(
+    def _run_scope(
         self,
         adapter: MemoryAdapter,
-        persona_id: str,
+        scope_id: str,
         episodes: list[Episode],
         questions_by_checkpoint: dict[int, list[Question]],
-    ) -> PersonaResult:
-        """Run the benchmark for a single persona."""
+    ) -> ScopeResult:
+        """Run the benchmark for a single scope."""
         episodes = sorted(episodes, key=lambda e: e.timestamp)
-        adapter.reset(persona_id)
+        adapter.reset(scope_id)
         checkpoints_done: list[CheckpointResult] = []
 
         for idx, episode in enumerate(episodes, start=1):
@@ -113,7 +113,7 @@ class RunEngine:
             t0 = time.monotonic()
             adapter.ingest(
                 episode_id=episode.episode_id,
-                persona_id=persona_id,
+                scope_id=scope_id,
                 timestamp=episode.timestamp.isoformat(),
                 text=episode.text,
                 meta=episode.meta,
@@ -121,7 +121,7 @@ class RunEngine:
             elapsed_ms = (time.monotonic() - t0) * 1000
             self.logger.end_step(
                 message=f"episode {episode.episode_id}",
-                persona_id=persona_id,
+                scope_id=scope_id,
                 elapsed=elapsed_ms,
             )
 
@@ -134,7 +134,7 @@ class RunEngine:
             # Check if this is a checkpoint
             if idx in self.config.checkpoints:
                 checkpoint_result = self._run_checkpoint(
-                    adapter, persona_id, idx, questions_by_checkpoint.get(idx, [])
+                    adapter, scope_id, idx, questions_by_checkpoint.get(idx, [])
                 )
                 checkpoints_done.append(checkpoint_result)
 
@@ -142,27 +142,27 @@ class RunEngine:
         final = len(episodes)
         if final not in self.config.checkpoints:
             checkpoint_result = self._run_checkpoint(
-                adapter, persona_id, final, questions_by_checkpoint.get(final, [])
+                adapter, scope_id, final, questions_by_checkpoint.get(final, [])
             )
             checkpoints_done.append(checkpoint_result)
 
-        return PersonaResult(persona_id=persona_id, checkpoints=checkpoints_done)
+        return ScopeResult(scope_id=scope_id, checkpoints=checkpoints_done)
 
     def _run_checkpoint(
         self,
         adapter: MemoryAdapter,
-        persona_id: str,
+        scope_id: str,
         checkpoint: int,
         questions: list[Question],
     ) -> CheckpointResult:
         """Execute prepare + agent questions at a checkpoint."""
-        self.logger.info(f"  Checkpoint {checkpoint} for {persona_id}")
+        self.logger.info(f"  Checkpoint {checkpoint} for {scope_id}")
         errors: list[str] = []
         timing: dict[str, float] = {}
 
         # Optional prepare hook
         t0 = time.monotonic()
-        adapter.prepare(persona_id, checkpoint)
+        adapter.prepare(scope_id, checkpoint)
         timing["prepare_ms"] = (time.monotonic() - t0) * 1000
 
         # Build agent budget from config
@@ -200,7 +200,7 @@ class RunEngine:
             ))
 
         return CheckpointResult(
-            persona_id=persona_id,
+            scope_id=scope_id,
             checkpoint=checkpoint,
             question_results=question_results,
             validation_errors=errors,
@@ -227,11 +227,11 @@ class RunEngine:
         with atomic_write(out / "config.json") as tmp:
             tmp.write_text(json.dumps(self.config.to_dict(), indent=2))
 
-        # Per-persona checkpoints
-        for persona in result.personas:
-            persona_dir = out / "personas" / persona.persona_id
-            for cp in persona.checkpoints:
-                cp_dir = persona_dir / f"checkpoint_{cp.checkpoint}"
+        # Per-scope checkpoints
+        for scope in result.scopes:
+            scope_dir = out / "scopes" / scope.scope_id
+            for cp in scope.checkpoints:
+                cp_dir = scope_dir / f"checkpoint_{cp.checkpoint}"
                 cp_dir.mkdir(parents=True, exist_ok=True)
 
                 with atomic_write(cp_dir / "question_results.json") as tmp:

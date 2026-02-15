@@ -17,13 +17,13 @@ class NullAdapter(MemoryAdapter):
     All metrics should score ~0 against this adapter.
     """
 
-    def reset(self, persona_id: str) -> None:
+    def reset(self, scope_id: str) -> None:
         pass
 
     def ingest(
         self,
         episode_id: str,
-        persona_id: str,
+        scope_id: str,
         timestamp: str,
         text: str,
         meta: dict | None = None,

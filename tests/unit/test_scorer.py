@@ -5,7 +5,7 @@ from lens.core.models import (
     CheckpointResult,
     GroundTruth,
     MetricResult,
-    PersonaResult,
+    ScopeResult,
     Question,
     QuestionResult,
     RunResult,
@@ -43,7 +43,7 @@ def _make_qr(
     return QuestionResult(
         question=Question(
             question_id="test_q",
-            persona_id="p1",
+            scope_id="p1",
             checkpoint_after=10,
             question_type=question_type,
             prompt="Test?",
@@ -74,12 +74,12 @@ def _make_run(question_results: list[QuestionResult]) -> RunResult:
         adapter="test",
         dataset_version="0.1.0",
         budget_preset="standard",
-        personas=[
-            PersonaResult(
-                persona_id="p1",
+        scopes=[
+            ScopeResult(
+                scope_id="p1",
                 checkpoints=[
                     CheckpointResult(
-                        persona_id="p1",
+                        scope_id="p1",
                         checkpoint=10,
                         question_results=question_results,
                     )

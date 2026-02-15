@@ -37,8 +37,8 @@ class EpisodeVault:
         """Clear all stored episodes."""
         self._episodes.clear()
 
-    def clear_persona(self, episode_ids: list[str]) -> None:
-        """Clear specific episodes (used when resetting a persona)."""
+    def clear_scope(self, episode_ids: list[str]) -> None:
+        """Clear specific episodes (used when resetting a scope)."""
         for eid in episode_ids:
             self._episodes.pop(eid, None)
 

@@ -20,7 +20,7 @@ class StepLog:
     """A single logged step in a run."""
 
     step: str
-    persona_id: str | None = None
+    scope_id: str | None = None
     checkpoint: int | None = None
     message: str = ""
     elapsed_ms: float = 0.0
@@ -28,8 +28,8 @@ class StepLog:
 
     def to_dict(self) -> dict:
         d: dict = {"step": self.step, "message": self.message, "elapsed_ms": self.elapsed_ms}
-        if self.persona_id:
-            d["persona_id"] = self.persona_id
+        if self.scope_id:
+            d["scope_id"] = self.scope_id
         if self.checkpoint is not None:
             d["checkpoint"] = self.checkpoint
         if self.extra:
@@ -81,7 +81,7 @@ class LensLogger:
     def end_step(
         self,
         message: str = "",
-        persona_id: str | None = None,
+        scope_id: str | None = None,
         checkpoint: int | None = None,
         **extra: object,
     ) -> StepLog:
@@ -92,7 +92,7 @@ class LensLogger:
         elapsed = (time.monotonic() - start) * 1000
         log = StepLog(
             step=step,
-            persona_id=persona_id,
+            scope_id=scope_id,
             checkpoint=checkpoint,
             message=message,
             elapsed_ms=elapsed,
