@@ -63,12 +63,16 @@ class BudgetEnforcement:
             self.violations.append(msg)
 
     def check_tokens(self, tokens: int) -> None:
-        """Add tokens and raise BudgetViolation if total exceeds limit."""
+        """Add tokens and record a violation if total exceeds limit.
+
+        Records the violation for scoring but does NOT raise, since the
+        response has already been received and paid for. Hard stops are
+        only enforced for turns and tool calls.
+        """
         self.total_tokens += tokens
         if self.total_tokens > self.budget.max_agent_tokens:
             msg = f"Token limit exceeded: {self.total_tokens} > {self.budget.max_agent_tokens}"
             self.violations.append(msg)
-            raise BudgetViolation(msg)
 
     def record_turn(self) -> None:
         """Increment turns used."""

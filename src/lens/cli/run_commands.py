@@ -9,25 +9,34 @@ from rich.console import Console
 console = Console()
 
 
+def _default_dataset() -> str:
+    """Path to the bundled smoke dataset."""
+    return str(Path(__file__).resolve().parent.parent / "datasets" / "smoke" / "smoke_dataset.json")
+
+
 @click.command()
-@click.option("--dataset", required=True, type=click.Path(exists=True), help="Path to dataset JSON")
-@click.option("--adapter", default="null", help="Adapter name")
+@click.option("--dataset", default=None, type=click.Path(exists=True), help="Path to dataset JSON (default: bundled smoke dataset)")
+@click.option("--adapter", default="sqlite", help="Adapter name")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config JSON file")
 @click.option("--out", "output_dir", default="output", help="Output directory")
 @click.option("--budget", default="standard", type=click.Choice(["fast", "standard", "extended"]))
 @click.option("--seed", default=42, type=int)
+@click.option("--provider", default=None, help="LLM provider (mock, openai)")
+@click.option("--model", default=None, help="LLM model name")
 @click.option("-v", "--verbose", count=True, help="Increase verbosity")
 def run(
-    dataset: str,
+    dataset: str | None,
     adapter: str,
     config_path: str | None,
     output_dir: str,
     budget: str,
     seed: int,
+    provider: str | None,
+    model: str | None,
     verbose: int,
 ) -> None:
     """Run the LENS benchmark against a memory adapter."""
-    from lens.agent.llm_client import MockLLMClient
+    from lens.agent.client_factory import create_llm_client
     from lens.core.config import AgentBudgetConfig, RunConfig
     from lens.core.logging import LensLogger, Verbosity
     from lens.datasets.loader import (
@@ -38,6 +47,7 @@ def run(
     )
     from lens.runner.runner import RunEngine
 
+    dataset = dataset or _default_dataset()
     verbosity = Verbosity(min(verbose + 1, 3))
     logger = LensLogger(verbosity)
 
@@ -54,6 +64,18 @@ def run(
             seed=seed,
         )
 
+    # CLI overrides for LLM config
+    if provider is not None:
+        config.llm.provider = provider
+    if model is not None:
+        config.llm.model = model
+
+    # Resolve env vars into LLM config
+    config.llm = config.llm.resolve_env()
+
+    # Create LLM client from config
+    llm_client = create_llm_client(config.llm)
+
     # Load dataset
     logger.info(f"Loading dataset from {dataset}")
     data = load_dataset(dataset)
@@ -61,7 +83,7 @@ def run(
     questions = load_questions(data)
 
     # Run
-    engine = RunEngine(config, logger, llm_client=MockLLMClient())
+    engine = RunEngine(config, logger, llm_client=llm_client)
     result = engine.run(episodes, questions=questions)
     result.dataset_version = get_dataset_version(data)
 

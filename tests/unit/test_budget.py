@@ -50,11 +50,13 @@ class TestBudgetEnforcement:
         enforcer.check_tokens(500)  # Should not raise
         assert enforcer.total_tokens == 500
 
-    def test_check_tokens_exceeds_limit(self):
+    def test_check_tokens_exceeds_limit_records_violation(self):
         enforcer = BudgetEnforcement(QuestionBudget(max_agent_tokens=1000))
         enforcer.check_tokens(500)
-        with pytest.raises(BudgetViolation, match="Token limit exceeded"):
-            enforcer.check_tokens(600)
+        enforcer.check_tokens(600)  # Should NOT raise, just record violation
+        assert enforcer.total_tokens == 1100
+        assert len(enforcer.violations) == 1
+        assert "Token limit exceeded" in enforcer.violations[0]
 
     def test_check_payload_records_warning_not_violation(self):
         enforcer = BudgetEnforcement(QuestionBudget(max_payload_bytes=100))

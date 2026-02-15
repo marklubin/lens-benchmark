@@ -209,8 +209,8 @@ class RunEngine:
         )
 
     def save_artifacts(self, result: RunResult, output_dir: str | Path) -> Path:
-        """Write run artifacts to disk."""
-        out = Path(output_dir)
+        """Write run artifacts to disk under a per-run subdirectory."""
+        out = Path(output_dir) / self.run_id
         out.mkdir(parents=True, exist_ok=True)
 
         # Run manifest
@@ -242,6 +242,9 @@ class RunEngine:
                 if cp.validation_errors:
                     with atomic_write(cp_dir / "validation.json") as tmp:
                         tmp.write_text(json.dumps(cp.validation_errors, indent=2))
+
+        # Write structured log
+        self.logger.save_log(out / "log.jsonl")
 
         self.logger.success(f"Artifacts saved to {out}")
         return out
