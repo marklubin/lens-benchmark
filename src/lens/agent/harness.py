@@ -90,6 +90,13 @@ class AgentHarness:
             enforcer.check_tokens(turn.tokens_used)
             enforcer.check_turn()
 
+        all_turns: list[AgentTurn] = []
+
+        def tracking_turn_callback(turn: AgentTurn) -> None:
+            """Track every assistant turn so we preserve work on budget violation."""
+            all_turns.append(turn)
+            turn_callback(turn)
+
         wall_start = time.monotonic()
         try:
             turns = self.llm_client.run_agent_loop(
@@ -98,10 +105,11 @@ class AgentHarness:
                 tools=tools,
                 tool_executor=tool_executor,
                 max_turns=self.budget.max_turns,
-                turn_callback=turn_callback,
+                turn_callback=tracking_turn_callback,
             )
         except BudgetViolation:
-            turns = []
+            # Preserve the assistant turns we collected before the violation
+            turns = all_turns
         wall_ms = (time.monotonic() - wall_start) * 1000
 
         # Count tool calls from turns (for reporting)

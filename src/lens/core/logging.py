@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
+from pathlib import Path
 from typing import IO
 
 from rich.console import Console
@@ -101,3 +102,13 @@ class LensLogger:
         self.steps.append(log)
         self.debug(f"{step}: {message} ({elapsed:.1f}ms)")
         return log
+
+    def save_log(self, path: Path) -> None:
+        """Write all recorded steps as JSON Lines to *path*."""
+        import json
+
+        path = Path(path) if not isinstance(path, Path) else path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            for step in self.steps:
+                f.write(json.dumps(step.to_dict()) + "\n")

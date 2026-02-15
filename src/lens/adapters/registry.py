@@ -77,3 +77,4 @@ def _ensure_builtins() -> None:
     """Import built-in adapter modules to trigger @register_adapter decorators."""
     # These imports trigger the decorators
     import lens.adapters.null  # noqa: F401
+    import lens.adapters.sqlite  # noqa: F401
