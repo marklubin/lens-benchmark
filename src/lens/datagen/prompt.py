@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from lens.datagen.spec import (
+    DistractorTheme,
     KeyFact,
     PhaseArc,
     ScopeSpec,
@@ -44,7 +45,12 @@ def build_phase_prompt(
         voice_parts.append(spec.scenario.voice.strip())
     if spec.episodes.format:
         voice_parts.append(f"Format: {spec.episodes.format}")
-    voice_parts.append(f"Each episode: approximately {spec.episodes.target_words} words.")
+    voice_parts.append(
+        f"MINIMUM {spec.episodes.target_words} words per episode. "
+        f"Each episode MUST be at least {spec.episodes.target_words} words. "
+        f"Include detailed metrics, extended notes, multiple subsections, "
+        f"and contextual commentary to reach this length."
+    )
     sections.append(f"## Voice & Format\n" + "\n".join(voice_parts))
 
     # Prior context
@@ -90,6 +96,76 @@ def build_phase_prompt(
         f"Return JSON: "
         f'{{"episodes": [{{"index": 1, "text": "...", "meta": {{}}}}, ...], '
         f'"phase_summary": "2-3 sentence summary of what happened in this phase"}}'
+    )
+
+    return "\n\n".join(sections)
+
+
+def build_distractor_prompt(
+    spec: ScopeSpec,
+    theme: DistractorTheme,
+    count: int,
+    prior_summaries: list[str],
+) -> str:
+    """Build the user prompt for generating distractor episodes.
+
+    Distractors are format-matched but topically orthogonal episodes
+    that share the same voice/style but describe unrelated systems.
+
+    Args:
+        spec: The scope specification.
+        theme: The distractor theme to use.
+        count: Number of distractor episodes to generate for this theme.
+        prior_summaries: Summaries of previously generated distractor batches.
+
+    Returns:
+        The user prompt string.
+    """
+    target_words = spec.distractors.target_words if (spec.distractors and spec.distractors.target_words) else spec.episodes.target_words
+
+    sections: list[str] = []
+
+    # Scenario — use the theme's scenario, NOT the main one
+    sections.append(f"## Scenario\n{theme.scenario.strip()}")
+
+    # Voice & format — same as signal episodes for style matching
+    voice_parts: list[str] = []
+    if spec.scenario.voice:
+        voice_parts.append(spec.scenario.voice.strip())
+    if spec.episodes.format:
+        voice_parts.append(f"Format: {spec.episodes.format}")
+    voice_parts.append(
+        f"MINIMUM {target_words} words per episode. "
+        f"Each episode MUST be at least {target_words} words. "
+        f"Include detailed metrics, extended notes, multiple subsections, "
+        f"and contextual commentary to reach this length."
+    )
+    sections.append("## Voice & Format\n" + "\n".join(voice_parts))
+
+    # Prior distractor context
+    if prior_summaries:
+        context = "\n\n".join(
+            f"Batch {i + 1}: {s}" for i, s in enumerate(prior_summaries)
+        )
+        sections.append(f"## Prior Batches\n{context}")
+
+    # Negative constraint — excluded terms
+    if theme.excluded_terms:
+        terms = ", ".join(f'"{t}"' for t in theme.excluded_terms)
+        sections.append(
+            f"## CRITICAL CONSTRAINT\n"
+            f"These episodes must NOT mention or reference any of the following "
+            f"terms or concepts: {terms}.\n"
+            f"These terms belong to a different system and must not appear."
+        )
+
+    # Output spec
+    sections.append(
+        f"## Output\n"
+        f"Generate exactly {count} episodes for theme '{theme.id}'.\n"
+        f"Return JSON: "
+        f'{{"episodes": [{{"index": 1, "text": "...", "meta": {{}}}}, ...], '
+        f'"batch_summary": "2-3 sentence summary of this batch"}}'
     )
 
     return "\n\n".join(sections)

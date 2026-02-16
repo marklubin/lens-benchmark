@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from lens.core.errors import DatasetError, atomic_write
@@ -19,7 +20,7 @@ def verify_scope(
     contamination: bool = True,
     naive_baseline: bool = True,
     provider: str = "openai",
-    model: str = "gpt-4o",
+    model: str = "gpt-5.2",
     api_key: str | None = None,
     api_base: str | None = None,
     verbose: bool = False,
@@ -64,7 +65,22 @@ def verify_scope(
     episodes = json.loads(episodes_path.read_text())
     questions = json.loads(questions_path.read_text()) if questions_path.exists() else []
 
+    # Load distractor episodes if present
+    distractors_path = gen_dir / "distractors.json"
+    distractor_episodes = []
+    if distractors_path.exists():
+        distractor_episodes = json.loads(distractors_path.read_text())
+        if not isinstance(distractor_episodes, list):
+            distractor_episodes = []
+
     results: dict = {}
+
+    # Distractor purity check (no LLM needed)
+    if distractor_episodes:
+        _log("Running distractor purity check...")
+        results["distractor_purity"] = _check_distractor_purity(
+            distractor_episodes, spec.key_facts, spec.distractors,
+        )
 
     # Create LLM client if needed
     client = None
@@ -79,9 +95,28 @@ def verify_scope(
 
     if naive_baseline:
         _log("Running naive full-context baseline...")
+        # Merge signal + distractor episodes for realistic baseline
+        all_episodes_for_baseline = episodes + distractor_episodes
+        all_episodes_for_baseline.sort(key=lambda ep: ep.get("timestamp", ""))
         results["naive_baseline"] = _run_naive_baseline(
-            spec, episodes, questions, client, model, _log
+            spec, all_episodes_for_baseline, questions, client, model, _log
         )
+
+    # Add metadata envelope
+    results["_meta"] = {
+        "scope_id": spec.scope_id,
+        "domain": spec.domain,
+        "episode_count": len(episodes),
+        "question_count": len(questions),
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+    }
+
+    # Write full results to disk
+    verification_path = gen_dir / "verification.json"
+    with atomic_write(verification_path) as tmp:
+        tmp.write_text(json.dumps(results, indent=2))
+    _log(f"Results: {verification_path}")
 
     # Update manifest with verification results
     manifest_path = gen_dir / "manifest.json"
@@ -131,6 +166,7 @@ def _run_contamination_check(
         # Test each episode individually up to the checkpoint
         max_single_coverage = 0.0
         worst_episode = None
+        episode_scores: list[dict] = []
 
         relevant_episodes = [ep for ep in episodes[:checkpoint]]
 
@@ -140,6 +176,11 @@ def _run_contamination_check(
 
             # Score: what fraction of key facts appear in the answer?
             coverage = _compute_fact_coverage(answer, key_facts)
+            episode_scores.append({
+                "episode_id": ep["episode_id"],
+                "coverage": round(coverage, 3),
+                "answer": answer,
+            })
             if coverage > max_single_coverage:
                 max_single_coverage = coverage
                 worst_episode = ep["episode_id"]
@@ -153,6 +194,7 @@ def _run_contamination_check(
             "max_single_episode_coverage": round(max_single_coverage, 3),
             "worst_episode": worst_episode,
             "contaminated": contaminated,
+            "episode_scores": episode_scores,
         })
 
     return {
@@ -191,12 +233,14 @@ def _run_naive_baseline(
 
         answer = _call_completion(client, model, prompt)
         coverage = _compute_fact_coverage(answer, key_facts)
+        per_fact = _compute_per_fact_matches(answer, key_facts)
 
         results.append({
             "question_id": q_id,
             "question_type": q.get("question_type", ""),
             "fact_coverage": round(coverage, 3),
-            "answer_preview": answer[:200],
+            "answer": answer,
+            "per_fact_matches": per_fact,
         })
 
     # Compute summary stats by question type
@@ -213,6 +257,61 @@ def _run_naive_baseline(
     return {
         "summary": summary_stats,
         "questions": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Distractor purity check
+# ---------------------------------------------------------------------------
+
+
+def _check_distractor_purity(
+    distractor_episodes: list[dict],
+    key_facts: list,
+    distractor_config: object | None,
+) -> dict:
+    """Check that distractor episodes don't overlap with key facts.
+
+    Scores every distractor against all key facts using word overlap.
+    Flags any that exceed the similarity threshold.
+    """
+    from lens.datagen.generator import _compute_distractor_similarity
+
+    max_similarity = 0.3
+    if distractor_config and hasattr(distractor_config, "max_similarity"):
+        max_similarity = distractor_config.max_similarity
+
+    key_fact_strings = [kf.fact if hasattr(kf, "fact") else str(kf) for kf in key_facts]
+
+    per_episode: list[dict] = []
+    flagged_count = 0
+
+    for ep in distractor_episodes:
+        text = ep.get("text", "")
+        eid = ep.get("episode_id", "unknown")
+        theme = ep.get("meta", {}).get("theme", "unknown")
+
+        sim = _compute_distractor_similarity(text, key_fact_strings)
+        flagged = sim > max_similarity
+        if flagged:
+            flagged_count += 1
+
+        per_episode.append({
+            "episode_id": eid,
+            "theme": theme,
+            "max_similarity": round(sim, 3),
+            "flagged": flagged,
+        })
+
+    all_sims = [e["max_similarity"] for e in per_episode]
+    return {
+        "summary": "fail" if flagged_count > 0 else "pass",
+        "threshold": max_similarity,
+        "total_distractors": len(distractor_episodes),
+        "flagged_count": flagged_count,
+        "avg_similarity": round(sum(all_sims) / len(all_sims), 3) if all_sims else 0.0,
+        "max_similarity": max(all_sims) if all_sims else 0.0,
+        "episodes": per_episode,
     }
 
 
@@ -238,6 +337,35 @@ def _compute_fact_coverage(answer: str, key_facts: list[str]) -> float:
             hits += 1
 
     return hits / len(key_facts)
+
+
+def _compute_per_fact_matches(answer: str, key_facts: list[str]) -> list[dict]:
+    """Return per-fact match details for a given answer.
+
+    Returns list of dicts with keys: fact, matched, overlap_ratio.
+    """
+    if not key_facts:
+        return []
+
+    answer_lower = answer.lower()
+    answer_words = set(answer_lower.split())
+    results: list[dict] = []
+
+    for fact in key_facts:
+        fact_words = set(fact.lower().split())
+        if not fact_words:
+            results.append({"fact": fact, "matched": False, "overlap_ratio": 0.0})
+            continue
+        overlap = fact_words & answer_words
+        ratio = len(overlap) / len(fact_words)
+        matched = len(overlap) >= max(1, len(fact_words) * 0.5)
+        results.append({
+            "fact": fact,
+            "matched": matched,
+            "overlap_ratio": round(ratio, 3),
+        })
+
+    return results
 
 
 # ---------------------------------------------------------------------------

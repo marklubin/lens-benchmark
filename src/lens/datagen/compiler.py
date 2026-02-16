@@ -43,6 +43,15 @@ def compile_dataset(
         if not isinstance(episodes, list):
             raise DatasetError(f"episodes.json must be a list in {scope_dir}")
 
+        # Load and merge distractor episodes if present
+        distractors_path = gen_dir / "distractors.json"
+        if distractors_path.exists():
+            distractors = json.loads(distractors_path.read_text())
+            if isinstance(distractors, list):
+                episodes = episodes + distractors
+                # Sort merged episodes by timestamp for interleaved ordering
+                episodes.sort(key=lambda ep: ep.get("timestamp", ""))
+
         # Check for duplicate episode IDs
         for ep in episodes:
             eid = ep.get("episode_id", "")
@@ -59,7 +68,10 @@ def compile_dataset(
         scope_id = scope_ids.pop()
 
         # Load manifest for domain metadata
-        manifest_path = gen_dir / "manifest.json"
+        # Prefer release_manifest.json (synix pipeline) over manifest.json (legacy)
+        manifest_path = gen_dir / "release_manifest.json"
+        if not manifest_path.exists():
+            manifest_path = gen_dir / "manifest.json"
         manifest = {}
         if manifest_path.exists():
             manifest = json.loads(manifest_path.read_text())

@@ -140,3 +140,85 @@ class TestCompileDataset:
         out = tmp_path / "deep" / "nested" / "dir" / "dataset.json"
         result = compile_dataset([scope_dir_a], "0.1.0", out)
         assert result.exists()
+
+
+class TestCompileWithDistractors:
+    @pytest.fixture
+    def scope_with_distractors(self, tmp_path: Path) -> Path:
+        scope = tmp_path / "scope_dist"
+        gen = scope / "generated"
+        gen.mkdir(parents=True)
+
+        episodes = [
+            {
+                "episode_id": "scope_dist_ep_001",
+                "scope_id": "scope_dist",
+                "timestamp": "2024-01-15T10:00:00",
+                "text": "Signal episode 1.",
+                "meta": {"episode_type": "signal"},
+            },
+            {
+                "episode_id": "scope_dist_ep_002",
+                "scope_id": "scope_dist",
+                "timestamp": "2024-01-17T10:00:00",
+                "text": "Signal episode 2.",
+                "meta": {"episode_type": "signal"},
+            },
+        ]
+        (gen / "episodes.json").write_text(json.dumps(episodes))
+
+        distractors = [
+            {
+                "episode_id": "scope_dist_dx_001",
+                "scope_id": "scope_dist",
+                "timestamp": "2024-01-16T10:30:00",
+                "text": "Distractor episode 1.",
+                "meta": {"episode_type": "distractor", "theme": "dns"},
+            },
+        ]
+        (gen / "distractors.json").write_text(json.dumps(distractors))
+
+        questions = [
+            {
+                "question_id": "scope_dist_q01",
+                "scope_id": "scope_dist",
+                "checkpoint_after": 3,
+                "question_type": "longitudinal",
+                "prompt": "What happened?",
+                "ground_truth": {
+                    "canonical_answer": "Things happened.",
+                    "required_evidence_refs": [],
+                    "key_facts": [],
+                },
+            },
+        ]
+        (gen / "questions.json").write_text(json.dumps(questions))
+
+        return scope
+
+    def test_merges_distractors(self, scope_with_distractors: Path, tmp_path: Path) -> None:
+        out = tmp_path / "output" / "dataset.json"
+        compile_dataset([scope_with_distractors], "0.2.0-test", out)
+        data = json.loads(out.read_text())
+
+        eps = data["scopes"][0]["episodes"]
+        assert len(eps) == 3  # 2 signal + 1 distractor
+
+        ep_ids = [e["episode_id"] for e in eps]
+        assert "scope_dist_dx_001" in ep_ids
+
+    def test_distractors_sorted_by_timestamp(self, scope_with_distractors: Path, tmp_path: Path) -> None:
+        out = tmp_path / "output" / "dataset.json"
+        compile_dataset([scope_with_distractors], "0.2.0-test", out)
+        data = json.loads(out.read_text())
+
+        eps = data["scopes"][0]["episodes"]
+        timestamps = [e["timestamp"] for e in eps]
+        assert timestamps == sorted(timestamps)
+
+    def test_no_distractors_file_works(self, scope_dir_a: Path, tmp_path: Path) -> None:
+        """Scope without distractors.json still compiles fine."""
+        out = tmp_path / "output" / "dataset.json"
+        result = compile_dataset([scope_dir_a], "0.1.0", out)
+        data = json.loads(result.read_text())
+        assert len(data["scopes"][0]["episodes"]) == 2

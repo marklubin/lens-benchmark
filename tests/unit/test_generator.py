@@ -11,12 +11,16 @@ import pytest
 
 from lens.core.errors import DatasetError
 from lens.datagen.generator import (
+    _assign_distractor_ids_and_timestamps,
+    _compute_distractor_similarity,
     _compute_key_fact_coverage,
     _parse_phase_response,
     _resolve_questions,
     _validate_phase_output,
 )
 from lens.datagen.spec import (
+    DistractorConfig,
+    DistractorTheme,
     EpisodeConfig,
     GenerationConfig,
     KeyFact,
@@ -479,3 +483,156 @@ class TestCompiledSuiteValidation:
         assert "longitudinal" in types
         assert "null_hypothesis" in types
         assert "action_recommendation" in types
+
+
+# ---------------------------------------------------------------------------
+# Distractor similarity scoring
+# ---------------------------------------------------------------------------
+
+
+class TestComputeDistractorSimilarity:
+    def test_no_overlap(self):
+        text = "DNS zone transfers completed successfully today."
+        facts = ["connection pool exhaustion", "geo-lookup latency increasing"]
+        sim = _compute_distractor_similarity(text, facts)
+        assert sim == 0.0
+
+    def test_full_overlap(self):
+        text = "The geo-lookup API latency is increasing rapidly today."
+        facts = ["geo-lookup API latency increasing"]
+        sim = _compute_distractor_similarity(text, facts)
+        assert sim == 1.0
+
+    def test_partial_overlap(self):
+        text = "Service latency was observed during the migration."
+        facts = ["API latency increasing"]  # 3 words, "latency" overlaps = 1/3
+        sim = _compute_distractor_similarity(text, facts)
+        assert 0.0 < sim < 1.0
+
+    def test_empty_facts(self):
+        sim = _compute_distractor_similarity("any text", [])
+        assert sim == 0.0
+
+    def test_max_across_facts(self):
+        text = "Connection pool metrics are normal."
+        facts = ["connection pool exhaustion", "geo-lookup latency"]
+        sim = _compute_distractor_similarity(text, facts)
+        # "connection" and "pool" overlap with first fact (2/3),
+        # no overlap with second fact
+        assert sim > 0.5
+
+
+# ---------------------------------------------------------------------------
+# Distractor ID and timestamp assignment
+# ---------------------------------------------------------------------------
+
+
+class TestAssignDistractorIdsAndTimestamps:
+    def test_assigns_dx_ids(self):
+        spec = ScopeSpec(
+            scope_id="test_01",
+            episodes=EpisodeConfig(
+                count=10,
+                timeline=TimelineConfig(start="2024-01-01", interval="1d"),
+            ),
+        )
+        episodes = [{"text": f"Ep {i}", "meta": {}} for i in range(3)]
+        _assign_distractor_ids_and_timestamps(spec, episodes)
+
+        assert episodes[0]["episode_id"] == "test_01_dx_001"
+        assert episodes[1]["episode_id"] == "test_01_dx_002"
+        assert episodes[2]["episode_id"] == "test_01_dx_003"
+
+    def test_assigns_scope_id(self):
+        spec = ScopeSpec(
+            scope_id="my_scope",
+            episodes=EpisodeConfig(
+                count=5,
+                timeline=TimelineConfig(start="2024-01-01"),
+            ),
+        )
+        episodes = [{"text": "test", "meta": {}}]
+        _assign_distractor_ids_and_timestamps(spec, episodes)
+        assert episodes[0]["scope_id"] == "my_scope"
+
+    def test_timestamps_span_signal_timeline(self):
+        spec = ScopeSpec(
+            scope_id="test_01",
+            episodes=EpisodeConfig(
+                count=10,
+                timeline=TimelineConfig(start="2024-01-01", interval="1d"),
+            ),
+        )
+        episodes = [{"text": f"Ep {i}", "meta": {}} for i in range(5)]
+        _assign_distractor_ids_and_timestamps(spec, episodes)
+
+        # First distractor should start at signal start
+        assert episodes[0]["timestamp"].startswith("2024-01-01")
+        # Last distractor should end at signal end (day 9 = Jan 10)
+        assert episodes[4]["timestamp"].startswith("2024-01-10")
+        # Timestamps should be in order
+        timestamps = [ep["timestamp"] for ep in episodes]
+        assert timestamps == sorted(timestamps)
+
+    def test_empty_list_noop(self):
+        spec = ScopeSpec(
+            scope_id="test_01",
+            episodes=EpisodeConfig(
+                count=5,
+                timeline=TimelineConfig(start="2024-01-01"),
+            ),
+        )
+        episodes: list[dict] = []
+        _assign_distractor_ids_and_timestamps(spec, episodes)
+        assert episodes == []
+
+    def test_distractor_episode_type_preserved(self):
+        spec = ScopeSpec(
+            scope_id="test_01",
+            episodes=EpisodeConfig(
+                count=5,
+                timeline=TimelineConfig(start="2024-01-01"),
+            ),
+        )
+        episodes = [
+            {"text": "test", "meta": {"episode_type": "distractor", "theme": "dns"}},
+        ]
+        _assign_distractor_ids_and_timestamps(spec, episodes)
+        assert episodes[0]["meta"]["episode_type"] == "distractor"
+        assert episodes[0]["meta"]["theme"] == "dns"
+
+
+# ---------------------------------------------------------------------------
+# Signal episode meta tagging
+# ---------------------------------------------------------------------------
+
+
+class TestSignalEpisodeMetaTagging:
+    """Verify that the episode_map building logic tags signal episodes."""
+
+    def test_signal_episodes_get_tagged(self):
+        """Simulate the episode building logic from generate_scope."""
+        scope_id = "tag_test"
+        phase_episodes = [
+            {"text": "Normal day one." + " word" * 20, "meta": {}},
+            {"text": "Normal day two." + " word" * 20, "meta": {"existing": "data"}},
+        ]
+
+        episode_map: dict[str, dict] = {}
+        start = 1
+        for i, ep in enumerate(phase_episodes):
+            global_idx = start + i
+            eid = make_episode_id(scope_id, global_idx)
+            meta = ep.get("meta", {})
+            meta["episode_type"] = "signal"
+            episode_map[eid] = {
+                "episode_id": eid,
+                "scope_id": scope_id,
+                "text": ep.get("text", ""),
+                "meta": meta,
+            }
+
+        for ep in episode_map.values():
+            assert ep["meta"]["episode_type"] == "signal"
+        # Existing meta preserved
+        assert episode_map[f"{scope_id}_ep_002"]["meta"]["existing"] == "data"

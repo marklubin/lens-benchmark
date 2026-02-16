@@ -5,10 +5,13 @@ import pytest
 from lens.datagen.prompt import (
     SYSTEM_PROMPT,
     build_contamination_prompt,
+    build_distractor_prompt,
     build_naive_baseline_prompt,
     build_phase_prompt,
 )
 from lens.datagen.spec import (
+    DistractorConfig,
+    DistractorTheme,
     EpisodeConfig,
     GenerationConfig,
     KeyFact,
@@ -139,6 +142,105 @@ class TestBuildNaiveBaselinePrompt:
     def test_includes_all_records_label(self) -> None:
         prompt = build_naive_baseline_prompt(["text"], "q")
         assert "all records" in prompt
+
+
+class TestBuildDistractorPrompt:
+    @pytest.fixture
+    def distractor_spec(self) -> ScopeSpec:
+        return ScopeSpec(
+            scope_id="test_01",
+            generation=GenerationConfig(temperature=0.7, seed=42),
+            episodes=EpisodeConfig(
+                count=10,
+                timeline=TimelineConfig(start="2024-01-01"),
+                format="Daily log",
+                target_words=500,
+            ),
+            scenario=ScenarioConfig(
+                setting="A main scenario with services.",
+                voice="Terse log style.",
+            ),
+            distractors=DistractorConfig(
+                count=30,
+                target_words=500,
+                themes=[
+                    DistractorTheme(
+                        id="dns_migration",
+                        scenario="DNS team migrating zones.",
+                        excluded_terms=["geo-lookup", "retry", "service-B"],
+                    ),
+                ],
+            ),
+        )
+
+    def test_uses_theme_scenario(self, distractor_spec: ScopeSpec) -> None:
+        theme = distractor_spec.distractors.themes[0]
+        prompt = build_distractor_prompt(distractor_spec, theme, 10, [])
+        assert "DNS team migrating" in prompt
+        # Should NOT include the main scenario
+        assert "A main scenario with services" not in prompt
+
+    def test_includes_excluded_terms(self, distractor_spec: ScopeSpec) -> None:
+        theme = distractor_spec.distractors.themes[0]
+        prompt = build_distractor_prompt(distractor_spec, theme, 10, [])
+        assert "geo-lookup" in prompt
+        assert "retry" in prompt
+        assert "service-B" in prompt
+        assert "CRITICAL CONSTRAINT" in prompt
+
+    def test_includes_word_target(self, distractor_spec: ScopeSpec) -> None:
+        theme = distractor_spec.distractors.themes[0]
+        prompt = build_distractor_prompt(distractor_spec, theme, 10, [])
+        assert "MINIMUM 500 words" in prompt
+
+    def test_includes_voice_and_format(self, distractor_spec: ScopeSpec) -> None:
+        theme = distractor_spec.distractors.themes[0]
+        prompt = build_distractor_prompt(distractor_spec, theme, 10, [])
+        assert "Terse log style" in prompt
+        assert "Daily log" in prompt
+
+    def test_correct_episode_count(self, distractor_spec: ScopeSpec) -> None:
+        theme = distractor_spec.distractors.themes[0]
+        prompt = build_distractor_prompt(distractor_spec, theme, 15, [])
+        assert "exactly 15 episodes" in prompt
+
+    def test_json_output_format(self, distractor_spec: ScopeSpec) -> None:
+        theme = distractor_spec.distractors.themes[0]
+        prompt = build_distractor_prompt(distractor_spec, theme, 10, [])
+        assert '"episodes"' in prompt
+
+    def test_uses_episodes_target_words_when_zero(self) -> None:
+        spec = ScopeSpec(
+            scope_id="test_01",
+            episodes=EpisodeConfig(
+                count=10,
+                timeline=TimelineConfig(start="2024-01-01"),
+                target_words=300,
+            ),
+            scenario=ScenarioConfig(voice="Terse"),
+            distractors=DistractorConfig(
+                count=10,
+                target_words=0,  # 0 means use episodes.target_words
+                themes=[DistractorTheme(id="t1", scenario="A test")],
+            ),
+        )
+        theme = spec.distractors.themes[0]
+        prompt = build_distractor_prompt(spec, theme, 5, [])
+        assert "MINIMUM 300 words" in prompt
+
+    def test_includes_prior_summaries(self, distractor_spec: ScopeSpec) -> None:
+        theme = distractor_spec.distractors.themes[0]
+        summaries = ["Batch 1 covered zone transfers."]
+        prompt = build_distractor_prompt(distractor_spec, theme, 10, summaries)
+        assert "Prior Batches" in prompt
+        assert "zone transfers" in prompt
+
+
+class TestWordCountLanguage:
+    def test_phase_prompt_uses_minimum_language(self, spec_with_facts: ScopeSpec) -> None:
+        prompt = build_phase_prompt(spec_with_facts, spec_with_facts.arc[0], [])
+        assert "MINIMUM" in prompt
+        assert "MUST be at least" in prompt
 
 
 class TestSystemPrompt:

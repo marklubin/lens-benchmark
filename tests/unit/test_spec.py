@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from lens.datagen.spec import (
+    DistractorConfig,
+    DistractorTheme,
     EpisodeConfig,
     GenerationConfig,
     KeyFact,
@@ -415,3 +417,109 @@ class TestTimelineConfig:
         tl = TimelineConfig(start="2024-01-01", interval="weekly")
         with pytest.raises(DatasetError, match="Invalid interval"):
             tl.interval_days()
+
+
+# ---------------------------------------------------------------------------
+# DistractorConfig parsing & validation
+# ---------------------------------------------------------------------------
+
+
+class TestDistractorConfig:
+    def test_parse_spec_with_distractors(self, tmp_path: Path) -> None:
+        content = textwrap.dedent("""\
+            scope_id: dist_test_01
+            episodes:
+              count: 10
+              timeline:
+                start: "2024-01-01"
+              target_words: 500
+            arc:
+              - id: baseline
+                episodes: "1-10"
+                description: "Normal"
+                signal_density: none
+            distractors:
+              count: 30
+              target_words: 500
+              seed: 99
+              max_similarity: 0.25
+              themes:
+                - id: dns_migration
+                  scenario: "DNS team ops"
+                  excluded_terms:
+                    - geo-lookup
+                    - retry
+                - id: storage
+                  scenario: "Storage team ops"
+        """)
+        spec_file = tmp_path / "spec.yaml"
+        spec_file.write_text(content)
+        spec = load_spec(spec_file)
+
+        assert spec.distractors is not None
+        assert spec.distractors.count == 30
+        assert spec.distractors.target_words == 500
+        assert spec.distractors.seed == 99
+        assert spec.distractors.max_similarity == 0.25
+        assert len(spec.distractors.themes) == 2
+        assert spec.distractors.themes[0].id == "dns_migration"
+        assert spec.distractors.themes[0].excluded_terms == ["geo-lookup", "retry"]
+        assert spec.distractors.themes[1].id == "storage"
+
+    def test_spec_without_distractors_is_none(self, minimal_spec: ScopeSpec) -> None:
+        assert minimal_spec.distractors is None
+
+    def test_backward_compat_no_distractors(self, sample_spec_yaml: Path) -> None:
+        spec = load_spec(sample_spec_yaml)
+        assert spec.distractors is None
+        errors = validate_spec(spec)
+        assert errors == []
+
+    def test_validate_negative_count(self, minimal_spec: ScopeSpec) -> None:
+        minimal_spec.distractors = DistractorConfig(
+            count=-1,
+            themes=[DistractorTheme(id="t1", scenario="test")],
+        )
+        errors = validate_spec(minimal_spec)
+        assert any("count" in e for e in errors)
+
+    def test_validate_invalid_max_similarity(self, minimal_spec: ScopeSpec) -> None:
+        minimal_spec.distractors = DistractorConfig(
+            count=10,
+            max_similarity=1.5,
+            themes=[DistractorTheme(id="t1", scenario="test")],
+        )
+        errors = validate_spec(minimal_spec)
+        assert any("max_similarity" in e for e in errors)
+
+    def test_validate_count_without_themes(self, minimal_spec: ScopeSpec) -> None:
+        minimal_spec.distractors = DistractorConfig(count=10, themes=[])
+        errors = validate_spec(minimal_spec)
+        assert any("themes required" in e for e in errors)
+
+    def test_validate_duplicate_theme_ids(self, minimal_spec: ScopeSpec) -> None:
+        minimal_spec.distractors = DistractorConfig(
+            count=10,
+            themes=[
+                DistractorTheme(id="dup", scenario="test 1"),
+                DistractorTheme(id="dup", scenario="test 2"),
+            ],
+        )
+        errors = validate_spec(minimal_spec)
+        assert any("Duplicate distractor theme" in e for e in errors)
+
+    def test_validate_empty_theme_scenario(self, minimal_spec: ScopeSpec) -> None:
+        minimal_spec.distractors = DistractorConfig(
+            count=10,
+            themes=[DistractorTheme(id="t1", scenario="")],
+        )
+        errors = validate_spec(minimal_spec)
+        assert any("scenario is required" in e for e in errors)
+
+    def test_validate_valid_distractors(self, minimal_spec: ScopeSpec) -> None:
+        minimal_spec.distractors = DistractorConfig(
+            count=10,
+            themes=[DistractorTheme(id="t1", scenario="A valid scenario")],
+        )
+        errors = validate_spec(minimal_spec)
+        assert errors == []

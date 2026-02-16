@@ -34,7 +34,7 @@ class EpisodeConfig:
     count: int
     timeline: TimelineConfig
     format: str = ""
-    target_words: int = 150
+    target_words: int = 500
 
 
 @dataclass
@@ -68,6 +68,22 @@ class PhaseArc:
 class NoiseConfig:
     description: str = ""
     examples: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DistractorTheme:
+    id: str
+    scenario: str
+    excluded_terms: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DistractorConfig:
+    count: int = 0
+    target_words: int = 0  # 0 = use episodes.target_words
+    themes: list[DistractorTheme] = field(default_factory=list)
+    seed: int = 99
+    max_similarity: float = 0.3
 
 
 @dataclass
@@ -106,6 +122,7 @@ class ScopeSpec:
     scenario: ScenarioConfig = field(default_factory=ScenarioConfig)
     arc: list[PhaseArc] = field(default_factory=list)
     noise: NoiseConfig = field(default_factory=NoiseConfig)
+    distractors: DistractorConfig | None = None
     key_facts: list[KeyFact] = field(default_factory=list)
     questions: list[QuestionSpec] = field(default_factory=list)
 
@@ -185,6 +202,25 @@ def _parse_spec(raw: dict) -> ScopeSpec:
         examples=noise_raw.get("examples", []),
     )
 
+    # Distractors (optional)
+    distractors = None
+    dist_raw = raw.get("distractors")
+    if dist_raw and isinstance(dist_raw, dict):
+        themes = []
+        for t_raw in dist_raw.get("themes", []):
+            themes.append(DistractorTheme(
+                id=t_raw["id"],
+                scenario=t_raw.get("scenario", ""),
+                excluded_terms=t_raw.get("excluded_terms", []),
+            ))
+        distractors = DistractorConfig(
+            count=dist_raw.get("count", 0),
+            target_words=dist_raw.get("target_words", 0),
+            themes=themes,
+            seed=dist_raw.get("seed", 99),
+            max_similarity=dist_raw.get("max_similarity", 0.3),
+        )
+
     # Key facts
     key_facts = []
     for kf_raw in raw.get("key_facts", []):
@@ -221,6 +257,7 @@ def _parse_spec(raw: dict) -> ScopeSpec:
         scenario=scenario,
         arc=arc,
         noise=noise,
+        distractors=distractors,
         key_facts=key_facts,
         questions=questions,
     )
@@ -313,6 +350,25 @@ def validate_spec(spec: ScopeSpec) -> list[str]:
                 errors.append(f"Question {q.id!r}: references unknown key_fact {fact_id!r}")
         for ref in q.ground_truth.evidence:
             _validate_phase_ref(ref, phase_ids, spec, f"question {q.id!r}.evidence", errors)
+
+    # Validate distractors
+    if spec.distractors is not None:
+        dc = spec.distractors
+        if dc.count < 0:
+            errors.append("distractors.count must be >= 0")
+        if dc.max_similarity < 0.0 or dc.max_similarity > 1.0:
+            errors.append("distractors.max_similarity must be between 0.0 and 1.0")
+        if dc.count > 0 and not dc.themes:
+            errors.append("distractors.themes required when distractors.count > 0")
+        theme_ids = set()
+        for theme in dc.themes:
+            if not theme.id:
+                errors.append("distractor theme must have an 'id'")
+            if theme.id in theme_ids:
+                errors.append(f"Duplicate distractor theme id: {theme.id!r}")
+            theme_ids.add(theme.id)
+            if not theme.scenario.strip():
+                errors.append(f"Distractor theme {theme.id!r}: scenario is required")
 
     return errors
 
