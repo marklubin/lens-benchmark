@@ -15,21 +15,42 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "action_quality": 0.05,
 }
 
+# Tier 1 hard gate — if ANY gated metric falls below its threshold,
+# the composite score is zeroed out. This prevents higher-tier scores
+# (LLM judge) from compensating for fundamental mechanical failures.
+TIER1_GATE_THRESHOLDS: dict[str, float] = {
+    "evidence_grounding": 0.5,
+    "budget_compliance": 0.5,
+}
+
 
 def compute_composite(
     metrics: list[MetricResult],
     weights: dict[str, float] | None = None,
+    gate_thresholds: dict[str, float] | None = None,
 ) -> float:
     """Compute weighted composite score from individual metrics.
 
-    Score = sum(weight_i * value_i) for metrics in the weight table.
-    Metrics not in the weight table are excluded from the composite.
+    Two-phase scoring:
+    1. Tier 1 gate check — if any gated metric falls below its threshold,
+       the composite is 0.0 regardless of other scores.
+    2. Weighted sum — sum(weight_i * value_i) for metrics in the weight table.
+
+    Pass gate_thresholds={} to disable gating.
     """
     w = weights or DEFAULT_WEIGHTS
-    total_weight = 0.0
-    weighted_sum = 0.0
+    gates = gate_thresholds if gate_thresholds is not None else TIER1_GATE_THRESHOLDS
 
     metric_map = {m.name: m.value for m in metrics}
+
+    # Tier 1 hard gate
+    for gate_name, threshold in gates.items():
+        if gate_name in metric_map and metric_map[gate_name] < threshold:
+            return 0.0
+
+    # Weighted sum
+    total_weight = 0.0
+    weighted_sum = 0.0
 
     for name, weight in w.items():
         if name in metric_map:

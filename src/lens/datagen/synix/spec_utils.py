@@ -114,7 +114,7 @@ def parse_spec(raw: dict) -> dict:
     # Questions
     for q in raw.get("questions", []):
         gt = q.get("ground_truth", {})
-        spec["questions"].append({
+        q_entry: dict = {
             "id": q["id"],
             "checkpoint_after": q["checkpoint_after"],
             "type": q["type"],
@@ -124,7 +124,12 @@ def parse_spec(raw: dict) -> dict:
                 "key_facts": gt.get("key_facts", []),
                 "evidence": gt.get("evidence", []),
             },
-        })
+        }
+        if "variant_of" in q:
+            q_entry["variant_of"] = q["variant_of"]
+        if "expected_answer_polarity" in q:
+            q_entry["expected_answer_polarity"] = q["expected_answer_polarity"]
+        spec["questions"].append(q_entry)
 
     return spec
 
@@ -133,7 +138,18 @@ def parse_spec(raw: dict) -> dict:
 # Validation
 # ---------------------------------------------------------------------------
 
-VALID_QUESTION_TYPES = {"longitudinal", "null_hypothesis", "action_recommendation"}
+VALID_QUESTION_TYPES = {
+    "longitudinal",
+    "null_hypothesis",
+    "action_recommendation",
+    "negative",
+    "paraphrase",
+    "temporal",
+    "counterfactual",
+    "distractor_resistance",
+    "severity_assessment",
+    "evidence_sufficiency",
+}
 VALID_SIGNAL_DENSITIES = {"none", "low", "medium", "high"}
 
 

@@ -108,6 +108,51 @@ class TestParseSpec:
         assert spec["generation"]["temperature"] == 0.7
         assert spec["scenario"]["setting"] == ""
 
+    def test_optional_question_metadata_parsed(self):
+        """variant_of and expected_answer_polarity are parsed when present."""
+        raw = {**MINIMAL_SPEC_RAW}
+        raw["questions"] = [
+            {
+                "id": "q_paraphrase",
+                "checkpoint_after": 8,
+                "type": "paraphrase",
+                "variant_of": "q01",
+                "prompt": "Rephrased?",
+                "ground_truth": {
+                    "canonical_answer": "Same",
+                    "key_facts": ["kf_latency"],
+                    "evidence": ["signal:1"],
+                },
+            },
+            {
+                "id": "q_negative",
+                "checkpoint_after": 8,
+                "type": "negative",
+                "expected_answer_polarity": "negative",
+                "prompt": "Is X happening?",
+                "ground_truth": {
+                    "canonical_answer": "No",
+                    "key_facts": ["kf_latency"],
+                    "evidence": ["signal:1"],
+                },
+            },
+        ]
+        spec = spec_utils.parse_spec(raw)
+        q_para = spec["questions"][0]
+        assert q_para["variant_of"] == "q01"
+        assert "expected_answer_polarity" not in q_para
+
+        q_neg = spec["questions"][1]
+        assert q_neg["expected_answer_polarity"] == "negative"
+        assert "variant_of" not in q_neg
+
+    def test_optional_metadata_absent_by_default(self):
+        """When variant_of/expected_answer_polarity not in raw, they don't appear in parsed spec."""
+        spec = spec_utils.parse_spec(MINIMAL_SPEC_RAW)
+        q = spec["questions"][0]
+        assert "variant_of" not in q
+        assert "expected_answer_polarity" not in q
+
 
 # ---------------------------------------------------------------------------
 # validate_spec
@@ -168,6 +213,44 @@ class TestValidateSpec:
         spec = spec_utils.parse_spec(_spec_with_distractors())
         errors = spec_utils.validate_spec(spec)
         assert errors == []
+
+    def test_new_question_types_accepted(self):
+        """All new question types pass validation."""
+        for qt in ("negative", "paraphrase", "temporal", "counterfactual",
+                    "distractor_resistance", "severity_assessment", "evidence_sufficiency"):
+            raw = {**MINIMAL_SPEC_RAW}
+            raw["questions"] = [{
+                "id": f"q_{qt}",
+                "checkpoint_after": 8,
+                "type": qt,
+                "prompt": f"Test {qt} question?",
+                "ground_truth": {
+                    "canonical_answer": "Answer",
+                    "key_facts": ["kf_latency"],
+                    "evidence": ["signal:1"],
+                },
+            }]
+            spec = spec_utils.parse_spec(raw)
+            errors = spec_utils.validate_spec(spec)
+            assert errors == [], f"Question type '{qt}' should be valid but got: {errors}"
+
+    def test_invalid_question_type_rejected(self):
+        """Unknown question types still produce validation errors."""
+        raw = {**MINIMAL_SPEC_RAW}
+        raw["questions"] = [{
+            "id": "q_bad",
+            "checkpoint_after": 8,
+            "type": "invented_type",
+            "prompt": "Bad?",
+            "ground_truth": {
+                "canonical_answer": "x",
+                "key_facts": ["kf_latency"],
+                "evidence": ["signal:1"],
+            },
+        }]
+        spec = spec_utils.parse_spec(raw)
+        errors = spec_utils.validate_spec(spec)
+        assert any("invalid type" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------

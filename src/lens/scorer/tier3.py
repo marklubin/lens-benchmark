@@ -15,9 +15,23 @@ def _fact_recall_score(answer_text: str, key_facts: list[str]) -> float:
     return found / len(key_facts)
 
 
+# Question types that require cross-episode synthesis (numerator for advantage metric)
+SYNTHESIS_QUESTION_TYPES = {
+    "longitudinal", "negative", "temporal", "counterfactual", "paraphrase",
+    "distractor_resistance", "severity_assessment", "evidence_sufficiency",
+}
+
+# Control question types (denominator for advantage metric)
+CONTROL_QUESTION_TYPES = {"null_hypothesis"}
+
+
 @register_metric("longitudinal_advantage")
 class LongitudinalAdvantage(BaseMetric):
-    """Differential: mean score for longitudinal minus mean score for null_hypothesis questions."""
+    """Differential: mean score for synthesis questions minus control questions.
+
+    Synthesis types: longitudinal, negative, temporal, counterfactual, paraphrase.
+    Control types: null_hypothesis.
+    """
 
     @property
     def name(self) -> str:
@@ -29,47 +43,47 @@ class LongitudinalAdvantage(BaseMetric):
 
     @property
     def description(self) -> str:
-        return "Mean fact-recall for longitudinal questions minus null_hypothesis questions"
+        return "Mean fact-recall for synthesis questions minus control questions"
 
     def compute(self, result: RunResult) -> MetricResult:
         qrs = _all_question_results(result)
 
-        longitudinal_scores: list[float] = []
-        null_scores: list[float] = []
+        synthesis_scores: list[float] = []
+        control_scores: list[float] = []
 
         for qr in qrs:
             score = _fact_recall_score(
                 qr.answer.answer_text, qr.question.ground_truth.key_facts
             )
-            if qr.question.question_type == "longitudinal":
-                longitudinal_scores.append(score)
-            elif qr.question.question_type == "null_hypothesis":
-                null_scores.append(score)
+            if qr.question.question_type in SYNTHESIS_QUESTION_TYPES:
+                synthesis_scores.append(score)
+            elif qr.question.question_type in CONTROL_QUESTION_TYPES:
+                control_scores.append(score)
 
-        if not longitudinal_scores or not null_scores:
+        if not synthesis_scores or not control_scores:
             return MetricResult(
                 name=self.name,
                 tier=self.tier,
                 value=0.0,
                 details={
-                    "longitudinal_count": len(longitudinal_scores),
-                    "null_hypothesis_count": len(null_scores),
+                    "synthesis_count": len(synthesis_scores),
+                    "control_count": len(control_scores),
                 },
             )
 
-        long_mean = sum(longitudinal_scores) / len(longitudinal_scores)
-        null_mean = sum(null_scores) / len(null_scores)
-        value = long_mean - null_mean
+        synthesis_mean = sum(synthesis_scores) / len(synthesis_scores)
+        control_mean = sum(control_scores) / len(control_scores)
+        value = synthesis_mean - control_mean
 
         return MetricResult(
             name=self.name,
             tier=self.tier,
             value=value,
             details={
-                "longitudinal_mean": long_mean,
-                "null_hypothesis_mean": null_mean,
-                "longitudinal_count": len(longitudinal_scores),
-                "null_hypothesis_count": len(null_scores),
+                "synthesis_mean": synthesis_mean,
+                "control_mean": control_mean,
+                "synthesis_count": len(synthesis_scores),
+                "control_count": len(control_scores),
             },
         )
 

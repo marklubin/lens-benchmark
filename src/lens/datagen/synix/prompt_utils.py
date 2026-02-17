@@ -279,47 +279,59 @@ def build_render_prompt(spec: dict, brief: dict, episode_type: str = "signal") -
     if voice:
         sections.append(f"## Voice\n{voice}")
 
-    # Structure template
+    # Dynamic structure from data sheet keys (domain-aware)
     date_str = brief.get("date", "YYYY-MM-DD")
+    skip_keys = {"index", "date", "theme", "phase"}
+    data_keys = [k for k in brief.keys() if k not in skip_keys]
+
+    structure_lines = [f"## {date_str} Daily Operations Summary\n"]
+    for key in data_keys:
+        header = key.replace("_", " ").title()
+        structure_lines.append(f"### {header}")
+        value = brief.get(key)
+        if isinstance(value, dict):
+            # Check if it's a dict-of-dicts (nested items) or flat dict
+            has_nested = any(isinstance(v, dict) for v in value.values())
+            if has_nested:
+                structure_lines.append(
+                    "- Each sub-item gets a labeled header line, then each of its "
+                    "metrics on a SEPARATE indented line with full label and value"
+                )
+            else:
+                structure_lines.append(
+                    "- Each metric on its own line with full label and value"
+                )
+        elif isinstance(value, list):
+            structure_lines.append("- One line per entry with full detail")
+        else:
+            structure_lines.append("- Include with full label and value")
+        structure_lines.append("")
+
     sections.append(
         "## REQUIRED STRUCTURE\n"
-        "The log entry MUST follow this structure with section headers:\n\n"
-        f"```\n"
-        f"## {date_str} Daily Operations Summary\n\n"
-        f"### Endpoint Performance\n"
-        f"- /endpoint-name: REQUESTS req | p50: Xms p95: Xms p99: Xms | err: X% (N errors) | success: X%\n"
-        f"  (one line per endpoint, include ALL endpoints from data sheet)\n\n"
-        f"### Infrastructure\n"
-        f"- hostname: CPU X% | Mem X% | Disk X% | Conns: N | Net: X/X Mbps\n"
-        f"  (one line per host)\n\n"
-        f"### Connection Pools\n"
-        f"- pool-name: active N | idle N | waiting N | exhaustion: N | max: N | avg_wait: Xms\n\n"
-        f"### CDN & Caching\n"
-        f"- Hit rate: X% | Bandwidth: X Gbps | Origin requests: N\n\n"
-        f"### Alerts\n"
-        f"- [SEVERITY] alert-name on hostname: value\n\n"
-        f"### Deployments & Changes\n"
-        f"- description of each deployment or change\n\n"
-        f"### Events\n"
-        f"- description of each operational event\n\n"
-        f"### On-Call\n"
-        f"- shift handoff note\n"
-        f"```"
+        "The log entry MUST use section headers derived from the data sheet categories.\n"
+        "IMPORTANT: Every metric from the data sheet MUST appear on its own line.\n"
+        "For nested categories (dict-of-dicts), use a sub-header for each item, "
+        "then list each metric on a separate indented bullet line.\n\n"
+        "```\n" + "\n".join(structure_lines) + "```"
     )
 
     # Strict formatting rules
     sections.append(
         "## STRICT RULES\n"
         "- Include EVERY metric from the data sheet. Do not skip any.\n"
-        "- Each endpoint gets its own line with ALL its stats.\n"
-        "- Each host gets its own line with ALL its stats.\n"
+        "- Each metric gets its OWN line — do NOT combine multiple metrics "
+        "into a single comma-separated line.\n"
+        "- For nested items (dict-of-dicts), each sub-item gets a labeled "
+        "header, then each metric listed separately below it.\n"
         "- Bullet points and metrics ONLY. No prose paragraphs.\n"
         "- Do NOT add interpretation, trends, analysis, or commentary.\n"
         "- Do NOT mention anything not in the data sheet.\n"
         "- Do NOT use words like 'increasing', 'degrading', 'elevated', "
         "'anomalous', 'concerning', 'notable', 'higher', 'rising', 'unusual'.\n"
         "- Do NOT compare to previous days or expected values.\n"
-        f"- MINIMUM {target_words} words. Include every data point from the sheet."
+        f"- MINIMUM {target_words} words. You MUST reach this word count. "
+        f"Put each metric value on its own line to ensure sufficient length."
     )
 
     # The data sheet itself
@@ -588,7 +600,11 @@ def build_contamination_prompt(episode_text: str, question_prompt: str) -> str:
     return (
         f"You are given a single record from a longitudinal dataset. "
         f"Answer the question below using ONLY the information in this record. "
-        f"If you cannot answer fully from this single record, say so.\n\n"
+        f"Do NOT speculate about potential issues or trends — only report findings "
+        f"that are clearly and unambiguously demonstrated by the data in this single record. "
+        f"If the data appears within normal operational ranges, state that there are "
+        f"no significant findings. "
+        f"If you cannot answer fully from this single record alone, say so.\n\n"
         f"## Record\n{episode_text}\n\n"
         f"## Question\n{question_prompt}\n\n"
         f"## Answer"

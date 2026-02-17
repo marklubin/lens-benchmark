@@ -264,7 +264,148 @@ class TestContaminationCheck:
         assert len(violations) == 1
         assert violations[0].violation_type == "contamination"
 
-    def test_skips_non_longitudinal_questions(self, tmp_path):
+    def test_checks_negative_questions(self, tmp_path):
+        """Negative questions (synthesis type) should be checked for contamination."""
+        v = validators_mod.ContaminationCheck(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q05", "negative", ["dns not failing"])
+        ep6 = _make_episode("test_scope_ep_006", "Normal DNS operations.")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
+            content="No information about DNS."
+        )
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep6], ctx)
+        assert len(violations) == 0
+
+    def test_checks_temporal_questions(self, tmp_path):
+        """Temporal questions (synthesis type) should be checked for contamination."""
+        v = validators_mod.ContaminationCheck(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q07", "temporal", ["latency started week 9"])
+        ep6 = _make_episode("test_scope_ep_006", "Normal data.")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
+            content="Cannot determine timing from this single record."
+        )
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep6], ctx)
+        assert len(violations) == 0
+
+    def test_checks_counterfactual_questions(self, tmp_path):
+        """Counterfactual questions (synthesis type) should be checked for contamination."""
+        v = validators_mod.ContaminationCheck(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q08", "counterfactual", ["deploy not root cause"])
+        ep6 = _make_episode("test_scope_ep_006", "Normal data.")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
+            content="Cannot evaluate counterfactual from this single record."
+        )
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep6], ctx)
+        assert len(violations) == 0
+
+    def test_checks_paraphrase_questions(self, tmp_path):
+        """Paraphrase questions (synthesis type) should be checked for contamination."""
+        v = validators_mod.ContaminationCheck(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q06", "paraphrase", ["latency increasing"])
+        ep6 = _make_episode("test_scope_ep_006", "Normal data.")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
+            content="No relevant information."
+        )
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep6], ctx)
+        assert len(violations) == 0
+
+    def test_checks_distractor_resistance_questions(self, tmp_path):
+        """Distractor resistance questions (synthesis type) should be checked for contamination."""
+        v = validators_mod.ContaminationCheck(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q19", "distractor_resistance", ["dns not failing"])
+        ep6 = _make_episode("test_scope_ep_006", "Normal data.")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
+            content="No relevant information."
+        )
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep6], ctx)
+        assert len(violations) == 0
+
+    def test_checks_severity_assessment_questions(self, tmp_path):
+        """Severity assessment questions (synthesis type) should be checked for contamination."""
+        v = validators_mod.ContaminationCheck(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q12", "severity_assessment", ["critical risk level"])
+        ep6 = _make_episode("test_scope_ep_006", "Normal data.")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
+            content="Cannot assess severity from a single record."
+        )
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep6], ctx)
+        assert len(violations) == 0
+
+    def test_checks_evidence_sufficiency_questions(self, tmp_path):
+        """Evidence sufficiency questions (synthesis type) should be checked for contamination."""
+        v = validators_mod.ContaminationCheck(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q24", "evidence_sufficiency", ["sufficient evidence"])
+        ep6 = _make_episode("test_scope_ep_006", "Normal data.")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
+            content="Insufficient data from a single record."
+        )
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep6], ctx)
+        assert len(violations) == 0
+
+    def test_skips_non_synthesis_questions(self, tmp_path):
+        """null_hypothesis and action_recommendation are not checked for contamination."""
         v = validators_mod.ContaminationCheck(
             layers=[],
             llm_config={"provider": "openai", "model": "test"},
@@ -277,6 +418,30 @@ class TestContaminationCheck:
         violations = v.validate([spec_art, q], ctx)
         assert len(violations) == 0
 
+    def test_skips_synthesis_questions_with_empty_key_facts(self, tmp_path):
+        """Synthesis questions with empty key_facts are skipped (no LLM calls, no false positives)."""
+        v = validators_mod.ContaminationCheck(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q09", "longitudinal", [])  # empty key_facts
+        ep6 = _make_episode("test_scope_ep_006", "Normal data.")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        # No LLM calls expected — question is skipped
+        mock_synix_llm._logged_complete.side_effect = []
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep6], ctx)
+        assert len(violations) == 0
+
+        # Verify results file records the skip
+        data = json.loads((tmp_path / "contamination_results.json").read_text())
+        assert data["questions"][0]["skipped"] == "no key_facts in ground_truth"
+        assert data["questions"][0]["contaminated"] is False
+
     def test_writes_results_file(self, tmp_path):
         v = validators_mod.ContaminationCheck(
             layers=[],
@@ -288,6 +453,7 @@ class TestContaminationCheck:
         ep = _make_episode("test_scope_ep_006", "text")
 
         mock_synix_llm._get_llm_client.return_value = MagicMock()
+        mock_synix_llm._logged_complete.side_effect = None
         mock_synix_llm._logged_complete.return_value = MockLLMResponse(content="No info here.")
 
         ctx = MockValidationContext(str(tmp_path))
@@ -314,33 +480,49 @@ class TestContaminationCheck:
 
 
 class TestNaiveBaseline:
-    def test_no_warnings_normal_coverage(self, tmp_path):
+    def test_no_violations_in_healthy_range(self, tmp_path):
+        """Coverage between floor and warn thresholds produces no violations."""
         v = validators_mod.NaiveBaseline(
             layers=[],
             llm_config={"provider": "openai", "model": "test"},
-            warn_threshold=0.95,
+            fail_threshold=0.80,
+            warn_threshold=0.40,
+            floor_threshold=0.05,
         )
 
-        spec_art = _make_spec_artifact()
-        q = _make_question("q01", "longitudinal", ["latency increasing"])
+        spec_art = _make_spec_artifact({
+            **MINIMAL_SPEC_RAW,
+            "key_facts": [
+                {"id": "kf1", "fact": "latency increasing", "first_appears": "signal:1", "reinforced_in": []},
+                {"id": "kf2", "fact": "pool exhaustion", "first_appears": "signal:2", "reinforced_in": []},
+                {"id": "kf3", "fact": "error rate spike", "first_appears": "signal:3", "reinforced_in": []},
+                {"id": "kf4", "fact": "timeout cascade", "first_appears": "signal:4", "reinforced_in": []},
+            ],
+        })
+        q = _make_question("q01", "longitudinal", [
+            "latency increasing", "pool exhaustion", "error rate spike", "timeout cascade",
+        ])
         ep = _make_episode("test_scope_ep_006", "text")
 
         mock_synix_llm._get_llm_client.return_value = MagicMock()
-        # LLM answer partially covers key facts
-        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
-            content="The system shows some latency changes."
-        )
+        # Call 1: baseline answer; Calls 2-5: YES NO NO NO → 25% coverage
+        mock_synix_llm._logged_complete.side_effect = [
+            MockLLMResponse(content="The system shows some latency changes."),
+            MockLLMResponse(content="YES"),
+            MockLLMResponse(content="NO"),
+            MockLLMResponse(content="NO"),
+            MockLLMResponse(content="NO"),
+        ]
 
         ctx = MockValidationContext(str(tmp_path))
         violations = v.validate([spec_art, q, ep], ctx)
-        # Should not warn since coverage is partial (< 95%)
-        assert all(v.severity != "error" for v in violations)
+        assert len(violations) == 0
 
-    def test_warns_when_too_easy(self, tmp_path):
+    def test_error_when_too_easy(self, tmp_path):
         v = validators_mod.NaiveBaseline(
             layers=[],
             llm_config={"provider": "openai", "model": "test"},
-            warn_threshold=0.5,
+            fail_threshold=0.50,
         )
 
         spec_art = _make_spec_artifact()
@@ -348,22 +530,80 @@ class TestNaiveBaseline:
         ep = _make_episode("test_scope_ep_006", "text")
 
         mock_synix_llm._get_llm_client.return_value = MagicMock()
-        # LLM answer fully covers key facts
-        mock_synix_llm._logged_complete.return_value = MockLLMResponse(
-            content="The latency is clearly increasing across all services."
+        # Call 1: baseline answer; Call 2: judge says YES
+        mock_synix_llm._logged_complete.side_effect = [
+            MockLLMResponse(content="The latency is clearly increasing across all services."),
+            MockLLMResponse(content="YES"),
+        ]
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep], ctx)
+        assert len(violations) == 1
+        assert violations[0].severity == "error"
+        assert "too easy" in violations[0].message
+
+    def test_warning_between_thresholds(self, tmp_path):
+        """Coverage between warn and fail thresholds produces a warning."""
+        v = validators_mod.NaiveBaseline(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+            fail_threshold=0.80,
+            warn_threshold=0.20,
         )
+
+        spec_art = _make_spec_artifact({
+            **MINIMAL_SPEC_RAW,
+            "key_facts": [
+                {"id": "kf1", "fact": "latency increasing", "first_appears": "signal:1", "reinforced_in": []},
+                {"id": "kf2", "fact": "pool exhaustion", "first_appears": "signal:2", "reinforced_in": []},
+            ],
+        })
+        q = _make_question("q01", "longitudinal", ["latency increasing", "pool exhaustion"])
+        ep = _make_episode("test_scope_ep_006", "text")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        # Call 1: baseline answer; Calls 2-3: judge says YES then NO → 50% coverage
+        mock_synix_llm._logged_complete.side_effect = [
+            MockLLMResponse(content="Some answer about latency."),
+            MockLLMResponse(content="YES"),
+            MockLLMResponse(content="NO"),
+        ]
 
         ctx = MockValidationContext(str(tmp_path))
         violations = v.validate([spec_art, q, ep], ctx)
         assert len(violations) == 1
         assert violations[0].severity == "warning"
-        assert "too easy" in violations[0].message
 
-    def test_writes_results_file(self, tmp_path):
+    def test_skips_questions_with_no_key_facts(self, tmp_path):
+        """Questions with empty key_facts are skipped (no LLM calls, no coverage)."""
         v = validators_mod.NaiveBaseline(
             layers=[],
             llm_config={"provider": "openai", "model": "test"},
-            warn_threshold=0.95,
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q02", "null_hypothesis", [])  # empty key_facts
+        ep = _make_episode("test_scope_ep_006", "text")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        # No LLM calls expected — question is skipped entirely
+        mock_synix_llm._logged_complete.side_effect = []
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep], ctx)
+        assert len(violations) == 0
+
+        # Verify the results file records the skip
+        data = json.loads((tmp_path / "baseline_results.json").read_text())
+        assert data["questions"][0]["skipped"] == "no key_facts in ground_truth"
+        assert data["questions"][0]["fact_coverage"] is None
+
+    def test_warning_below_floor(self, tmp_path):
+        """Coverage below floor threshold warns about missing signal."""
+        v = validators_mod.NaiveBaseline(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+            floor_threshold=0.10,
         )
 
         spec_art = _make_spec_artifact()
@@ -371,7 +611,35 @@ class TestNaiveBaseline:
         ep = _make_episode("test_scope_ep_006", "text")
 
         mock_synix_llm._get_llm_client.return_value = MagicMock()
-        mock_synix_llm._logged_complete.return_value = MockLLMResponse(content="answer")
+        # Call 1: baseline answer; Call 2: judge says NO → 0% coverage
+        mock_synix_llm._logged_complete.side_effect = [
+            MockLLMResponse(content="Everything looks normal."),
+            MockLLMResponse(content="NO"),
+        ]
+
+        ctx = MockValidationContext(str(tmp_path))
+        violations = v.validate([spec_art, q, ep], ctx)
+        assert len(violations) == 1
+        assert violations[0].violation_type == "naive_baseline_too_hard"
+        assert violations[0].severity == "warning"
+        assert "missing" in violations[0].message
+
+    def test_writes_results_file(self, tmp_path):
+        v = validators_mod.NaiveBaseline(
+            layers=[],
+            llm_config={"provider": "openai", "model": "test"},
+        )
+
+        spec_art = _make_spec_artifact()
+        q = _make_question("q01", "longitudinal", ["latency increasing"])
+        ep = _make_episode("test_scope_ep_006", "text")
+
+        mock_synix_llm._get_llm_client.return_value = MagicMock()
+        # Call 1: baseline answer; Call 2: judge
+        mock_synix_llm._logged_complete.side_effect = [
+            MockLLMResponse(content="answer"),
+            MockLLMResponse(content="NO"),
+        ]
 
         ctx = MockValidationContext(str(tmp_path))
         v.validate([spec_art, q, ep], ctx)
@@ -386,10 +654,18 @@ class TestNaiveBaseline:
         v = validators_mod.NaiveBaseline(
             layers=[],
             llm_config={"provider": "openai", "model": "test"},
-            warn_threshold=0.9,
+            fail_threshold=0.6,
+            warn_threshold=0.25,
+            floor_threshold=0.08,
         )
         cfg = v.to_config_dict()
-        assert cfg == {"layers": [], "llm_config": {"provider": "openai", "model": "test"}, "warn_threshold": 0.9}
+        assert cfg == {
+            "layers": [],
+            "llm_config": {"provider": "openai", "model": "test"},
+            "fail_threshold": 0.6,
+            "warn_threshold": 0.25,
+            "floor_threshold": 0.08,
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,8 @@ Transforms:
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+import logging
+from pathlib import Path
 
 from synix import Source, Transform
 from synix.build.llm_transforms import _get_llm_client, _logged_complete
@@ -97,9 +98,31 @@ class PlanOutline(Transform):
             return self._plan_distractor(inputs, config)
 
     def _plan_signal(self, inputs: list[Artifact], config: dict) -> list[Artifact]:
-        """One LLM call → signal_outline artifact with all episode data sheets."""
+        """One LLM call → signal_outline artifact with all episode data sheets.
+
+        If a pre-generated signal_outline.json exists in source_dir, loads it
+        directly instead of calling the LLM (saves cost and avoids timeouts).
+        """
         spec_artifact = _find_artifact(inputs, "scope_spec")
         spec = json.loads(spec_artifact.content)
+
+        # Check for pre-generated outline in source directory
+        source_dir = config.get("source_dir", ".")
+        outline_path = Path(source_dir) / "signal_outline.json"
+        if outline_path.exists():
+            logging.info("Loading pre-generated signal outline from %s", outline_path)
+            parsed = json.loads(outline_path.read_text())
+            if "episodes" not in parsed or not isinstance(parsed["episodes"], list):
+                raise ValueError(f"Pre-generated outline at {outline_path} missing 'episodes' list")
+            return [Artifact(
+                label="signal_outline",
+                artifact_type="signal_outline",
+                content=json.dumps(parsed, indent=2),
+                input_ids=[spec_artifact.artifact_id],
+                metadata={"episode_count": len(parsed["episodes"]), "source": "pre-generated"},
+            )]
+
+        # Fall back to LLM generation
         client = _get_llm_client(config)
 
         for attempt in range(1, MAX_RETRIES + 1):
@@ -127,7 +150,6 @@ class PlanOutline(Transform):
                 )]
 
             except (ValueError, json.JSONDecodeError, KeyError) as e:
-                import logging
                 logging.warning(
                     "Signal outline attempt %d/%d failed: %s (response length: %d chars)",
                     attempt, MAX_RETRIES, e,
@@ -145,13 +167,40 @@ class PlanOutline(Transform):
         return []  # unreachable but satisfies type checker
 
     def _plan_distractor(self, inputs: list[Artifact], config: dict) -> list[Artifact]:
-        """One LLM call per theme → distractor_outline artifact."""
+        """One LLM call per theme → distractor_outline artifact.
+
+        If a pre-generated distractor outline exists at
+        source_dir/distractor_outlines/{theme_id}.json, loads it directly.
+        """
         spec_artifact = _find_artifact(inputs, "scope_spec")
         spec = json.loads(spec_artifact.content)
         dc = spec["distractors"]
         theme_idx = config["_theme_idx"]
         theme = dc["themes"][theme_idx]
         count = config.get("_theme_count", 0)
+
+        # Check for pre-generated distractor outline in source directory
+        source_dir = config.get("source_dir", ".")
+        outline_path = Path(source_dir) / "distractor_outlines" / f"{theme['id']}.json"
+        if outline_path.exists():
+            logging.info("Loading pre-generated distractor outline for %s from %s", theme['id'], outline_path)
+            parsed = json.loads(outline_path.read_text())
+            if "episodes" not in parsed or not isinstance(parsed["episodes"], list):
+                raise ValueError(f"Pre-generated outline at {outline_path} missing 'episodes' list")
+            return [Artifact(
+                label=f"distractor_outline_{theme['id']}",
+                artifact_type="distractor_outline",
+                content=json.dumps(parsed, indent=2),
+                input_ids=[spec_artifact.artifact_id],
+                metadata={
+                    "theme": theme["id"],
+                    "theme_index": theme_idx,
+                    "episode_count": len(parsed["episodes"]),
+                    "source": "pre-generated",
+                },
+            )]
+
+        # Fall back to LLM generation
         client = _get_llm_client(config)
 
         for attempt in range(1, MAX_RETRIES + 1):
@@ -547,6 +596,48 @@ def _fact_indicators(kf: dict) -> list[str]:
         indicators.extend(["deploy", "rollback", "service-c", "service_c"])
     if "red_herring" in kf_id or "red herring" in fact_lower:
         indicators.extend(["rollback", "service-c"])
+
+    # Financial domain indicators
+    if "receivable" in fact_lower or "aging" in fact_lower or "ar_aging" in kf_id:
+        indicators.extend(["aging", "120", "90 day", "overdue", "write"])
+    if "cash" in fact_lower and ("conversion" in fact_lower or "revenue" in fact_lower):
+        indicators.extend(["cash", "conversion", "revenue", "operations", "free cash"])
+    if "bill" in fact_lower and "hold" in fact_lower:
+        indicators.extend(["bill", "hold", "revenue", "recognition"])
+    if "seasonal" in fact_lower or ("red_herring" in kf_id and "seasonal" in fact_lower):
+        indicators.extend(["seasonal", "quarter", "q4", "push"])
+
+    # Clinical domain indicators
+    if "hepatotoxicity" in fact_lower or "liver" in fact_lower or "alt" in fact_lower:
+        indicators.extend(["alt", "ast", "bilirubin", "hepat", "liver"])
+    if "statin" in fact_lower or "drug" in fact_lower and "interaction" in fact_lower:
+        indicators.extend(["statin", "concomitant", "interaction", "drug"])
+    if "adverse" in fact_lower or "event" in fact_lower and "safety" in fact_lower:
+        indicators.extend(["adverse", "event", "safety", "grade"])
+
+    # Environmental domain indicators
+    if "chromium" in fact_lower or "cr" in kf_id:
+        indicators.extend(["chromium", "cr", "ug/l", "mcl"])
+    if "wq-02" in fact_lower or "wq-03" in fact_lower or "point_source" in kf_id:
+        indicators.extend(["wq-02", "wq-03", "wq-04", "station"])
+    if "agricultural" in fact_lower or "runoff" in fact_lower:
+        indicators.extend(["agricultural", "runoff", "turbidity", "nutrient"])
+
+    # Security domain indicators
+    if "jmorris" in fact_lower or "exfiltration" in fact_lower:
+        indicators.extend(["jmorris", "dlp", "download", "access"])
+    if "encrypted" in fact_lower and "upload" in fact_lower:
+        indicators.extend(["encrypted", "upload", "cloud", "box"])
+    if "red_team" in kf_id or "red team" in fact_lower:
+        indicators.extend(["red team", "phishing", "simulation", "exercise"])
+
+    # Market domain indicators
+    if "correlation" in fact_lower and ("equity" in fact_lower or "bond" in fact_lower):
+        indicators.extend(["correlation", "equity", "bond", "spx", "ust"])
+    if "risk parity" in fact_lower or "systematic" in fact_lower:
+        indicators.extend(["risk parity", "systematic", "drawdown", "deleverage"])
+    if "central bank" in fact_lower or "hawkish" in fact_lower or "fomc" in fact_lower:
+        indicators.extend(["fomc", "hawkish", "rate", "policy"])
 
     # Deduplicate
     seen: set[str] = set()

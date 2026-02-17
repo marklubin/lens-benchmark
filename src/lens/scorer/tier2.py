@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from lens.core.models import MetricResult, RunResult
 from lens.scorer.base import BaseMetric
 from lens.scorer.registry import register_metric
@@ -8,16 +10,24 @@ from lens.scorer.tier1 import _all_question_results
 
 @register_metric("answer_quality")
 class AnswerQuality(BaseMetric):
-    """Overall answer correctness — requires LLM judge (not yet implemented).
+    """Answer quality via pairwise LLM judge comparison.
 
-    This metric is intended to use an LLM judge to compare the agent's answer
-    against the ground truth canonical_answer, assessing semantic correctness
-    beyond simple substring matching. Currently returns 0.0 as a stub.
+    Compares each agent answer against the canonical ground-truth answer
+    using pairwise judging. For each key fact, the judge picks which answer
+    better demonstrates the finding. Position bias is controlled via
+    random assignment.
 
-    Once implemented, this will NOT duplicate fact_recall — fact_recall checks
-    for specific factual claims via substring matching, while answer_quality
-    will assess holistic correctness, coherence, and completeness via LLM judge.
+    Requires a judge_fn to be set via configure(). Without it, returns
+    0.0 as a stub (backward compatible).
     """
+
+    def __init__(self, judge_fn: Callable[[str], str] | None = None) -> None:
+        self._judge_fn = judge_fn
+
+    def configure(self, *, judge_fn: Callable[[str], str] | None = None) -> None:
+        """Inject the LLM judge callable after construction."""
+        if judge_fn is not None:
+            self._judge_fn = judge_fn
 
     @property
     def name(self) -> str:
@@ -29,14 +39,52 @@ class AnswerQuality(BaseMetric):
 
     @property
     def description(self) -> str:
-        return "Overall answer correctness via LLM judge (stub — not yet implemented)"
+        return "Pairwise answer quality — candidate vs canonical ground truth"
 
     def compute(self, result: RunResult) -> MetricResult:
+        if self._judge_fn is None:
+            return MetricResult(
+                name=self.name,
+                tier=self.tier,
+                value=0.0,
+                details={"not_implemented": True},
+            )
+
+        from lens.scorer.judge import pairwise_fact_judge
+
+        qrs = _all_question_results(result)
+        if not qrs:
+            return MetricResult(name=self.name, tier=self.tier, value=0.0)
+
+        scores: list[float] = []
+        per_question: list[dict] = []
+
+        for qr in qrs:
+            key_facts = qr.question.ground_truth.key_facts
+            if not key_facts:
+                scores.append(1.0)
+                continue
+
+            win_rate, details = pairwise_fact_judge(
+                candidate_answer=qr.answer.answer_text,
+                reference_answer=qr.question.ground_truth.canonical_answer,
+                key_facts=key_facts,
+                question=qr.question.prompt,
+                judge_fn=self._judge_fn,
+            )
+            scores.append(win_rate)
+            per_question.append({
+                "question_id": qr.question.question_id,
+                "win_rate": win_rate,
+                "fact_details": details,
+            })
+
+        value = sum(scores) / len(scores) if scores else 0.0
         return MetricResult(
             name=self.name,
             tier=self.tier,
-            value=0.0,
-            details={"not_implemented": True},
+            value=value,
+            details={"per_question": per_question, "method": "pairwise"},
         )
 
 

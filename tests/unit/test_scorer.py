@@ -10,7 +10,8 @@ from lens.core.models import (
     QuestionResult,
     RunResult,
 )
-from lens.scorer.aggregate import compute_composite
+from lens.scorer.aggregate import TIER1_GATE_THRESHOLDS, compute_composite
+from lens.scorer.judge import pairwise_fact_judge
 from lens.scorer.registry import list_metrics
 from lens.scorer.tier1 import (
     BudgetCompliance,
@@ -207,8 +208,8 @@ class TestBudgetCompliance:
 
 
 class TestAnswerQuality:
-    def test_stub_returns_zero(self):
-        """answer_quality is an LLM judge stub — always returns 0.0."""
+    def test_stub_without_judge(self):
+        """Without judge_fn, answer_quality returns 0.0 as stub."""
         qr = _make_qr(
             answer_text="Found pattern_alpha and evidence_fragment",
             key_facts=["pattern_alpha", "evidence_fragment"],
@@ -217,6 +218,52 @@ class TestAnswerQuality:
         mr = AnswerQuality().compute(result)
         assert mr.value == 0.0
         assert mr.details.get("not_implemented") is True
+
+    def test_with_judge_candidate_wins(self):
+        """With judge that always picks candidate, score is 1.0."""
+        qr = _make_qr(
+            answer_text="Found pattern_alpha and evidence_fragment",
+            key_facts=["pattern_alpha"],
+        )
+        result = _make_run([qr])
+        # Judge always returns the candidate's position
+        calls = []
+
+        def judge_fn(prompt):
+            calls.append(prompt)
+            # Determine which position the candidate is in from the prompt
+            # The pairwise judge randomizes, so we check both
+            if "Response A:\nFound pattern_alpha" in prompt:
+                return "A"
+            return "B"
+
+        metric = AnswerQuality(judge_fn=judge_fn)
+        mr = metric.compute(result)
+        assert mr.value == 1.0
+        assert mr.details.get("method") == "pairwise"
+
+    def test_with_judge_via_configure(self):
+        """judge_fn injected via configure() works."""
+        qr = _make_qr(
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        result = _make_run([qr])
+
+        metric = AnswerQuality()
+        assert metric.compute(result).value == 0.0  # stub
+
+        metric.configure(judge_fn=lambda prompt: "TIE")
+        mr = metric.compute(result)
+        assert mr.value == 0.5  # tie on 1 fact
+
+    def test_no_key_facts_scores_one(self):
+        """Questions with no key facts score 1.0."""
+        qr = _make_qr(answer_text="answer", key_facts=[])
+        result = _make_run([qr])
+        metric = AnswerQuality(judge_fn=lambda p: "A")
+        mr = metric.compute(result)
+        assert mr.value == 1.0
 
 
 class TestInsightDepth:
@@ -278,6 +325,150 @@ class TestLongitudinalAdvantage:
         mr = LongitudinalAdvantage().compute(result)
         assert mr.value == 0.0
 
+    def test_negative_questions_count_as_synthesis(self):
+        """Negative question type should be grouped with synthesis (numerator)."""
+        neg_qr = _make_qr(
+            question_type="negative",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["different_fact"],
+        )
+        result = _make_run([neg_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 1.0  # 1.0 - 0.0
+        assert mr.details["synthesis_count"] == 1
+        assert mr.details["control_count"] == 1
+
+    def test_temporal_questions_count_as_synthesis(self):
+        """Temporal question type should be grouped with synthesis (numerator)."""
+        temp_qr = _make_qr(
+            question_type="temporal",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["different_fact"],
+        )
+        result = _make_run([temp_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 1.0
+        assert mr.details["synthesis_count"] == 1
+
+    def test_counterfactual_questions_count_as_synthesis(self):
+        """Counterfactual question type should be grouped with synthesis (numerator)."""
+        cf_qr = _make_qr(
+            question_type="counterfactual",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["different_fact"],
+        )
+        result = _make_run([cf_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 1.0
+        assert mr.details["synthesis_count"] == 1
+
+    def test_paraphrase_questions_count_as_synthesis(self):
+        """Paraphrase question type should be grouped with synthesis (numerator)."""
+        para_qr = _make_qr(
+            question_type="paraphrase",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["different_fact"],
+        )
+        result = _make_run([para_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 1.0
+        assert mr.details["synthesis_count"] == 1
+
+    def test_distractor_resistance_questions_count_as_synthesis(self):
+        """Distractor resistance question type should be grouped with synthesis."""
+        dr_qr = _make_qr(
+            question_type="distractor_resistance",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["different_fact"],
+        )
+        result = _make_run([dr_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 1.0
+        assert mr.details["synthesis_count"] == 1
+
+    def test_severity_assessment_questions_count_as_synthesis(self):
+        """Severity assessment question type should be grouped with synthesis."""
+        sev_qr = _make_qr(
+            question_type="severity_assessment",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["different_fact"],
+        )
+        result = _make_run([sev_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 1.0
+        assert mr.details["synthesis_count"] == 1
+
+    def test_evidence_sufficiency_questions_count_as_synthesis(self):
+        """Evidence sufficiency question type should be grouped with synthesis."""
+        es_qr = _make_qr(
+            question_type="evidence_sufficiency",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["different_fact"],
+        )
+        result = _make_run([es_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        assert mr.value == 1.0
+        assert mr.details["synthesis_count"] == 1
+
+    def test_mixed_synthesis_types(self):
+        """Multiple synthesis question types combined in numerator."""
+        long_qr = _make_qr(
+            question_type="longitudinal",
+            answer_text="Found pattern_alpha",
+            key_facts=["pattern_alpha"],
+        )
+        neg_qr = _make_qr(
+            question_type="negative",
+            answer_text="No facts found here",
+            key_facts=["different_fact"],
+        )
+        null_qr = _make_qr(
+            question_type="null_hypothesis",
+            answer_text="No facts found",
+            key_facts=["other_fact"],
+        )
+        result = _make_run([long_qr, neg_qr, null_qr])
+        mr = LongitudinalAdvantage().compute(result)
+        # synthesis mean = (1.0 + 0.0) / 2 = 0.5, control mean = 0.0
+        assert mr.value == 0.5
+        assert mr.details["synthesis_count"] == 2
+        assert mr.details["control_count"] == 1
+
 
 class TestActionQuality:
     def test_action_questions(self):
@@ -338,3 +529,200 @@ class TestCompositeScore:
 
     def test_empty_metrics(self):
         assert compute_composite([]) == 0.0
+
+
+class TestTier1Gate:
+    """Tier 1 hard gate — composite is 0.0 if any gated metric fails."""
+
+    def test_gate_passes(self):
+        """All gated metrics above threshold — normal composite."""
+        metrics = [
+            MetricResult(name="evidence_grounding", tier=1, value=0.8),
+            MetricResult(name="budget_compliance", tier=1, value=1.0),
+            MetricResult(name="fact_recall", tier=1, value=0.5),
+        ]
+        score = compute_composite(metrics)
+        assert score > 0.0
+
+    def test_gate_fails_evidence_grounding(self):
+        """evidence_grounding below threshold — composite is 0."""
+        metrics = [
+            MetricResult(name="evidence_grounding", tier=1, value=0.3),
+            MetricResult(name="budget_compliance", tier=1, value=1.0),
+            MetricResult(name="fact_recall", tier=1, value=1.0),
+            MetricResult(name="answer_quality", tier=2, value=1.0),
+        ]
+        score = compute_composite(metrics)
+        assert score == 0.0
+
+    def test_gate_fails_budget_compliance(self):
+        """budget_compliance below threshold — composite is 0."""
+        metrics = [
+            MetricResult(name="evidence_grounding", tier=1, value=1.0),
+            MetricResult(name="budget_compliance", tier=1, value=0.2),
+            MetricResult(name="answer_quality", tier=2, value=1.0),
+        ]
+        score = compute_composite(metrics)
+        assert score == 0.0
+
+    def test_gate_custom_thresholds(self):
+        """Custom gate thresholds override defaults."""
+        metrics = [
+            MetricResult(name="evidence_grounding", tier=1, value=0.3),
+            MetricResult(name="fact_recall", tier=1, value=0.5),
+        ]
+        # Default gate would fail (evidence_grounding 0.3 < 0.5)
+        assert compute_composite(metrics) == 0.0
+        # Custom gate with lower threshold passes
+        score = compute_composite(
+            metrics, gate_thresholds={"evidence_grounding": 0.2}
+        )
+        assert score > 0.0
+
+    def test_gate_disabled(self):
+        """Empty gate_thresholds disables gating entirely."""
+        metrics = [
+            MetricResult(name="evidence_grounding", tier=1, value=0.1),
+            MetricResult(name="budget_compliance", tier=1, value=0.1),
+        ]
+        score = compute_composite(metrics, gate_thresholds={})
+        assert score > 0.0
+
+    def test_gate_metric_not_present(self):
+        """Gate metric not in results — gate does not trigger."""
+        metrics = [
+            MetricResult(name="fact_recall", tier=1, value=0.5),
+        ]
+        score = compute_composite(metrics)
+        assert score > 0.0
+
+    def test_default_gate_thresholds(self):
+        """Default gate thresholds are evidence_grounding=0.5, budget_compliance=0.5."""
+        assert TIER1_GATE_THRESHOLDS == {
+            "evidence_grounding": 0.5,
+            "budget_compliance": 0.5,
+        }
+
+
+class TestPairwiseFactJudge:
+    """Tests for the pairwise LLM judge function."""
+
+    def test_candidate_wins_all(self):
+        """Judge always picks candidate — win_rate 1.0."""
+        def judge_fn(prompt):
+            # Candidate may be A or B — we look for its text
+            if "candidate answer" in prompt.split("Response A:")[1].split("Response B:")[0]:
+                return "A"
+            return "B"
+
+        # Use a simpler approach: judge always says A, candidate position varies
+        # but we just check the aggregate score
+        win_rate, details = pairwise_fact_judge(
+            candidate_answer="The pattern is X",
+            reference_answer="No findings",
+            key_facts=["pattern X"],
+            question="What pattern?",
+            judge_fn=lambda p: "A" if "The pattern is X" in p.split("Response A:")[1].split("Response B:")[0] else "B",
+        )
+        assert win_rate == 1.0
+
+    def test_reference_wins_all(self):
+        """Judge always picks reference — win_rate 0.0."""
+        win_rate, details = pairwise_fact_judge(
+            candidate_answer="No findings",
+            reference_answer="The pattern is X",
+            key_facts=["pattern X"],
+            question="What pattern?",
+            judge_fn=lambda p: "A" if "The pattern is X" in p.split("Response A:")[1].split("Response B:")[0] else "B",
+        )
+        assert win_rate == 0.0
+
+    def test_all_ties(self):
+        """Judge always says TIE — win_rate 0.5."""
+        win_rate, details = pairwise_fact_judge(
+            candidate_answer="answer a",
+            reference_answer="answer b",
+            key_facts=["fact1", "fact2"],
+            question="What?",
+            judge_fn=lambda p: "TIE",
+        )
+        assert win_rate == 0.5
+        assert all(d["winner"] == "tie" for d in details)
+        assert all(d["fact_score"] == 0.5 for d in details)
+
+    def test_position_is_randomized(self):
+        """Candidate should appear as both A and B across facts."""
+        positions = []
+
+        def judge_fn(prompt):
+            positions.append("A")  # always return A
+            return "A"
+
+        _, details = pairwise_fact_judge(
+            candidate_answer="answer",
+            reference_answer="other",
+            key_facts=[f"fact_{i}" for i in range(20)],
+            question="What?",
+            judge_fn=judge_fn,
+        )
+        # With 20 facts and seed=42, candidate should appear in both positions
+        candidate_positions = [d["candidate_position"] for d in details]
+        assert "A" in candidate_positions
+        assert "B" in candidate_positions
+
+    def test_empty_facts(self):
+        """No facts → win_rate 1.0, empty details."""
+        win_rate, details = pairwise_fact_judge(
+            candidate_answer="answer",
+            reference_answer="other",
+            key_facts=[],
+            question="What?",
+            judge_fn=lambda p: "A",
+        )
+        assert win_rate == 1.0
+        assert details == []
+
+    def test_details_structure(self):
+        """Each detail has the expected fields."""
+        _, details = pairwise_fact_judge(
+            candidate_answer="answer",
+            reference_answer="other",
+            key_facts=["fact1"],
+            question="What?",
+            judge_fn=lambda p: "TIE",
+        )
+        assert len(details) == 1
+        d = details[0]
+        assert d["fact"] == "fact1"
+        assert d["winner"] == "tie"
+        assert d["verdict_raw"] == "TIE"
+        assert d["candidate_position"] in ("A", "B")
+        assert d["fact_score"] == 0.5
+
+    def test_seed_reproducibility(self):
+        """Same seed produces same position assignments."""
+        results_1 = pairwise_fact_judge(
+            "a", "b", ["f1", "f2", "f3"], "q",
+            judge_fn=lambda p: "A", seed=123,
+        )[1]
+        results_2 = pairwise_fact_judge(
+            "a", "b", ["f1", "f2", "f3"], "q",
+            judge_fn=lambda p: "A", seed=123,
+        )[1]
+        pos_1 = [d["candidate_position"] for d in results_1]
+        pos_2 = [d["candidate_position"] for d in results_2]
+        assert pos_1 == pos_2
+
+    def test_different_seeds_differ(self):
+        """Different seeds produce different position assignments."""
+        results_1 = pairwise_fact_judge(
+            "a", "b", [f"f{i}" for i in range(10)], "q",
+            judge_fn=lambda p: "TIE", seed=1,
+        )[1]
+        results_2 = pairwise_fact_judge(
+            "a", "b", [f"f{i}" for i in range(10)], "q",
+            judge_fn=lambda p: "TIE", seed=2,
+        )[1]
+        pos_1 = [d["candidate_position"] for d in results_1]
+        pos_2 = [d["candidate_position"] for d in results_2]
+        assert pos_1 != pos_2

@@ -8,6 +8,7 @@ Validators:
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 from synix.build.validators import BaseValidator, Violation
@@ -63,11 +64,19 @@ class WordCount(BaseValidator):
 # ---------------------------------------------------------------------------
 
 
-class ContaminationCheck(BaseValidator):
-    """LLM-based check: can longitudinal questions be answered from single episodes?
+# Question types that require cross-episode reasoning (checked for contamination)
+SYNTHESIS_QUESTION_TYPES = {
+    "longitudinal", "negative", "temporal", "counterfactual", "paraphrase",
+    "distractor_resistance", "severity_assessment", "evidence_sufficiency",
+}
 
-    For each longitudinal question, tests each signal episode individually.
-    If max single-episode fact coverage > 50%, the question is contaminated.
+
+class ContaminationCheck(BaseValidator):
+    """LLM-based check: can synthesis questions be answered from single episodes?
+
+    For each synthesis question (longitudinal, negative, temporal, counterfactual,
+    paraphrase), tests each signal episode individually. If max single-episode
+    fact coverage > 50%, the question is contaminated.
 
     Side effect: writes detailed results to build_dir/contamination_results.json.
     """
@@ -89,11 +98,11 @@ class ContaminationCheck(BaseValidator):
             key=lambda a: a.label,
         )
 
-        # Filter to longitudinal questions only
+        # Filter to synthesis questions (require cross-episode reasoning)
         longitudinal_qs = []
         for qa in question_artifacts:
             q_data = json.loads(qa.content)
-            if q_data.get("question_type") == "longitudinal":
+            if q_data.get("question_type") in SYNTHESIS_QUESTION_TYPES:
                 longitudinal_qs.append((qa, q_data))
 
         if not longitudinal_qs:
@@ -108,6 +117,18 @@ class ContaminationCheck(BaseValidator):
             q_prompt = q_data["prompt"]
             key_facts = q_data.get("ground_truth", {}).get("key_facts", [])
             checkpoint = q_data.get("checkpoint_after", len(signal_artifacts))
+
+            # Skip questions with no key facts — can't measure fact coverage
+            if not key_facts:
+                all_results.append({
+                    "question_id": q_id,
+                    "max_single_episode_coverage": None,
+                    "worst_episode": None,
+                    "contaminated": False,
+                    "skipped": "no key_facts in ground_truth",
+                    "episode_scores": [],
+                })
+                continue
 
             # Get episodes up to checkpoint (sorted by label which is the episode ID)
             relevant_episodes = [
@@ -190,17 +211,25 @@ class ContaminationCheck(BaseValidator):
 class NaiveBaseline(BaseValidator):
     """LLM-based naive baseline: all episodes in context, no memory system.
 
-    Warns if any question type averages > threshold (default 95%) fact coverage,
-    indicating the benchmark may be too easy.
+    Uses LLM-as-judge to score whether the baseline answer demonstrates
+    knowledge of each key fact (semantic matching, not word-overlap).
+
+    Three-tier thresholds (applied per question-type average):
+      - fail_threshold (default 0.50): error — benchmark is too easy
+      - warn_threshold (default 0.30): warning — borderline easy
+      - floor_threshold (default 0.05): warning — signal may be missing
 
     Side effect: writes detailed results to build_dir/baseline_results.json.
     """
 
-    def __init__(self, layers, llm_config=None, warn_threshold=0.95):
+    def __init__(self, layers, llm_config=None, fail_threshold=0.50,
+                 warn_threshold=0.30, floor_threshold=0.05):
         super().__init__()
         self.layers = layers
         self.llm_config = llm_config or {}
+        self.fail_threshold = fail_threshold
         self.warn_threshold = warn_threshold
+        self.floor_threshold = floor_threshold
 
     def validate(self, artifacts: list[Artifact], ctx) -> list[Violation]:
         merged_config = {"llm_config": self.llm_config}
@@ -230,14 +259,42 @@ class NaiveBaseline(BaseValidator):
             key_facts = q_data.get("ground_truth", {}).get("key_facts", [])
             checkpoint = q_data.get("checkpoint_after", len(signal_artifacts))
 
+            # Skip questions with no key facts — can't measure fact coverage
+            if not key_facts:
+                question_results.append({
+                    "question_id": q_id,
+                    "question_type": q_data.get("question_type", ""),
+                    "fact_coverage": None,
+                    "answer": None,
+                    "per_fact_matches": [],
+                    "skipped": "no key_facts in ground_truth",
+                })
+                continue
+
             # Episodes up to checkpoint
-            episode_texts = []
+            signal_texts = []
+            distractor_texts = []
             for ep in all_episodes:
                 idx = _episode_index_from_label(ep.label)
-                # Include all episodes whose index is within checkpoint
-                # For distractors, include all (they interleave)
-                if ep.artifact_type == "distractor_episode" or idx <= checkpoint:
-                    episode_texts.append(ep.content)
+                if ep.artifact_type == "distractor_episode":
+                    distractor_texts.append(ep.content)
+                elif idx <= checkpoint:
+                    signal_texts.append(ep.content)
+
+            # Estimate tokens and sample distractors if needed to fit context
+            # ~2.0 tokens per word for structured data with special chars
+            max_tokens = 100_000  # conservative headroom below 128k
+            signal_tokens = sum(len(t.split()) for t in signal_texts) * 2.0
+            available = max_tokens - signal_tokens - 2000  # prompt overhead
+            if available > 0 and distractor_texts:
+                distractor_tokens = sum(len(t.split()) for t in distractor_texts) * 2.0
+                if distractor_tokens > available:
+                    # Sample distractors to fit within budget
+                    max_distractors = max(1, int(len(distractor_texts) * available / distractor_tokens))
+                    rng = random.Random(42)
+                    distractor_texts = rng.sample(distractor_texts, min(max_distractors, len(distractor_texts)))
+
+            episode_texts = signal_texts + distractor_texts
 
             prompt = prompt_utils.build_naive_baseline_prompt(episode_texts, q_prompt)
             response = _logged_complete(
@@ -246,8 +303,9 @@ class NaiveBaseline(BaseValidator):
                 artifact_desc=f"baseline-{q_id}",
             )
 
-            cov = scoring.compute_fact_coverage(response.content, key_facts)
-            per_fact = scoring.compute_per_fact_matches(response.content, key_facts)
+            cov, per_fact = scoring.compute_fact_coverage_llm(
+                response.content, key_facts, q_prompt, client, merged_config,
+            )
 
             question_results.append({
                 "question_id": q_id,
@@ -257,9 +315,11 @@ class NaiveBaseline(BaseValidator):
                 "per_fact_matches": per_fact,
             })
 
-        # Compute averages by question type
+        # Compute averages by question type (skip questions with no key facts)
         by_type: dict[str, list[float]] = {}
         for r in question_results:
+            if r["fact_coverage"] is None:
+                continue
             qt = r["question_type"]
             by_type.setdefault(qt, []).append(r["fact_coverage"])
 
@@ -269,14 +329,40 @@ class NaiveBaseline(BaseValidator):
         for qt, coverages in by_type.items():
             avg = sum(coverages) / len(coverages) if coverages else 0.0
             summary_stats[qt] = round(avg, 3)
-            if avg > self.warn_threshold:
+            if avg > self.fail_threshold:
+                violations.append(Violation(
+                    violation_type="naive_baseline_too_easy",
+                    severity="error",
+                    message=(
+                        f"Question type '{qt}' averages {avg:.1%} fact coverage "
+                        f"on naive baseline (threshold: {self.fail_threshold:.0%}). "
+                        f"Benchmark is too easy."
+                    ),
+                    label="naive_baseline",
+                    field="fact_coverage",
+                    metadata={"question_type": qt, "avg_coverage": round(avg, 3)},
+                ))
+            elif avg > self.warn_threshold:
                 violations.append(Violation(
                     violation_type="naive_baseline_too_easy",
                     severity="warning",
                     message=(
                         f"Question type '{qt}' averages {avg:.1%} fact coverage "
-                        f"on naive baseline (threshold: {self.warn_threshold:.0%}). "
+                        f"on naive baseline (warn threshold: {self.warn_threshold:.0%}). "
                         f"Benchmark may be too easy."
+                    ),
+                    label="naive_baseline",
+                    field="fact_coverage",
+                    metadata={"question_type": qt, "avg_coverage": round(avg, 3)},
+                ))
+            elif avg < self.floor_threshold:
+                violations.append(Violation(
+                    violation_type="naive_baseline_too_hard",
+                    severity="warning",
+                    message=(
+                        f"Question type '{qt}' averages {avg:.1%} fact coverage "
+                        f"on naive baseline (floor: {self.floor_threshold:.0%}). "
+                        f"Signal may be missing or key facts poorly calibrated."
                     ),
                     label="naive_baseline",
                     field="fact_coverage",
@@ -298,7 +384,9 @@ class NaiveBaseline(BaseValidator):
         return {
             "layers": [l.name for l in self.layers],
             "llm_config": self.llm_config,
+            "fail_threshold": self.fail_threshold,
             "warn_threshold": self.warn_threshold,
+            "floor_threshold": self.floor_threshold,
         }
 
 

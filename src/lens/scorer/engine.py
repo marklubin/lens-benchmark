@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from lens.core.logging import LensLogger, Verbosity
 from lens.core.models import MetricResult, RunResult, ScoreCard
 from lens.scorer.aggregate import build_scorecard
@@ -7,15 +9,22 @@ from lens.scorer.registry import list_metrics
 
 
 class ScorerEngine:
-    """Runs all registered metrics against a run result and produces a ScoreCard."""
+    """Runs all registered metrics against a run result and produces a ScoreCard.
+
+    Supports optional judge_fn for metrics that require LLM-based evaluation
+    (e.g., pairwise answer_quality). Metrics that implement configure() will
+    receive the judge_fn automatically.
+    """
 
     def __init__(
         self,
         tier_filter: int | None = None,
         logger: LensLogger | None = None,
+        judge_fn: Callable[[str], str] | None = None,
     ) -> None:
         self.tier_filter = tier_filter
         self.logger = logger or LensLogger(Verbosity.NORMAL)
+        self.judge_fn = judge_fn
 
     def score(self, result: RunResult) -> ScoreCard:
         """Score a run result with all applicable metrics."""
@@ -24,6 +33,10 @@ class ScorerEngine:
 
         for name, metric_cls in sorted(all_metrics.items()):
             metric = metric_cls()
+
+            # Inject judge for metrics that support it
+            if self.judge_fn is not None and hasattr(metric, "configure"):
+                metric.configure(judge_fn=self.judge_fn)
 
             if self.tier_filter is not None and metric.tier != self.tier_filter:
                 continue

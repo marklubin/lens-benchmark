@@ -1,4 +1,4 @@
-# LENS: Longitudinal Evaluation of Networked Systems
+# LENS: Longitudinal Evidence-backed Narrative Signals
 
 ## What it is
 
@@ -30,13 +30,26 @@ After N episodes have been ingested, the benchmark pauses and asks questions. A 
 
 The agent gets a fixed budget: max turns, max tool calls, max payload bytes, max tokens. This prevents brute-force strategies and rewards systems that surface relevant information efficiently.
 
-### 4. Three question types test different capabilities
+### 4. Ten question types test different capabilities
 
-- **Longitudinal** — requires synthesizing across many episodes to identify patterns (e.g., *"What pattern of anxiety triggers has emerged over the course of therapy?"*). This is the hard test. It rewards memory systems that can surface cross-episode patterns, not just retrieve individual records.
+**Synthesis types** (require cross-episode reasoning):
 
-- **Null hypothesis** — answerable from a single specific episode (e.g., *"What happened on January 15th?"*). This is the baseline. Any functioning search system should handle these. The delta between longitudinal and null-hypothesis performance measures how much the memory system helps with *temporal reasoning* beyond basic retrieval.
+- **Longitudinal** — requires synthesizing across many episodes to identify patterns. This is the core test — it rewards memory systems that surface cross-episode patterns, not just retrieve individual records.
+- **Negative** — correctly identifying that a suspected cause is NOT supported by evidence. Tests whether the system can distinguish real signal from noise.
+- **Temporal** — when did a pattern start? What was the progression? Requires tracking changes over time.
+- **Counterfactual** — what would happen if X were different? Tests causal understanding from accumulated evidence.
+- **Paraphrase** — same underlying question rephrased differently. Tests robustness of retrieval and reasoning.
+- **Distractor resistance** — correctly ignoring topically similar but irrelevant episodes. Tests precision under noise.
+- **Severity assessment** — how severe is the issue? What's the impact? Requires weighing evidence across episodes.
+- **Evidence sufficiency** — is there enough evidence to support a conclusion? Tests epistemic calibration.
 
-- **Action recommendation** — requires both longitudinal insight and judgment (e.g., *"Based on the full history, what should the therapist focus on next?"*). Tests whether the memory system provides enough context for downstream decision-making.
+**Control type** (baseline):
+
+- **Null hypothesis** — answerable from a single specific episode. Any functioning search system should handle these. The delta between synthesis and null-hypothesis performance is the `longitudinal_advantage` metric — the headline number that isolates the value of temporal memory.
+
+**Decision type**:
+
+- **Action recommendation** — requires both longitudinal insight and judgment. Tests whether the memory system provides enough context for downstream decision-making.
 
 ### 5. Ground truth enables mechanical scoring
 
@@ -51,27 +64,29 @@ This allows scoring without an LLM judge for the core metrics.
 
 ### Tier 1 — Mechanical (no LLM judge)
 
-| Metric | What it measures |
-|--------|-----------------|
-| Evidence grounding | Are the agent's retrieved refs real episodes? (anti-hallucination) |
-| Fact recall | What fraction of ground-truth key facts appear in the answer? |
-| Evidence coverage | Did the agent find the *right* episodes? |
-| Budget compliance | Did the agent stay within its resource budget? |
+| Metric | Weight | What it measures |
+|--------|--------|-----------------|
+| Evidence grounding | 10% | Are the agent's retrieved refs real episodes? (anti-hallucination) |
+| Fact recall | 10% | What fraction of ground-truth key facts appear in the answer? |
+| Evidence coverage | 10% | Did the agent find the *right* episodes? |
+| Budget compliance | 10% | Did the agent stay within its resource budget? |
+
+**Hard gate**: If `evidence_grounding` or `budget_compliance` < 0.5, the composite score is zeroed out. This prevents higher-tier scores from compensating for fundamental mechanical failures like hallucinated references or budget violations.
 
 ### Tier 2 — LLM Judge
 
-| Metric | What it measures |
-|--------|-----------------|
-| Answer quality | Overall correctness vs. canonical answer |
-| Insight depth | Does the answer show cross-episode synthesis? |
-| Reasoning quality | Is the reasoning chain coherent? |
+| Metric | Weight | What it measures |
+|--------|--------|-----------------|
+| Answer quality | 15% | Pairwise comparison: candidate answer vs. canonical ground truth, position-debiased. For each key fact, the judge picks which answer better demonstrates the finding. |
+| Insight depth | 15% | Does the answer draw from 2+ distinct episodes? (cross-episode synthesis) |
+| Reasoning quality | 10% | Is the answer substantive (>50 chars) with active tool use? |
 
 ### Tier 3 — Differential
 
-| Metric | What it measures |
-|--------|-----------------|
-| Longitudinal advantage | How much better does the system do on longitudinal vs. null-hypothesis questions? This is the headline metric — it isolates the value of temporal memory. |
-| Action quality | How good are the action recommendations? |
+| Metric | Weight | What it measures |
+|--------|--------|-----------------|
+| Longitudinal advantage | 15% | Mean fact-recall for synthesis questions minus control questions. **The headline metric** — directly measures how much temporal memory helps beyond basic retrieval. |
+| Action quality | 5% | How good are the action recommendations? |
 
 ## What makes it different
 
@@ -80,3 +95,4 @@ This allows scoring without an LLM judge for the core metrics.
 - **Dynamic capability discovery** — The agent calls `get_capabilities()` to learn what filters, search modes, and extra tools the adapter supports, then adapts its strategy. Systems that expose richer interfaces get a natural advantage.
 - **Budget constraints** — Fixed resource budgets prevent brute-force. A system that surfaces the right information in 3 tool calls scores the same as one that takes 15, but the 15-call system is closer to its budget limit.
 - **Differential scoring** — The longitudinal advantage metric directly measures *how much memory helps* by comparing performance on questions that require temporal reasoning vs. questions that don't.
+- **Contamination-resistant dataset generation** — Datasets are generated via a two-stage pipeline: a full-context planner encodes signal as numeric progressions, then a blind renderer formats each episode independently without knowing the storyline. This prevents the LLM from editorializing and ensures signal only emerges from the progression across episodes, not from any single episode. See [methodology.md](methodology.md) for details.

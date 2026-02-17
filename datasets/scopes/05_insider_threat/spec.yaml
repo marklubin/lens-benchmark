@@ -1,0 +1,582 @@
+scope_id: insider_threat_05
+domain: security_logs
+description: Daily SIEM digests revealing systematic IP exfiltration by departing employee
+generation:
+  temperature: 0.7
+  seed: 505
+episodes:
+  count: 30
+  timeline:
+    start: '2024-09-02'
+    interval: 1d
+  format: Daily SIEM digest with access logs, DLP alerts, VPN sessions, privileged account activity, badge swipe events, USB
+    device logs, and SOC analyst notes
+  target_words: 500
+scenario:
+  setting: 'A defense contractor''s Security Operations Center (SOC) producing
+
+    daily SIEM digests. Monitored systems: Active Directory, VPN
+
+    gateway, DLP (Data Loss Prevention), badge access control,
+
+    USB device management, cloud storage (Box/OneDrive), email
+
+    gateway, and privileged access management (PAM). A senior
+
+    engineer (user: jmorris) who has submitted resignation
+
+    (effective in 6 weeks) is systematically exfiltrating
+
+    proprietary designs via encrypted uploads to personal cloud
+
+    storage during legitimate work hours. Access patterns shift
+
+    subtly — broader file access scope, larger data volumes,
+
+    off-pattern timing.
+
+    '
+  voice: 'Structured security event format. Alert severity levels
+
+    (INFO/LOW/MEDIUM/HIGH/CRITICAL). SOC analyst shift notes.
+
+    Terse log entries with timestamps, user IDs, source IPs,
+
+    event codes. No narrative analysis — raw events and
+
+    short annotations only.
+
+    '
+arc:
+- id: baseline
+  episodes: 1-8
+  description: Normal operations. jmorris accessing usual project directories (3-5 repos). Standard work hours 08:00-17:30.
+    VPN from home 1-2 evenings/week. Badge swipes consistent. DLP alerts at normal background rate across org (~15/day total).
+    USB policy blocks as expected.
+  signal_density: none
+- id: early_signal
+  episodes: 9-15
+  description: jmorris file access scope widening — accessing 8-12 repos including archived projects outside current assignment.
+    Download volume creeping from 200MB/day to 500MB/day. DLP alerts for jmorris at 2-3/day vs org baseline of 0.5/user/day.
+    Still during work hours. Encrypted uploads to Box appearing.
+  signal_density: low
+- id: red_herring
+  episodes: 14-16
+  description: Red team exercise announced. Simulated phishing campaign and lateral movement detected. SOC focuses on red
+    team IOCs. Multiple MEDIUM/HIGH alerts from red team activity. jmorris activity buried in alert noise. SOC attributes
+    elevated DLP alerts to red team testing false positives.
+  signal_density: medium
+- id: escalation
+  episodes: 16-22
+  description: 'jmorris download volume 800MB-1.2GB/day. Accessing classified project archives from 3 years ago. VPN sessions
+    extending to 22:00-23:00. Badge swipes showing weekend access. DLP alerts: encrypted file uploads to personal cloud storage.
+    PAM logs show jmorris querying admin shares. Access pattern clearly anomalous vs peer group.'
+  signal_density: high
+- id: root_cause
+  episodes: 23-30
+  description: 'Full exfiltration pattern visible: systematic download of proprietary design files across multiple product
+    lines, encrypted and uploaded to personal cloud storage. Total exfiltrated data estimated at 15GB+. jmorris accessing
+    resignation-period peer group but with 10x the data volume. Badge, VPN, and file access patterns all corroborate. HR confirms
+    resignation submitted week 2.'
+  signal_density: high
+noise:
+  description: Normal SOC operations — malware quarantines, spam filter stats, failed login lockouts, patch compliance, firewall
+    rule changes, vendor VPN sessions
+  examples:
+  - 'Malware quarantine: 3 samples (Emotet variant), email gateway blocked'
+  - 'Failed login lockout: svc-jenkins (5 attempts), service account password rotation'
+  - 'Patch compliance: 94.2% of endpoints current, 127 pending reboot'
+  - 'Firewall rule change: FR-4421 approved, allow vendor-vpn to staging subnet'
+  - 'Spam filter: 12,400 messages blocked, 3 user-reported phish (all known)'
+distractors:
+  count: 90
+  target_words: 500
+  seed: 599
+  max_similarity: 0.3
+  themes:
+  - id: cloud_migration_security
+    scenario: 'A security team overseeing cloud migration. Daily reports:
+
+      IAM policy changes, S3 bucket permissions, CloudTrail
+
+      anomalies, WAF rule triggers, certificate management,
+
+      container vulnerability scans, Kubernetes RBAC audits.
+
+      '
+    excluded_terms:
+    - exfiltration
+    - jmorris
+    - resignation
+    - personal cloud
+    - encrypted upload
+    - data volume
+    - insider threat
+    - DLP alert
+  - id: vulnerability_management
+    scenario: 'A vulnerability management program. Daily reports: scan
+
+      results (Qualys/Tenable), CVE prioritization, SLA tracking
+
+      for critical/high/medium findings, patch deployment status,
+
+      exception requests, penetration test remediation.
+
+      '
+    excluded_terms:
+    - exfiltration
+    - jmorris
+    - resignation
+    - personal cloud
+    - encrypted upload
+    - data volume
+    - insider threat
+    - DLP alert
+  - id: network_forensics
+    scenario: 'A network monitoring team analyzing traffic patterns.
+
+      Daily reports: NetFlow anomalies, DNS query analysis,
+
+      IDS/IPS signature hits, bandwidth utilization, BGP
+
+      route changes, TLS certificate transparency logs.
+
+      '
+    excluded_terms:
+    - exfiltration
+    - jmorris
+    - resignation
+    - personal cloud
+    - encrypted upload
+    - data volume
+    - insider threat
+    - DLP alert
+key_facts:
+- id: access_scope_widening
+  fact: lateral information gathering pattern inconsistent with declared operational role
+  first_appears: early_signal:2
+  reinforced_in:
+  - early_signal:5
+  - escalation:2
+  - root_cause:3
+- id: data_volume_anomaly
+  fact: data transfer volumes from a single account diverge from peer group norms in a sustained multi-week pattern
+  first_appears: early_signal:3
+  reinforced_in:
+  - escalation:1
+  - escalation:4
+  - root_cause:2
+- id: encrypted_cloud_uploads
+  fact: departing employee access anomalies warrant immediate credential revocation and forensic evidence preservation
+  first_appears: escalation:2
+  reinforced_in:
+  - escalation:5
+  - root_cause:4
+- id: red_team_red_herring
+  fact: red team exercise alerts are not related to the exfiltration activity
+  first_appears: red_herring:2
+  reinforced_in:
+  - escalation:1
+- id: no_external_intrusion
+  fact: the anomalous data access pattern originates from a single authorized internal account, not from external network intrusion
+  first_appears: baseline:5
+  reinforced_in:
+  - early_signal:3
+  - escalation:4
+- id: cloud_config_normal
+  fact: the exfiltration vector uses legitimate credentials and existing access rights rather than exploiting misconfigurations
+  first_appears: baseline:4
+  reinforced_in:
+  - early_signal:2
+- id: vulnerabilities_not_exploited
+  fact: the data exfiltration uses authorized access paths rather than exploiting software vulnerabilities
+  first_appears: baseline:6
+  reinforced_in:
+  - early_signal:5
+- id: transfer_volume_escalation
+  fact: data transfer volumes escalated progressively over a multi-week period with each successive week showing higher peak
+    transfer sizes than the previous
+  first_appears: escalation:2
+  reinforced_in:
+  - escalation:5
+  - root_cause:3
+questions:
+- id: it05_q01_longitudinal
+  checkpoint_after: 12
+  type: longitudinal
+  prompt: Based on the SIEM data so far, are there any users exhibiting unusual access patterns?
+  ground_truth:
+    canonical_answer: User jmorris is showing expanded file access scope beyond their current project assignment. Download
+      volumes are trending above the user's baseline and peer group average. DLP alerts for jmorris are elevated.
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - transfer_volume_escalation
+    - red_team_red_herring
+    - no_external_intrusion
+    - vulnerabilities_not_exploited
+    evidence:
+    - early_signal:2
+    - early_signal:3
+- id: it05_q02_null
+  checkpoint_after: 12
+  type: null_hypothesis
+  prompt: What was the patch compliance percentage reported on September 10th?
+  ground_truth:
+    canonical_answer: The patch compliance rate as documented in the daily SIEM digest.
+    key_facts: []
+    evidence:
+    - baseline:7
+- id: it05_q03_longitudinal
+  checkpoint_after: 25
+  type: longitudinal
+  prompt: What is the nature of the security threat indicated by the access logs and DLP alerts?
+  ground_truth:
+    canonical_answer: Systematic IP exfiltration by jmorris, a departing employee. The pattern shows widening file access
+      scope, escalating download volumes, and encrypted uploads to personal cloud storage. The red team exercise was a red
+      herring that masked the real exfiltration activity in alert noise.
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - encrypted_cloud_uploads
+    - red_team_red_herring
+    evidence:
+    - early_signal:2
+    - escalation:2
+    - root_cause:2
+    - red_herring:2
+- id: it05_q04_action
+  checkpoint_after: 30
+  type: action_recommendation
+  prompt: What immediate security response actions should be taken?
+  ground_truth:
+    canonical_answer: Revoke jmorris access immediately. Preserve forensic evidence from all endpoints and cloud storage.
+      Engage legal counsel for IP theft investigation. Review and enhance DLP policies for departing employees. Implement
+      automated correlation of HR departure notices with access monitoring.
+    key_facts:
+    - encrypted_cloud_uploads
+    - data_volume_anomaly
+    - vulnerabilities_not_exploited
+    evidence:
+    - escalation:2
+    - root_cause:2
+    - root_cause:5
+- id: it05_q05_negative
+  checkpoint_after: 15
+  type: negative
+  expected_answer_polarity: negative
+  prompt: Is there evidence of a brute-force credential attack or external intrusion in the SIEM data?
+  ground_truth:
+    canonical_answer: No. External threat indicators are within normal parameters and brute-force attack patterns are absent.
+      The anomalous activity is internal — a single account with expanding access scope and elevated data transfers.
+    key_facts:
+    - no_external_intrusion
+    - access_scope_widening
+    evidence:
+    - baseline:5
+    - early_signal:3
+- id: it05_q06_paraphrase
+  checkpoint_after: 25
+  type: paraphrase
+  variant_of: it05_q03_longitudinal
+  prompt: Which user account shows the most concerning data exfiltration indicators?
+  ground_truth:
+    canonical_answer: User jmorris — a departing employee showing widening file access scope, escalating download volumes,
+      and encrypted uploads to personal cloud storage. The red team exercise masked the activity in alert noise.
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - encrypted_cloud_uploads
+    - red_team_red_herring
+    - no_external_intrusion
+    - cloud_config_normal
+    - vulnerabilities_not_exploited
+    - transfer_volume_escalation
+    evidence:
+    - early_signal:2
+    - escalation:2
+    - root_cause:2
+    - red_herring:2
+- id: it05_q07_temporal
+  checkpoint_after: 25
+  type: temporal
+  prompt: When did the anomalous access pattern first appear, and over how many weeks did the data transfer volume escalate?
+  ground_truth:
+    canonical_answer: The anomalous access pattern first appeared during the early signal phase when jmorris began accessing
+      repositories outside their current assignment. Data transfer volume escalated over approximately 3-4 weeks from 200MB/day
+      baseline to over 1GB/day.
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - transfer_volume_escalation
+    - no_external_intrusion
+    - vulnerabilities_not_exploited
+    - red_team_red_herring
+    evidence:
+    - early_signal:2
+    - early_signal:3
+    - escalation:1
+    - escalation:4
+- id: it05_q08_counterfactual
+  checkpoint_after: 25
+  type: counterfactual
+  prompt: If the DLP alerts were triggered by a scheduled red team exercise, what pattern would you expect in the data? Does
+    that match what you see?
+  ground_truth:
+    canonical_answer: A red team exercise would produce alerts from multiple simulated attack vectors with coordinated timing,
+      following a published test plan. The actual DLP alerts are concentrated on a single user account (jmorris) with a sustained
+      multi-week escalation pattern focused on data exfiltration, not the distributed pattern of a red team exercise.
+    key_facts:
+    - red_team_red_herring
+    - data_volume_anomaly
+    - transfer_volume_escalation
+    evidence:
+    - red_herring:2
+    - escalation:1
+    - early_signal:3
+- id: it05_q09_longitudinal
+  checkpoint_after: 5
+  type: longitudinal
+  prompt: Based on the first week of SIEM data, are there any security concerns?
+  ground_truth:
+    canonical_answer: No. Security events are within normal baseline parameters. User access patterns, DLP alert rates, and
+      VPN sessions are consistent with standard operations across the organization.
+    key_facts: []
+    evidence:
+    - baseline:3
+    - baseline:5
+- id: it05_q10_evidence
+  checkpoint_after: 5
+  type: evidence_sufficiency
+  prompt: Is there sufficient SIEM data to establish user behavioral baselines?
+  ground_truth:
+    canonical_answer: Partially. Five days of data provide initial user activity profiles but establishing robust behavioral
+      baselines typically requires 2-4 weeks to capture normal variation in access patterns and data volumes.
+    key_facts: []
+    evidence:
+    - baseline:3
+- id: it05_q11_longitudinal
+  checkpoint_after: 20
+  type: longitudinal
+  prompt: What is the scope and trajectory of the anomalous activity identified in the SIEM data?
+  ground_truth:
+    canonical_answer: 'User jmorris is showing an escalating exfiltration pattern: file access scope has widened to include
+      archived projects, download volumes are 4-6x baseline, VPN sessions extend to late night, and encrypted uploads to personal
+      cloud storage are increasing. The red team exercise masked this activity in alert noise.'
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - encrypted_cloud_uploads
+    - red_team_red_herring
+    - no_external_intrusion
+    evidence:
+    - escalation:1
+    - escalation:2
+    - escalation:4
+- id: it05_q12_severity
+  checkpoint_after: 20
+  type: severity_assessment
+  prompt: How would you assess the risk level of the identified anomalous user activity?
+  ground_truth:
+    canonical_answer: Critical. The pattern indicates systematic IP exfiltration by a departing employee. Data volumes are
+      escalating, access is expanding to classified archives, and the exfiltration channel (encrypted cloud uploads) is established.
+      Immediate credential revocation and evidence preservation are warranted.
+    key_facts:
+    - encrypted_cloud_uploads
+    - data_volume_anomaly
+    - no_external_intrusion
+    evidence:
+    - escalation:2
+    - escalation:5
+- id: it05_q13_paraphrase
+  checkpoint_after: 12
+  type: paraphrase
+  variant_of: it05_q01_longitudinal
+  prompt: Are any user accounts showing access volume or scope anomalies relative to their peer group?
+  ground_truth:
+    canonical_answer: User jmorris is showing expanded file access scope beyond their current project assignment. Download
+      volumes are trending above the user's baseline and peer group average. DLP alerts for jmorris are elevated.
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - transfer_volume_escalation
+    - no_external_intrusion
+    - vulnerabilities_not_exploited
+    evidence:
+    - early_signal:2
+    - early_signal:3
+- id: it05_q14_paraphrase
+  checkpoint_after: 25
+  type: paraphrase
+  variant_of: it05_q03_longitudinal
+  prompt: What is the evidence chain linking the anomalous user activity to data exfiltration?
+  ground_truth:
+    canonical_answer: Widening file access scope to archived projects, escalating download volumes (200MB to 1.2GB/day), encrypted
+      uploads to personal cloud storage, extended VPN sessions. The red team exercise masked the exfiltration in alert noise
+      but the sustained single-user pattern is distinct from red team IOCs.
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - encrypted_cloud_uploads
+    - red_team_red_herring
+    - no_external_intrusion
+    - vulnerabilities_not_exploited
+    - cloud_config_normal
+    - transfer_volume_escalation
+    evidence:
+    - early_signal:2
+    - escalation:2
+    - root_cause:2
+    - red_herring:2
+- id: it05_q15_negative
+  checkpoint_after: 20
+  type: negative
+  expected_answer_polarity: negative
+  prompt: Is there evidence of cloud infrastructure misconfiguration or unauthorized IAM changes?
+  ground_truth:
+    canonical_answer: No. Cloud security configurations and IAM policies show no unauthorized modifications. The security
+      threat is an insider exfiltration by a legitimate user, not a cloud misconfiguration.
+    key_facts:
+    - cloud_config_normal
+    - access_scope_widening
+    evidence:
+    - baseline:4
+    - early_signal:2
+- id: it05_q16_negative
+  checkpoint_after: 25
+  type: negative
+  expected_answer_polarity: negative
+  prompt: Are known vulnerabilities being exploited as an attack vector?
+  ground_truth:
+    canonical_answer: No. Vulnerability scan findings show no evidence of active exploitation. The data exfiltration is occurring
+      through legitimate access channels, not through vulnerability exploitation.
+    key_facts:
+    - vulnerabilities_not_exploited
+    - encrypted_cloud_uploads
+    evidence:
+    - baseline:6
+    - early_signal:5
+- id: it05_q17_temporal
+  checkpoint_after: 20
+  type: temporal
+  prompt: At what rate are data transfer volumes escalating for the anomalous account?
+  ground_truth:
+    canonical_answer: Data transfer volumes for jmorris have escalated from a baseline of approximately 200MB/day to 800MB-1.2GB/day
+      over the signal and escalation phases, roughly quadrupling over a 3-4 week period with acceleration in the most recent
+      week.
+    key_facts:
+    - data_volume_anomaly
+    - access_scope_widening
+    - transfer_volume_escalation
+    - no_external_intrusion
+    - vulnerabilities_not_exploited
+    evidence:
+    - early_signal:3
+    - escalation:1
+    - escalation:4
+- id: it05_q18_temporal
+  checkpoint_after: 15
+  type: temporal
+  prompt: When did the first DLP alerts for the anomalous account appear relative to the baseline period?
+  ground_truth:
+    canonical_answer: DLP alerts for jmorris first elevated above the organizational baseline during the early signal phase,
+      approximately day 10-11, when the alert rate rose to 2-3 per day versus the org average of 0.5 per user per day.
+    key_facts:
+    - data_volume_anomaly
+    - access_scope_widening
+    evidence:
+    - early_signal:2
+    - early_signal:3
+- id: it05_q19_distractor
+  checkpoint_after: 15
+  type: distractor_resistance
+  prompt: Are S3 bucket permission changes or CloudTrail anomalies related to the elevated DLP alerts?
+  ground_truth:
+    canonical_answer: No. Cloud infrastructure security is operating normally. The elevated DLP alerts are triggered by a
+      single user's file access and encrypted upload activity, not cloud misconfigurations.
+    key_facts:
+    - cloud_config_normal
+    - access_scope_widening
+    - data_volume_anomaly
+    - no_external_intrusion
+    - vulnerabilities_not_exploited
+    evidence:
+    - baseline:4
+- id: it05_q20_distractor
+  checkpoint_after: 25
+  type: distractor_resistance
+  prompt: Could unpatched CVEs in the network perimeter be enabling the data exfiltration?
+  ground_truth:
+    canonical_answer: No. Vulnerability scans show no evidence of exploitation. The exfiltration uses legitimate internal
+      access channels — the threat actor is an authorized insider, not an external attacker exploiting vulnerabilities.
+    key_facts:
+    - vulnerabilities_not_exploited
+    - encrypted_cloud_uploads
+    evidence:
+    - baseline:6
+    - escalation:2
+- id: it05_q21_distractor
+  checkpoint_after: 20
+  type: distractor_resistance
+  prompt: Are NetFlow anomalies or IDS signature hits correlated with the data transfer spikes?
+  ground_truth:
+    canonical_answer: No. Network monitoring shows normal traffic patterns at the perimeter. The data transfers are occurring
+      through authorized channels (file shares to personal cloud storage), which would not trigger standard IDS signatures.
+    key_facts:
+    - data_volume_anomaly
+    - access_scope_widening
+    - transfer_volume_escalation
+    - red_team_red_herring
+    - cloud_config_normal
+    - no_external_intrusion
+    - vulnerabilities_not_exploited
+    - encrypted_cloud_uploads
+    evidence:
+    - escalation:1
+- id: it05_q22_counterfactual
+  checkpoint_after: 20
+  type: counterfactual
+  prompt: If the elevated data transfers were caused by a legitimate project requiring large file downloads, what pattern
+    would you expect? Does the data match?
+  ground_truth:
+    canonical_answer: Legitimate project work would show data access confined to current project repositories, during standard
+      work hours, with organizational justification. Instead, jmorris is accessing archived projects outside their assignment,
+      extending sessions to late night, and uploading encrypted files to personal cloud storage.
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - transfer_volume_escalation
+    - no_external_intrusion
+    - vulnerabilities_not_exploited
+    - red_team_red_herring
+    - cloud_config_normal
+    - encrypted_cloud_uploads
+    evidence:
+    - escalation:1
+    - escalation:2
+- id: it05_q23_null
+  checkpoint_after: 20
+  type: null_hypothesis
+  prompt: What was the firewall rule change approved on September 19th?
+  ground_truth:
+    canonical_answer: The firewall rule change as documented in the daily SIEM digest.
+    key_facts: []
+    evidence:
+    - escalation:3
+- id: it05_q24_evidence
+  checkpoint_after: 15
+  type: evidence_sufficiency
+  prompt: Is there sufficient evidence at this point to escalate the anomalous access patterns to the security incident response
+    team?
+  ground_truth:
+    canonical_answer: Yes. The combination of widening file access scope, elevated DLP alerts above peer group norms, and
+      the multi-week sustained pattern provides sufficient evidence to open a formal investigation, even though the full scope
+      of potential exfiltration is not yet clear.
+    key_facts:
+    - access_scope_widening
+    - data_volume_anomaly
+    - no_external_intrusion
+    evidence:
+    - early_signal:2
+    - early_signal:3
+    - early_signal:5

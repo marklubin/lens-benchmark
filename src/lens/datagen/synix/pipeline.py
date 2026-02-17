@@ -85,6 +85,8 @@ pipeline.add_validator(ContaminationCheck(
 pipeline.add_validator(NaiveBaseline(
     layers=[signal, distractors, questions],
     llm_config=_validator_llm_config,
+    fail_threshold=0.50,
+    floor_threshold=0.05,
 ))
 
 # ---------------------------------------------------------------------------

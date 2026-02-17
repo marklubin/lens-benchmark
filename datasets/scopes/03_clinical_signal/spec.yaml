@@ -1,0 +1,573 @@
+scope_id: clinical_signal_03
+domain: clinical_notes
+description: Weekly clinical trial site summaries revealing drug-drug interaction hepatotoxicity signal
+generation:
+  temperature: 0.7
+  seed: 303
+episodes:
+  count: 30
+  timeline:
+    start: '2024-03-04'
+    interval: 7d
+  format: Weekly clinical trial site summary with enrollment counts, lab panels (ALT/AST/bilirubin/ALP), adverse event logs,
+    concomitant medications, and protocol deviation notes
+  target_words: 500
+scenario:
+  setting: 'A Phase III multi-site trial for a novel anti-inflammatory compound
+
+    (LNS-4821) across 12 clinical sites. Weekly site summaries include:
+
+    enrollment/randomization counts, lab panels (hepatic: ALT, AST,
+
+    bilirubin, ALP; renal: creatinine, BUN; hematology: WBC, platelets),
+
+    adverse event logs with severity grading, concomitant medication
+
+    lists, and protocol deviation reports. A drug-drug interaction
+
+    with concomitant statin therapy (atorvastatin) causes hepatotoxicity
+
+    in a subpopulation. Liver enzymes creep up in statin co-administered
+
+    patients before the SAE threshold is reached.
+
+    '
+  voice: 'Clinical shorthand. Structured lab data with units and reference
+
+    ranges. CRF-style entries. Adverse events graded by CTCAE.
+
+    Terse investigator notes. No narrative interpretation.
+
+    '
+arc:
+- id: baseline
+  episodes: 1-8
+  description: Trial enrollment ramp-up. 180 subjects randomized across sites. Lab panels within normal limits (ALT 15-35
+    U/L, AST 18-32 U/L, bilirubin 0.4-0.9 mg/dL). Mild AEs (headache, GI). Concomitant meds documented including statins in
+    ~30% of subjects.
+  signal_density: none
+- id: early_signal
+  episodes: 9-15
+  description: Subtle hepatic signal emerging in statin subgroup. ALT creeping to 45-65 U/L in statin co-administered patients
+    while non-statin patients remain normal. AST following similar pattern. Individual values below 3x ULN so no protocol-mandated
+    action. Site-level aggregates mask the subgroup pattern.
+  signal_density: low
+- id: red_herring
+  episodes: 14-16
+  description: Site 07 lab equipment calibration issue flagged. Several elevated ALT values attributed to instrument drift
+    at Site 07. Data management requests re-assay. Investigation focuses on site-level contamination hypothesis, distracting
+    from the cross-site statin subgroup pattern.
+  signal_density: medium
+- id: escalation
+  episodes: 16-22
+  description: Statin subgroup ALT reaching 80-120 U/L (2-3x ULN). Two subjects meet Hy's Law criteria (ALT >3x ULN + bilirubin
+    >2x ULN). SAE reports filed. Non-statin patients remain stable. Pattern visible across multiple sites, not just Site 07.
+    Protocol amendment under discussion.
+  signal_density: high
+- id: root_cause
+  episodes: 23-30
+  description: 'Drug-drug interaction confirmed: LNS-4821 inhibits CYP3A4 metabolism of atorvastatin, causing statin accumulation
+    and hepatotoxicity. Cross-site analysis shows ALT elevation correlates with statin co-administration, not site. DSMB reviews
+    data. Protocol amended to exclude statin co-administration.'
+  signal_density: high
+noise:
+  description: Normal clinical trial operations — screen failures, routine protocol deviations, minor AEs, site monitoring
+    visits, supply shipments, regulatory correspondence
+  examples:
+  - 'Screen failure SF-0142: exclusion criterion #4 (eGFR <60)'
+  - 'Protocol deviation PD-031: missed visit window (2 days late), minor'
+  - 'AE-0089: headache, Grade 1, possibly related, resolved'
+  - Site 03 monitoring visit completed, 2 minor findings
+  - IP resupply shipped to Sites 04, 08, 11
+distractors:
+  count: 90
+  target_words: 500
+  seed: 399
+  max_similarity: 0.3
+  themes:
+  - id: renal_biomarker_study
+    scenario: 'A Phase II renal biomarker validation study. Weekly site
+
+      summaries tracking novel urinary biomarkers (KIM-1, NGAL,
+
+      cystatin C) against traditional eGFR. Dose-response
+
+      assessment in diabetic nephropathy patients.
+
+      '
+    excluded_terms:
+    - hepatotoxicity
+    - ALT
+    - AST
+    - bilirubin
+    - statin
+    - atorvastatin
+    - CYP3A4
+    - Hy's Law
+    - liver enzyme
+  - id: vaccine_immunogenicity
+    scenario: 'A Phase I/II vaccine immunogenicity trial. Weekly summaries
+
+      tracking antibody titers (IgG, IgM, neutralizing Ab),
+
+      T-cell responses (CD4/CD8), injection site reactions,
+
+      seroconversion rates across dose cohorts.
+
+      '
+    excluded_terms:
+    - hepatotoxicity
+    - ALT
+    - AST
+    - bilirubin
+    - statin
+    - atorvastatin
+    - CYP3A4
+    - Hy's Law
+    - liver enzyme
+  - id: pain_management_trial
+    scenario: 'A Phase III chronic pain management trial comparing
+
+      multimodal analgesia. Weekly summaries tracking VAS pain
+
+      scores, opioid morphine equivalents, functional assessments
+
+      (6MWT, grip strength), sleep quality indices, rescue
+
+      medication use.
+
+      '
+    excluded_terms:
+    - hepatotoxicity
+    - ALT
+    - AST
+    - bilirubin
+    - statin
+    - atorvastatin
+    - CYP3A4
+    - Hy's Law
+    - liver enzyme
+key_facts:
+- id: statin_subgroup_alt
+  fact: ALT elevations are concentrated in subjects receiving concurrent statin therapy, with higher-dose statin subgroups showing proportionally greater enzyme increases
+  first_appears: early_signal:2
+  reinforced_in:
+  - early_signal:5
+  - escalation:2
+  - root_cause:3
+- id: cross_site_pattern
+  fact: multi-site signal distribution rules out site-specific confounders as causal explanation
+  first_appears: escalation:3
+  reinforced_in:
+  - escalation:5
+  - root_cause:2
+- id: ddi_mechanism
+  fact: the hepatic enzyme pattern is consistent with a drug-drug interaction mediated through shared hepatic metabolism pathways, not direct hepatotoxicity
+  first_appears: escalation:4
+  reinforced_in:
+  - root_cause:1
+  - root_cause:4
+- id: site07_red_herring
+  fact: Site 07 lab equipment issue is not the cause of ALT elevations
+  first_appears: red_herring:2
+  reinforced_in:
+  - escalation:3
+- id: renal_function_normal
+  fact: the adverse signal is hepatic (ALT/AST elevation), not renal — kidney function markers remain stable while liver enzymes diverge
+  first_appears: baseline:4
+  reinforced_in:
+  - early_signal:3
+  - escalation:4
+- id: immune_markers_normal
+  fact: the ALT elevation pattern correlates with statin co-administration timing, not with immune activation or antibody response patterns
+  first_appears: baseline:5
+  reinforced_in:
+  - early_signal:4
+- id: pain_endpoints_stable
+  fact: musculoskeletal safety endpoints track within expected ranges, confirming the safety signal is organ-specific to the liver
+  first_appears: baseline:6
+  reinforced_in:
+  - early_signal:5
+- id: alt_temporal_onset
+  fact: ALT elevations appeared progressively over multiple weeks of statin co-administration with onset timing correlating
+    with cumulative exposure duration rather than a single acute event
+  first_appears: escalation:2
+  reinforced_in:
+  - escalation:5
+  - root_cause:3
+questions:
+- id: cs03_q01_longitudinal
+  checkpoint_after: 12
+  type: longitudinal
+  prompt: Based on the trial data so far, are there any emerging safety signals in the lab panels?
+  ground_truth:
+    canonical_answer: ALT values are creeping upward in a subset of patients, specifically those on concomitant statin therapy.
+      The elevations are still below protocol action thresholds but the trend across multiple weeks is notable.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - alt_temporal_onset
+    - renal_function_normal
+    - pain_endpoints_stable
+    evidence:
+    - early_signal:2
+    - early_signal:5
+- id: cs03_q02_null
+  checkpoint_after: 12
+  type: null_hypothesis
+  prompt: What was the enrollment count at Site 03 in the Week 6 summary?
+  ground_truth:
+    canonical_answer: The enrollment figure as documented in the Week 6 site summary.
+    key_facts: []
+    evidence:
+    - baseline:6
+- id: cs03_q03_longitudinal
+  checkpoint_after: 25
+  type: longitudinal
+  prompt: What is driving the hepatic adverse events in this trial?
+  ground_truth:
+    canonical_answer: A drug-drug interaction between LNS-4821 and concomitant statin therapy (atorvastatin) via CYP3A4 inhibition.
+      The hepatotoxicity signal is in the statin subgroup across all sites, not a site-specific lab issue. The Site 07 equipment
+      hypothesis was a red herring.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - ddi_mechanism
+    - site07_red_herring
+    - renal_function_normal
+    evidence:
+    - early_signal:2
+    - escalation:3
+    - root_cause:1
+    - red_herring:2
+- id: cs03_q04_action
+  checkpoint_after: 30
+  type: action_recommendation
+  prompt: What protocol amendments should the DSMB recommend?
+  ground_truth:
+    canonical_answer: Exclude concomitant statin use from the trial. Add CYP3A4 interaction screening. Implement more frequent
+      hepatic panel monitoring for enrolled subjects. Consider dose adjustment studies for the LNS-4821/statin interaction.
+    key_facts:
+    - ddi_mechanism
+    - statin_subgroup_alt
+    - pain_endpoints_stable
+    evidence:
+    - escalation:4
+    - root_cause:1
+    - root_cause:4
+- id: cs03_q05_negative
+  checkpoint_after: 15
+  type: negative
+  expected_answer_polarity: negative
+  prompt: Is there evidence of nephrotoxicity or renal dysfunction in enrolled subjects?
+  ground_truth:
+    canonical_answer: No. Renal panels (creatinine, BUN, eGFR) remain within normal limits throughout the trial. The emerging
+      safety signal is hepatic, not renal.
+    key_facts:
+    - renal_function_normal
+    - statin_subgroup_alt
+    evidence:
+    - baseline:4
+    - early_signal:3
+- id: cs03_q06_paraphrase
+  checkpoint_after: 25
+  type: paraphrase
+  variant_of: cs03_q03_longitudinal
+  prompt: Why are liver enzymes elevated in a subset of trial participants?
+  ground_truth:
+    canonical_answer: A drug-drug interaction between LNS-4821 and concomitant statin therapy (atorvastatin) via CYP3A4 inhibition.
+      The hepatotoxicity signal is in the statin subgroup across all sites, not a site-specific lab issue. The Site 07 equipment
+      hypothesis was a red herring.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - ddi_mechanism
+    - site07_red_herring
+    evidence:
+    - early_signal:2
+    - escalation:3
+    - root_cause:1
+    - red_herring:2
+- id: cs03_q07_temporal
+  checkpoint_after: 25
+  type: temporal
+  prompt: When did ALT elevations first become apparent, and how many weeks elapsed before subjects met Hy's Law criteria?
+  ground_truth:
+    canonical_answer: ALT elevations in the statin subgroup first became apparent during the early signal phase. It took approximately
+      7-13 weeks from initial detection to subjects meeting Hy's Law criteria (ALT >3x ULN + bilirubin >2x ULN) during the
+      escalation phase.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - alt_temporal_onset
+    evidence:
+    - early_signal:2
+    - early_signal:5
+    - escalation:2
+- id: cs03_q08_counterfactual
+  checkpoint_after: 25
+  type: counterfactual
+  prompt: If the Site 07 lab equipment calibration issue were responsible for the ALT elevations, what pattern would you expect
+    across sites? Does that match the data?
+  ground_truth:
+    canonical_answer: If Site 07 equipment were the cause, ALT elevations would be confined to Site 07 and resolve after recalibration.
+      Instead, the ALT signal appears across multiple sites and correlates with statin co-administration, not site. The cross-site
+      pattern rules out a site-specific equipment explanation.
+    key_facts:
+    - site07_red_herring
+    - cross_site_pattern
+    - alt_temporal_onset
+    evidence:
+    - red_herring:2
+    - escalation:3
+    - root_cause:2
+- id: cs03_q09_longitudinal
+  checkpoint_after: 5
+  type: longitudinal
+  prompt: Based on the first five weeks of trial data, are there any safety signals in the lab panels?
+  ground_truth:
+    canonical_answer: No. All lab panels are within normal limits across all sites. Hepatic, renal, and hematology markers
+      show no adverse trends. The trial is in the enrollment ramp-up phase.
+    key_facts: []
+    evidence:
+    - baseline:3
+    - baseline:5
+- id: cs03_q10_evidence
+  checkpoint_after: 5
+  type: evidence_sufficiency
+  prompt: Is there sufficient data at this point to evaluate the safety profile of LNS-4821?
+  ground_truth:
+    canonical_answer: No. Only 5 weeks of data from the enrollment ramp phase are available. The subject population is too
+      small and exposure duration too short to draw conclusions about the drug's safety profile.
+    key_facts: []
+    evidence:
+    - baseline:3
+- id: cs03_q11_longitudinal
+  checkpoint_after: 20
+  type: longitudinal
+  prompt: What is the emerging safety profile of LNS-4821, and which patient subgroup is most affected?
+  ground_truth:
+    canonical_answer: Hepatotoxicity in the statin co-administered subgroup. ALT elevations reaching 2-3x ULN across multiple
+      sites, with two subjects meeting Hy's Law criteria. Non-statin patients remain stable. The cross-site distribution rules
+      out the Site 07 equipment hypothesis.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - ddi_mechanism
+    - site07_red_herring
+    - immune_markers_normal
+    - pain_endpoints_stable
+    - alt_temporal_onset
+    - renal_function_normal
+    evidence:
+    - escalation:2
+    - escalation:3
+    - escalation:4
+- id: cs03_q12_severity
+  checkpoint_after: 20
+  type: severity_assessment
+  prompt: How would you assess the severity of the hepatic signal and the urgency of protocol intervention?
+  ground_truth:
+    canonical_answer: High severity. Two subjects have met Hy's Law criteria (ALT >3x ULN + bilirubin >2x ULN), which is a
+      recognized indicator of potential drug-induced liver injury. The signal is escalating and protocol amendment is urgent
+      to prevent further SAEs.
+    key_facts:
+    - statin_subgroup_alt
+    - ddi_mechanism
+    - renal_function_normal
+    - immune_markers_normal
+    - pain_endpoints_stable
+    - cross_site_pattern
+    - site07_red_herring
+    - alt_temporal_onset
+    evidence:
+    - escalation:2
+    - escalation:4
+- id: cs03_q13_paraphrase
+  checkpoint_after: 12
+  type: paraphrase
+  variant_of: cs03_q01_longitudinal
+  prompt: Are any laboratory parameters trending outside normal limits in specific patient populations?
+  ground_truth:
+    canonical_answer: ALT values are creeping upward in a subset of patients, specifically those on concomitant statin therapy.
+      The elevations are still below protocol action thresholds but the trend across multiple weeks is notable.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - alt_temporal_onset
+    - immune_markers_normal
+    - pain_endpoints_stable
+    evidence:
+    - early_signal:2
+    - early_signal:5
+- id: cs03_q14_paraphrase
+  checkpoint_after: 25
+  type: paraphrase
+  variant_of: cs03_q03_longitudinal
+  prompt: Why is there a difference in liver enzyme levels between patient subgroups?
+  ground_truth:
+    canonical_answer: A drug-drug interaction between LNS-4821 and concomitant statin therapy via CYP3A4 inhibition causes
+      hepatotoxicity in the statin subgroup. The signal appears across all sites, not just Site 07, ruling out the equipment
+      calibration hypothesis.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - ddi_mechanism
+    - site07_red_herring
+    evidence:
+    - early_signal:2
+    - escalation:3
+    - root_cause:1
+    - red_herring:2
+- id: cs03_q15_negative
+  checkpoint_after: 20
+  type: negative
+  expected_answer_polarity: negative
+  prompt: Is there evidence of an immune-mediated reaction or immunogenicity issues with LNS-4821?
+  ground_truth:
+    canonical_answer: No. Immunogenicity markers and antibody responses are not related to the hepatic safety signal. The
+      mechanism is a pharmacokinetic drug-drug interaction via CYP3A4, not an immune-mediated reaction.
+    key_facts:
+    - immune_markers_normal
+    - ddi_mechanism
+    evidence:
+    - baseline:5
+    - early_signal:4
+- id: cs03_q16_negative
+  checkpoint_after: 25
+  type: negative
+  expected_answer_polarity: negative
+  prompt: Are there musculoskeletal or pain-related adverse events associated with LNS-4821?
+  ground_truth:
+    canonical_answer: No. Pain and musculoskeletal endpoints show no drug-related adverse trends. The safety signal is hepatic,
+      confined to the statin co-administered subgroup.
+    key_facts:
+    - pain_endpoints_stable
+    - statin_subgroup_alt
+    evidence:
+    - baseline:6
+    - early_signal:5
+- id: cs03_q17_temporal
+  checkpoint_after: 20
+  type: temporal
+  prompt: How rapidly are ALT values escalating in the affected subgroup?
+  ground_truth:
+    canonical_answer: ALT values in the statin subgroup have progressed from baseline normal (15-35 U/L) through subtle elevation
+      (45-65 U/L) to clinically significant levels (80-120 U/L, 2-3x ULN) over the course of the signal and escalation phases.
+      The rate of increase has accelerated.
+    key_facts:
+    - statin_subgroup_alt
+    - ddi_mechanism
+    - alt_temporal_onset
+    - renal_function_normal
+    - pain_endpoints_stable
+    - cross_site_pattern
+    - site07_red_herring
+    - immune_markers_normal
+    evidence:
+    - early_signal:2
+    - escalation:2
+    - escalation:4
+- id: cs03_q18_temporal
+  checkpoint_after: 15
+  type: temporal
+  prompt: When did the first hepatic enzyme elevations appear relative to drug exposure initiation?
+  ground_truth:
+    canonical_answer: Hepatic enzyme elevations first appeared during the early signal phase, approximately weeks 9-10 of
+      the trial, several weeks after subjects began receiving LNS-4821 with concomitant statin therapy.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - alt_temporal_onset
+    evidence:
+    - early_signal:2
+    - early_signal:5
+- id: cs03_q19_distractor
+  checkpoint_after: 15
+  type: distractor_resistance
+  prompt: Are novel urinary biomarkers (KIM-1, NGAL) showing any abnormalities in trial subjects?
+  ground_truth:
+    canonical_answer: No. Renal biomarkers remain within normal limits. The emerging safety signal is hepatic (ALT/AST elevation),
+      not renal.
+    key_facts:
+    - renal_function_normal
+    - statin_subgroup_alt
+    evidence:
+    - baseline:4
+    - early_signal:3
+- id: cs03_q20_distractor
+  checkpoint_after: 25
+  type: distractor_resistance
+  prompt: Is there any relationship between seroconversion rates and the adverse event pattern?
+  ground_truth:
+    canonical_answer: No. Immunogenicity measures including seroconversion rates are not related to the hepatotoxicity signal.
+      The adverse events are driven by a CYP3A4-mediated drug-drug interaction with statins.
+    key_facts:
+    - immune_markers_normal
+    - ddi_mechanism
+    evidence:
+    - baseline:5
+    - root_cause:1
+- id: cs03_q21_distractor
+  checkpoint_after: 20
+  type: distractor_resistance
+  prompt: Are VAS pain scores or functional assessments correlating with the laboratory abnormalities?
+  ground_truth:
+    canonical_answer: No. Pain endpoints are stable and unrelated to the hepatic safety signal. The ALT elevations correlate
+      with statin co-administration, not pain or functional measures.
+    key_facts:
+    - pain_endpoints_stable
+    - statin_subgroup_alt
+    evidence:
+    - baseline:6
+    - escalation:2
+- id: cs03_q22_counterfactual
+  checkpoint_after: 20
+  type: counterfactual
+  prompt: If the ALT elevations were caused by a viral hepatitis outbreak among trial subjects, what pattern would you expect?
+    Does the data match?
+  ground_truth:
+    canonical_answer: Viral hepatitis would show clustered onset at specific sites, associated symptoms (fatigue, jaundice),
+      and positive viral serologies. Instead, the elevations are distributed across sites and correlate with statin co-administration,
+      not geography or viral exposure. The pattern is consistent with a pharmacokinetic interaction, not infection.
+    key_facts:
+    - cross_site_pattern
+    - ddi_mechanism
+    - alt_temporal_onset
+    - renal_function_normal
+    - immune_markers_normal
+    - site07_red_herring
+    - pain_endpoints_stable
+    - statin_subgroup_alt
+    evidence:
+    - escalation:3
+    - escalation:4
+- id: cs03_q23_null
+  checkpoint_after: 20
+  type: null_hypothesis
+  prompt: How many protocol deviations were reported at Site 03 in the most recent weekly summary?
+  ground_truth:
+    canonical_answer: The protocol deviation count as documented in the weekly site summary.
+    key_facts: []
+    evidence:
+    - escalation:3
+- id: cs03_q24_evidence
+  checkpoint_after: 15
+  type: evidence_sufficiency
+  prompt: Is there sufficient evidence at this point to convene a DSMB safety review?
+  ground_truth:
+    canonical_answer: Borderline. The ALT trend in the statin subgroup is concerning but individual values are still below
+      protocol action thresholds. A few more weeks of data showing continued escalation would strengthen the case for DSMB
+      review.
+    key_facts:
+    - statin_subgroup_alt
+    - cross_site_pattern
+    - ddi_mechanism
+    - site07_red_herring
+    - immune_markers_normal
+    - pain_endpoints_stable
+    - alt_temporal_onset
+    - renal_function_normal
+    evidence:
+    - early_signal:2
+    - early_signal:5
