@@ -110,3 +110,32 @@ Dataset scopes are defined in `spec.yaml` with:
 - Python 3.11+, type hints encouraged
 - Tests mirror source structure: `test_synix_transforms.py`, `test_synix_prompt_utils.py`, etc.
 - Don't commit `generated/logs/`, `generated/embeddings/`, `generated/.projection_cache.json`, or `generated_old/`
+
+## Status Report Protocol
+
+**Every session must update the project status report** at `docs/STATUS_REPORT.md`. This is a living document that tracks the project's current state.
+
+### When to Update
+
+At the **end of every session** that makes meaningful changes (code, benchmark runs, scoring, analysis). Update before the final commit.
+
+### What to Update
+
+1. **Header metadata**: Update `Last Updated` date, pipeline version, test count if changed.
+2. **Latest Benchmark Results**: If new runs were scored, update the composite scores table, metric breakdown, resource usage, and run IDs. Keep only the latest baseline results in the main section.
+3. **Analysis**: Update "What's Working" and "What Needs Attention" to reflect current state. Remove items that are fixed, add new findings.
+4. **Scoring Pipeline Changelog**: Add a row for any scoring changes made this session.
+5. **Next Steps**: Update priorities based on what was completed and what was discovered.
+6. **Session Log**: Append a row with today's date and a one-line summary of key changes.
+
+### What NOT to Do
+
+- Don't delete historical run data or analysis — move superseded results to an appendix or `docs/archive/` if needed.
+- Don't update the report for trivial changes (typo fixes, refactors with no behavioral change).
+- Don't duplicate the report — `docs/STATUS_REPORT.md` is the single canonical location.
+
+### Template for Session Log Entry
+
+```
+| YYYY-MM-DD | Brief session title | Key changes: what was built/fixed/run, notable findings |
+```
