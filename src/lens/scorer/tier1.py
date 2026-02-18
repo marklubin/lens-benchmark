@@ -129,7 +129,12 @@ class EvidenceCoverage(BaseMetric):
 
 @register_metric("budget_compliance")
 class BudgetCompliance(BaseMetric):
-    """1.0 if no budget violations, degrades by 0.1 per violation."""
+    """Observational metric — records token usage and wall time per run.
+
+    Not gated. The score is 1.0 - (violations / total_questions) which
+    gives the fraction of questions that stayed within budget, but the
+    primary value is the detailed stats in the ``details`` dict.
+    """
 
     @property
     def name(self) -> str:
@@ -141,18 +146,87 @@ class BudgetCompliance(BaseMetric):
 
     @property
     def description(self) -> str:
-        return "Budget compliance score — degrades by 0.1 per violation"
+        return "Budget compliance — observational (token/time stats)"
 
     def compute(self, result: RunResult) -> MetricResult:
         qrs = _all_question_results(result)
         total_violations = 0
+        total_tokens = 0
+        max_tokens = 0
+        total_wall_ms = 0.0
+        max_wall_ms = 0.0
         for qr in qrs:
             total_violations += len(qr.answer.budget_violations)
+            tokens = qr.answer.total_tokens
+            wall = qr.answer.wall_time_ms
+            total_tokens += tokens
+            if tokens > max_tokens:
+                max_tokens = tokens
+            total_wall_ms += wall
+            if wall > max_wall_ms:
+                max_wall_ms = wall
 
-        value = max(0.0, 1.0 - 0.1 * total_violations)
+        n = len(qrs) if qrs else 1
+        value = max(0.0, 1.0 - total_violations / n)
         return MetricResult(
             name=self.name,
             tier=self.tier,
             value=value,
-            details={"total_violations": total_violations},
+            details={
+                "total_questions": len(qrs),
+                "total_violations": total_violations,
+                "violation_rate": total_violations / n,
+                "total_tokens": total_tokens,
+                "avg_tokens_per_question": total_tokens / n,
+                "max_tokens_single_question": max_tokens,
+                "total_wall_time_minutes": round(total_wall_ms / 60_000, 2),
+                "avg_wall_time_ms": round(total_wall_ms / n, 1),
+                "max_wall_time_ms": round(max_wall_ms, 1),
+            },
+        )
+
+
+@register_metric("citation_coverage")
+class CitationCoverage(BaseMetric):
+    """Fraction of required_evidence_refs that appear in agent citations.
+
+    Measures whether the agent cited the correct evidence episodes.
+    Uses refs_cited (from tool calls + inline [ref_id] citations)
+    and valid_ref_ids to check against required_evidence_refs.
+    """
+
+    @property
+    def name(self) -> str:
+        return "citation_coverage"
+
+    @property
+    def tier(self) -> int:
+        return 1
+
+    @property
+    def description(self) -> str:
+        return "Fraction of required evidence refs cited by the agent"
+
+    def compute(self, result: RunResult) -> MetricResult:
+        qrs = _all_question_results(result)
+        if not qrs:
+            return MetricResult(name=self.name, tier=self.tier, value=0.0)
+
+        scores: list[float] = []
+        for qr in qrs:
+            required = set(qr.question.ground_truth.required_evidence_refs)
+            if not required:
+                scores.append(1.0)
+                continue
+            # Combine tool-call refs and inline citation refs
+            cited = set(qr.retrieved_ref_ids) | set(qr.valid_ref_ids)
+            overlap = required & cited
+            scores.append(len(overlap) / len(required))
+
+        value = sum(scores) / len(scores)
+        return MetricResult(
+            name=self.name,
+            tier=self.tier,
+            value=value,
+            details={"num_questions": len(scores)},
         )

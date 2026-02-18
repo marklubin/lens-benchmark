@@ -40,7 +40,7 @@ class AgentBudgetConfig:
     max_tool_calls: int = 20
     max_payload_bytes: int = 65536
     max_latency_per_call_ms: float = 5000
-    max_agent_tokens: int = 8192
+    max_agent_tokens: int = 32768
     ingest_max_latency_ms: float = 200
 
     @classmethod
@@ -65,7 +65,7 @@ class AgentBudgetConfig:
             max_tool_calls=20,
             max_payload_bytes=65536,
             max_latency_per_call_ms=5000,
-            max_agent_tokens=8192,
+            max_agent_tokens=32768,
             ingest_max_latency_ms=200,
         )
 
@@ -78,7 +78,7 @@ class AgentBudgetConfig:
             max_tool_calls=50,
             max_payload_bytes=131072,
             max_latency_per_call_ms=10000,
-            max_agent_tokens=16384,
+            max_agent_tokens=65536,
             ingest_max_latency_ms=200,
         )
 

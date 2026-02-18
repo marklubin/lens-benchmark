@@ -47,7 +47,6 @@ def run(
     )
     from lens.runner.runner import RunEngine
 
-    dataset = dataset or _default_dataset()
     verbosity = Verbosity(min(verbose + 1, 3))
     logger = LensLogger(verbosity)
 
@@ -58,11 +57,14 @@ def run(
     else:
         config = RunConfig(
             adapter=adapter,
-            dataset=dataset,
+            dataset=dataset or "",
             output_dir=output_dir,
             agent_budget=AgentBudgetConfig.from_preset(budget),
             seed=seed,
         )
+
+    # CLI --dataset overrides config; fall back to config.dataset; last resort: smoke
+    dataset = dataset or config.dataset or _default_dataset()
 
     # CLI overrides for LLM config
     if provider is not None:

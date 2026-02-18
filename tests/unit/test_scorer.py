@@ -198,13 +198,21 @@ class TestBudgetCompliance:
         qr = _make_qr(budget_violations=["turn limit exceeded"])
         result = _make_run([qr])
         mr = BudgetCompliance().compute(result)
-        assert mr.value == 0.9
-
-    def test_many_violations(self):
-        qr = _make_qr(budget_violations=[f"v{i}" for i in range(15)])
-        result = _make_run([qr])
-        mr = BudgetCompliance().compute(result)
+        # 1 question, 1 violation → 1 - 1/1 = 0.0
         assert mr.value == 0.0
+        assert mr.details["total_violations"] == 1
+        assert "total_tokens" in mr.details
+        assert "total_wall_time_minutes" in mr.details
+
+    def test_violation_rate(self):
+        qrs = [_make_qr(budget_violations=[]) for _ in range(9)]
+        qrs.append(_make_qr(budget_violations=["over budget"]))
+        result = _make_run(qrs)
+        mr = BudgetCompliance().compute(result)
+        # 10 questions, 1 violation → 1 - 1/10 = 0.9
+        assert mr.value == 0.9
+        assert mr.details["total_violations"] == 1
+        assert mr.details["violation_rate"] == 0.1
 
 
 class TestAnswerQuality:
@@ -496,6 +504,7 @@ class TestMetricRegistry:
             "fact_recall",
             "evidence_coverage",
             "budget_compliance",
+            "citation_coverage",
         }
         assert tier1_names.issubset(set(metrics.keys()))
 
@@ -555,15 +564,15 @@ class TestTier1Gate:
         score = compute_composite(metrics)
         assert score == 0.0
 
-    def test_gate_fails_budget_compliance(self):
-        """budget_compliance below threshold — composite is 0."""
+    def test_budget_compliance_not_gated(self):
+        """budget_compliance is observational — low value does NOT zero composite."""
         metrics = [
             MetricResult(name="evidence_grounding", tier=1, value=1.0),
             MetricResult(name="budget_compliance", tier=1, value=0.2),
             MetricResult(name="answer_quality", tier=2, value=1.0),
         ]
         score = compute_composite(metrics)
-        assert score == 0.0
+        assert score > 0.0
 
     def test_gate_custom_thresholds(self):
         """Custom gate thresholds override defaults."""
@@ -597,10 +606,9 @@ class TestTier1Gate:
         assert score > 0.0
 
     def test_default_gate_thresholds(self):
-        """Default gate thresholds are evidence_grounding=0.5, budget_compliance=0.5."""
+        """Default gate thresholds only gate evidence_grounding (budget is observational)."""
         assert TIER1_GATE_THRESHOLDS == {
             "evidence_grounding": 0.5,
-            "budget_compliance": 0.5,
         }
 
 

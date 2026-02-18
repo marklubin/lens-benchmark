@@ -18,14 +18,14 @@ class TestAgentBudgetConfig:
         assert config.preset == "standard"
         assert config.max_turns == 10
         assert config.max_tool_calls == 20
-        assert config.max_agent_tokens == 8192
+        assert config.max_agent_tokens == 32768
 
     def test_extended_preset(self):
         config = AgentBudgetConfig.extended()
         assert config.preset == "extended"
         assert config.max_turns == 20
         assert config.max_tool_calls == 50
-        assert config.max_agent_tokens == 16384
+        assert config.max_agent_tokens == 65536
 
     def test_from_preset(self):
         config = AgentBudgetConfig.from_preset("fast")

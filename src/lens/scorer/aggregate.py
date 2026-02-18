@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from lens.core.models import MetricResult, ScoreCard
 
-# Default v2 composite weights
+# Default v3 composite weights
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "evidence_grounding": 0.10,
-    "fact_recall": 0.10,
-    "evidence_coverage": 0.10,
-    "budget_compliance": 0.10,
+    "evidence_grounding": 0.08,
+    "fact_recall": 0.07,
+    "evidence_coverage": 0.08,
+    "budget_compliance": 0.07,
+    "citation_coverage": 0.10,
     "answer_quality": 0.15,
     "insight_depth": 0.15,
     "reasoning_quality": 0.10,
@@ -20,7 +21,9 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 # (LLM judge) from compensating for fundamental mechanical failures.
 TIER1_GATE_THRESHOLDS: dict[str, float] = {
     "evidence_grounding": 0.5,
-    "budget_compliance": 0.5,
+    # budget_compliance is observational only — not gated.
+    # Token usage and wall time are recorded in the metric details
+    # for analysis, but don't zero out the composite.
 }
 
 
@@ -71,9 +74,10 @@ def build_scorecard(
     budget_preset: str,
     metrics: list[MetricResult],
     weights: dict[str, float] | None = None,
+    gate_thresholds: dict[str, float] | None = None,
 ) -> ScoreCard:
     """Build a complete ScoreCard with composite score."""
-    composite = compute_composite(metrics, weights)
+    composite = compute_composite(metrics, weights, gate_thresholds=gate_thresholds)
     return ScoreCard(
         run_id=run_id,
         adapter=adapter,

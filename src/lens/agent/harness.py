@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 
 from lens.agent.budget_enforcer import BudgetEnforcement, BudgetViolation, QuestionBudget
@@ -13,15 +14,30 @@ answer the user's question by searching and retrieving information from memory.
 
 Instructions:
 - Use memory_search to find relevant information for the question.
-- Use memory_retrieve to get full document details when you need specifics. \
-Reference retrieved documents by their ref_id when citing evidence.
+- Use memory_retrieve to get full document details when you need specifics.
 - Use memory_capabilities to understand what the memory system offers, \
 including available search modes and filter fields.
 - Synthesize your findings into a clear, concise answer.
-- Cite evidence by referencing the ref_ids of retrieved documents.
+- IMPORTANT: For each claim in your answer, cite the supporting episode using \
+the format [ref_id]. Every factual statement must have at least one citation.
 - If you cannot find sufficient information, say so clearly.
 - You have a limited number of turns and tool calls. Use them efficiently.
 """
+
+
+def _extract_inline_refs(text: str) -> list[str]:
+    """Extract [ref_id] citations from answer text.
+
+    Matches patterns like [scope_name_ep_NNN] or (ref_id: scope_name_ep_NNN).
+    """
+    patterns = [
+        r'\[([a-z][a-z0-9_]*_ep_\d+)\]',              # [insider_threat_05_ep_007]
+        r'\(ref_id:\s*([a-z][a-z0-9_]*_ep_\d+)\)',     # (ref_id: insider_threat_05_ep_007)
+    ]
+    refs: list[str] = []
+    for pat in patterns:
+        refs.extend(re.findall(pat, text))
+    return list(dict.fromkeys(refs))  # deduplicate preserving order
 
 
 class AgentHarness:
@@ -142,6 +158,10 @@ class AgentHarness:
             turn_dict["tokens_used"] = turn.tokens_used
             serialized_turns.append(turn_dict)
 
+        # Merge inline [ref_id] citations with tool-call refs
+        inline_refs = _extract_inline_refs(answer_text)
+        all_refs = list(dict.fromkeys(refs_cited + inline_refs))
+
         return AgentAnswer(
             question_id=question_id,
             answer_text=answer_text,
@@ -150,5 +170,5 @@ class AgentHarness:
             total_tokens=total_tokens,
             wall_time_ms=wall_ms,
             budget_violations=list(enforcer.violations),
-            refs_cited=list(refs_cited),
+            refs_cited=all_refs,
         )

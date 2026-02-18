@@ -38,8 +38,9 @@ def _make_openai_judge(model: str, api_key: str | None = None):
 @click.option("--out", "output_path", default=None, help="Output scorecard path")
 @click.option("--tier", type=int, default=None, help="Only compute metrics of this tier")
 @click.option("--judge-model", default=None, help="OpenAI model for LLM judge (e.g. gpt-4o-mini)")
+@click.option("--no-gate", is_flag=True, help="Disable tier-1 hard gates (budget/grounding)")
 @click.option("-v", "--verbose", count=True)
-def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: str | None, verbose: int) -> None:
+def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: str | None, no_gate: bool, verbose: int) -> None:
     """Score a benchmark run."""
     from lens.artifacts.bundle import load_run_result
     from lens.core.errors import atomic_write
@@ -57,7 +58,11 @@ def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: 
         logger.info(f"Using LLM judge: {judge_model}")
         judge_fn = _make_openai_judge(judge_model)
 
-    scorer = ScorerEngine(tier_filter=tier, logger=logger, judge_fn=judge_fn)
+    gate_thresholds = {} if no_gate else None
+    scorer = ScorerEngine(
+        tier_filter=tier, logger=logger, judge_fn=judge_fn,
+        gate_thresholds=gate_thresholds,
+    )
     scorecard = scorer.score(result)
 
     # Determine output path

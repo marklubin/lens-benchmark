@@ -21,10 +21,12 @@ class ScorerEngine:
         tier_filter: int | None = None,
         logger: LensLogger | None = None,
         judge_fn: Callable[[str], str] | None = None,
+        gate_thresholds: dict[str, float] | None = None,
     ) -> None:
         self.tier_filter = tier_filter
         self.logger = logger or LensLogger(Verbosity.NORMAL)
         self.judge_fn = judge_fn
+        self.gate_thresholds = gate_thresholds
 
     def score(self, result: RunResult) -> ScoreCard:
         """Score a run result with all applicable metrics."""
@@ -52,6 +54,7 @@ class ScorerEngine:
             dataset_version=result.dataset_version,
             budget_preset=result.budget_preset,
             metrics=results,
+            gate_thresholds=self.gate_thresholds,
         )
 
         self.logger.info(f"Composite score: [bold]{scorecard.composite_score:.4f}[/bold]")
