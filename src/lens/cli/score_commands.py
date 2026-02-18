@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -9,12 +10,36 @@ from rich.console import Console
 console = Console()
 
 
+def _make_openai_judge(model: str, api_key: str | None = None):
+    """Create a judge_fn callable that uses OpenAI chat completions."""
+    import openai
+
+    key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LENS_LLM_API_KEY")
+    if not key:
+        raise click.ClickException(
+            "Judge requires an API key. Set OPENAI_API_KEY or LENS_LLM_API_KEY."
+        )
+    client = openai.OpenAI(api_key=key)
+
+    def judge_fn(prompt: str) -> str:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=10,
+        )
+        return resp.choices[0].message.content or "TIE"
+
+    return judge_fn
+
+
 @click.command()
 @click.option("--run", "run_dir", required=True, type=click.Path(exists=True), help="Run output directory")
 @click.option("--out", "output_path", default=None, help="Output scorecard path")
 @click.option("--tier", type=int, default=None, help="Only compute metrics of this tier")
+@click.option("--judge-model", default=None, help="OpenAI model for LLM judge (e.g. gpt-4o-mini)")
 @click.option("-v", "--verbose", count=True)
-def score(run_dir: str, output_path: str | None, tier: int | None, verbose: int) -> None:
+def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: str | None, verbose: int) -> None:
     """Score a benchmark run."""
     from lens.artifacts.bundle import load_run_result
     from lens.core.errors import atomic_write
@@ -27,7 +52,12 @@ def score(run_dir: str, output_path: str | None, tier: int | None, verbose: int)
     logger.info(f"Loading run from {run_dir}")
     result = load_run_result(run_dir)
 
-    scorer = ScorerEngine(tier_filter=tier, logger=logger)
+    judge_fn = None
+    if judge_model:
+        logger.info(f"Using LLM judge: {judge_model}")
+        judge_fn = _make_openai_judge(judge_model)
+
+    scorer = ScorerEngine(tier_filter=tier, logger=logger, judge_fn=judge_fn)
     scorecard = scorer.score(result)
 
     # Determine output path

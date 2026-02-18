@@ -82,7 +82,11 @@ def validate_dataset(data: dict) -> list[str]:
         if not isinstance(data["questions"], list):
             errors.append("'questions' must be a list")
         else:
-            valid_question_types = {"longitudinal", "null_hypothesis", "action_recommendation"}
+            valid_question_types = {
+                "longitudinal", "null_hypothesis", "action_recommendation",
+                "negative", "temporal", "paraphrase", "counterfactual",
+                "distractor_resistance", "severity_assessment", "evidence_sufficiency",
+            }
             seen_question_ids: set[str] = set()
             for i, q in enumerate(data["questions"]):
                 q_prefix = f"questions[{i}]"

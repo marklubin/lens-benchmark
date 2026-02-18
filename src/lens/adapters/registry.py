@@ -78,3 +78,4 @@ def _ensure_builtins() -> None:
     # These imports trigger the decorators
     import lens.adapters.null  # noqa: F401
     import lens.adapters.sqlite  # noqa: F401
+    import lens.adapters.sqlite_variants  # noqa: F401
