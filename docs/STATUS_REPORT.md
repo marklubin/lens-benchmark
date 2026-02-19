@@ -1,13 +1,13 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-19 (session 4)
+**Last Updated**: 2026-02-19 (session 5)
 **Scoring Pipeline**: v3.1 (pairwise judge + citation coverage + observational budget)
 **Agent LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Judge LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Token Cap**: 32,768 (standard preset)
 **Dataset**: 6 scopes, 144 questions, 720 episodes
-**Unit Tests**: 683 passing (unit/ only)
-**Adapters Tested**: 12 (8 systems on scope 01, 3 on full 6-scope)
+**Unit Tests**: 730 passing (unit/ only)
+**Adapters Tested**: 13 (9 systems on scope 01, 3 on full 6-scope)
 
 ---
 
@@ -17,7 +17,9 @@ LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluat
 
 **Current state**: Core infrastructure is feature-complete. We have 6 domain-diverse dataset scopes, a contamination-resistant two-stage data generation pipeline, a three-tier scoring system with pairwise LLM judging, and benchmark results across 3 SQLite-based retrieval variants. The scoring pipeline (v3.1) produces interpretable, non-zero composite scores that correctly rank retrieval strategies.
 
-**Key finding 1 — Letta is new SOTA**: Letta (formerly MemGPT) achieves **0.5308 composite** (Qwen3 judge), +6.8pp above chunked-hybrid+batch_retrieve (0.4970). Letta's semantic vector search over archival passages with a neutral storage prompt achieves perfect evidence_grounding (1.0), answer_quality 0.7239, reasoning_quality 0.9167, and insight_depth 0.8750 — the highest on all three Tier-2 metrics. Budget compliance 0.8333 (5/30 violations, all from ingest latency).
+**Key finding 1 — Letta is SOTA**: Letta (formerly MemGPT) achieves **0.5308 composite** (Qwen3 judge), +6.8pp above chunked-hybrid+batch_retrieve (0.4970). Letta's semantic vector search over archival passages with a neutral storage prompt achieves perfect evidence_grounding (1.0), answer_quality 0.7239, reasoning_quality 0.9167, and insight_depth 0.8750 — the highest on all three Tier-2 metrics. Budget compliance 0.8333 (5/30 violations, all from ingest latency).
+
+**Key finding 4 — Hindsight disappoints despite graph+temporal**: Hindsight (TEMPR: semantic + BM25 + graph + temporal, RRF-fused) scores **0.3511** — below Letta (0.5308) and even below mem0-raw (0.3690). The graph-based entity extraction during ingest makes each retain() call take 20–100s, causing 19/24 budget violations (budget_compliance=0.2083). Despite exposing `memory_reflect` (native longitudinal synthesis), the agent rarely used it. The Hindsight image is 17.3 GB and contains its own PostgreSQL. reasoning_quality matches Letta (0.9167) suggesting the underlying synthesis is strong, but evidence/citation coverage (0.1667) show the agent struggles to ground answers in Hindsight's reformatted text.
 
 **Key finding 2 — batch_retrieve**: SQLite chunked-hybrid + `batch_retrieve` achieves **0.4970 composite** (Qwen3 judge), beating mem0-raw (0.3690) by **+35%**. A single extra tool collapsed avg tool calls from ~41 → 3.2 (>12x reduction), driving budget_compliance from 0.00 → 0.79 and tripling evidence_coverage. All systems still show *negative* longitudinal advantage — the core signal LENS is designed to measure.
 
@@ -42,6 +44,7 @@ Single scope (cascading_failure_01), 30 episodes, 24 questions. Together AI (Qwe
 | sqlite-embedding-openai | 0.3891 | 0.5815 | 0.2323 | 0.2917 | 0.6667 | 0.8750 | 0.3264 | -0.4068 | `fef20b05d46b` |
 | mem0-raw | 0.3690 | 0.5707 | — | 0.7500 | 0.5417 | 0.9167 | 0.1562 | — | `830d711e5c17` |
 | sqlite-chunked-hybrid L=7 | 0.3670 | 0.6920 | — | 0.0000 | 0.5417 | 0.9167 | 0.2153 | — | `8b9e83ae9dec` |
+| hindsight | 0.3511 | 0.6687 | 0.2775 | 0.2083 | 0.6250 | 0.9167 | 0.1667 | -0.3311 | `040bb488abbd` |
 | sqlite-fts | 0.2837 | 0.4711 | 0.1914 | 0.3333 | 0.4583 | 0.7917 | 0.1840 | -0.5647 | `11d7bf53e4f0` |
 | mem0-extract | 0.0000 | — | — | — | — | — | — | — | `a119b4906684` |
 
@@ -176,7 +179,8 @@ Each scope: 24 questions across 10 types (longitudinal, temporal, paraphrase, se
 | `sqlite-hybrid` | BM25 + Ollama RRF | Complete |
 | `mem0-raw` | Semantic (Mem0 + Qdrant, no extraction) | **Benchmarked (scope 01)** — 0.3690 |
 | `mem0-extract` | Semantic (Mem0 + Qdrant, LLM extraction) | **Ran (scope 01): 0.0000** — `add(infer=True)` returns `{"results": []}` on structured log data; Mem0's extraction LLM finds no "personal memories" in operational metrics |
-| `letta` | Semantic (Letta archival passages, vector search) | **Benchmarked (scope 01)** — **0.5308, new SOTA** |
+| `letta` | Semantic (Letta archival passages, vector search) | **Benchmarked (scope 01)** — **0.5308, SOTA** |
+| `hindsight` | TEMPR: semantic + BM25 + graph + temporal, RRF | **Benchmarked (scope 01)** — **0.3511**. Graph entity extraction per retain() causes 20-100s ingest latency, 19/24 budget violations. reasoning_quality 0.9167 (matches Letta). 17.3 GB image. |
 
 ### Testing Infrastructure
 
@@ -187,6 +191,7 @@ Each scope: 24 questions across 10 types (longitudinal, temporal, paraphrase, se
 | **Metering proxy** (`tests/unit/test_metering.py`) | 9 tests (store, manager, HTTP endpoints) | All passing |
 | **Mem0 unit tests** (`tests/unit/test_mem0_adapter.py`) | 21 tests (mocked SDK, both strategies) | All passing |
 | **Letta unit tests** (`tests/unit/test_letta_adapter.py`) | 29 tests (mocked letta-client, full lifecycle) | All passing |
+| **Hindsight unit tests** (`tests/unit/test_hindsight_adapter.py`) | 47 tests (mocked hindsight-client, TEMPR+reflect lifecycle) | All passing |
 
 ### LLM Metering Proxy
 
@@ -271,9 +276,21 @@ This reverses the 6-scope full-dataset result where FTS (0.4519) and embedding (
 
 5. **Provider-agnostic infrastructure**. Together AI (Qwen3-235B + GTE-ModernBERT) works as a full OpenAI replacement for both agent and judge.
 
+#### Finding 4: Hindsight — good reasoning, terrible budget
+
+Hindsight scores 0.3511, placing 6th of 8 systems on scope 01. Its TEMPR multi-network retrieval (world, experience, opinion, observation epistemic layers) produces solid reasoning_quality (0.9167, tied with Letta) but fails on budget and coverage.
+
+**Root cause — ingest latency**: Hindsight's `retain()` makes LLM calls during ingest for entity extraction and graph construction. Each call takes 20–100s. Across 30 episodes, this pushes total wall time to 26 minutes (avg 65s/question vs ~14s for Letta). Budget compliance: 0.2083 (19/24 violations).
+
+**Root cause — text reformatting**: Hindsight transforms raw text into natural language. `[ep_001] 2024-01-01: p99 latency 320ms` becomes `On 2024-01-01, system latency was 320ms at p99`. The reformatted text loses the `[ep_id]` prefix, so document_id must be used as the episode identifier — the adapter correctly handles this. But the reformatted text loses numerical precision, and observation-type memory units (synthesized from multiple episodes) carry no document_id, requiring fallback parsing.
+
+**`memory_reflect` not adopted**: Despite the `memory_reflect` ExtraTool description emphasizing temporal synthesis, the agent only used it in ~2/24 questions. The reflect() call was helpful when used (generating high-quality synthesis), but the agent defaulted to `memory_search` + `batch_retrieve`. The budget pressure from ingest latency likely reduced the agent's willingness to add more tool calls.
+
+**Positive signals**: answer_quality 0.6687 shows the underlying LLM synthesis is good. evidence_grounding 0.6374 (passes hard gate) shows retrieval works. The negative longitudinal_advantage (-0.3311) matches other adapters — not worse. Hindsight's graph-based memory for structured telemetry is a promising architecture that suffers from an engineering mismatch (sync LLM calls in hot ingest path).
+
 ### What Needs Attention
 
-1. **longitudinal_advantage is negative for every system (-0.35 to -0.57)**. Agents score lower on synthesis questions than on null_hypothesis controls. No current adapter flips this positive — which is expected for naive RAG, but is the core thing LENS is measuring. A memory system with genuine temporal reasoning should be the first to cross zero.
+1. **longitudinal_advantage is negative for every system (-0.33 to -0.57)**. Agents score lower on synthesis questions than on null_hypothesis controls. No current adapter flips this positive — which is expected for naive RAG, but is the core thing LENS is measuring. A memory system with genuine temporal reasoning should be the first to cross zero.
 
 2. **fact_recall is low (0.18–0.25)**. Expected — key_facts use domain terms that agents paraphrase rather than quote. The judge-based answer_quality is the more accurate measure of correctness.
 
@@ -320,13 +337,16 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 5. **Add remaining memory system adapters**: Zep, LangChain, LlamaIndex following the 5-step onboarding pattern (adapter file → guarded import → unit tests → conformance → integration).
 
+6. **Hindsight with async ingest**: Hindsight's synchronous LLM calls in retain() are the bottleneck. If Hindsight exposes async retain (`aretain_batch`), use it to pipeline multiple episodes. Expected to reduce ingest time 5-10x and push budget_compliance above 0.6.
+
 ### Target Systems
 
 | System | Adapter Names | Metering? | Local Setup | Status |
 |--------|--------------|-----------|-------------|--------|
 | **Mem0** | `mem0-raw`, `mem0-extract` | extract only | Qdrant (Podman) | **mem0-raw benchmarked (scope 01, 0.3690)**; mem0-extract disqualified — extraction prompt hardcoded for personal assistant memory, scores 0.0000 on structured data |
 | **Zep** | `zep-raw`, `zep-summarize` | summarize only | Zep Docker | Not started |
-| **Letta** | `letta` | No | Letta Podman + embed proxy | **Benchmarked (scope 01, 0.5308) — new SOTA**. Requires: `podman run letta/letta`, `scripts/letta_embed_proxy.py`, two BYOK providers (together + together-oai). |
+| **Letta** | `letta` | No | Letta Podman + embed proxy | **Benchmarked (scope 01, 0.5308) — SOTA**. Requires: `podman run letta/letta`, `scripts/letta_embed_proxy.py`, two BYOK providers (together + together-oai). |
+| **Hindsight** | `hindsight` | No | Hindsight Podman (17.3 GB) | **Benchmarked (scope 01, 0.3511)**. TEMPR retrieval + reflect(). Budget compliance 0.2083 (LLM ingest overhead). Requires: `podman run ghcr.io/vectorize-io/hindsight:latest`, env vars `HINDSIGHT_API_{LLM,EMBEDDINGS_OPENAI}_*`. |
 | **LangChain** | `langchain-faiss`, `langchain-chroma` | No | In-process | Not started |
 | **LlamaIndex** | `llamaindex` | Index build only | In-process | Not started |
 
@@ -353,6 +373,7 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-19 | Hindsight adapter + benchmark | Built Hindsight (vectorize.io) adapter with TEMPR retrieval and `memory_reflect` ExtraTool (longitudinal synthesis). Key discoveries: image is 17.3 GB; correct env vars are `HINDSIGHT_API_EMBEDDINGS_OPENAI_*` (not generic `HINDSIGHT_API_EMBEDDINGS_*`); Hindsight reformats text so `document_id` must carry episode IDs. Ran scope 01: **0.3511 composite** — below SOTA. 19/24 budget violations from 20-100s ingest latency (LLM entity extraction during retain()). reasoning_quality 0.9167 matches Letta. 730 unit tests (+47 Hindsight tests). |
 | 2026-02-19 | Letta adapter + new SOTA | Built full Letta adapter (archival passages, vector search, batch_retrieve, neutral storage persona). Setup: Podman container (letta/letta + TOGETHER_API_KEY) + local embed proxy (port 7878, rewrites model names → GTE-ModernBERT, needed for Together AI embedding compat). Ran scope 01: **0.5308 composite** (new SOTA, +6.8pp vs chunked-hybrid+batch_retrieve). Key metrics: evidence_grounding=1.0, answer_quality=0.7239, reasoning_quality=0.9167, insight_depth=0.8750. 683 unit tests passing (+29 Letta tests). |
 | 2026-02-18 | Scope 01 sweep + mem0-extract investigation | Scored FTS (0.2837) and embedding (0.3891) with Qwen3 judge. Investigated mem0-extract's 0.0000 score: Mem0's `FACT_RETRIEVAL_PROMPT` is hardcoded for personal assistant memory ("Personal Information Organizer... names, preferences, dates") — correctly returns `{"facts":[]}` on telemetry, logs "No new facts retrieved, skipping", stores nothing. No config to override without forking. mem0-raw (infer=False) works fine at 0.3690. Full scope 01 ranking: chunked-hybrid+batch_retrieve (0.4970) > embedding (0.3891) > mem0-raw (0.3690) > hybrid-L7 (0.3670) > fts (0.2837) > mem0-extract (0.0000). |
 | 2026-02-18 | batch_retrieve breakthrough | Added `batch_retrieve` extra tool to sqlite-chunked-hybrid. Agent adopted it for 20/24 questions, cutting avg tool calls 41→3.2 (>12x). Composite: 0.3632→0.4970 (+35%), budget: 0.00→0.79, evidence_coverage: 0.22→0.46. Harness extended to track `ref_ids` from any tool. Fair comparison: chunked-hybrid beats mem0 by 35% (0.4970 vs 0.3690, same judge). OpenAI quota exhausted — all future scoring via Together AI (Qwen3-235B). |

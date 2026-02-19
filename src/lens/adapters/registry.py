@@ -87,3 +87,7 @@ def _ensure_builtins() -> None:
         import lens.adapters.letta  # noqa: F401
     except ImportError:
         pass  # letta-client not installed
+    try:
+        import lens.adapters.hindsight  # noqa: F401
+    except ImportError:
+        pass  # hindsight-client not installed
