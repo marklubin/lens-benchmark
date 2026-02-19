@@ -1,12 +1,12 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-19 (session 7)
+**Last Updated**: 2026-02-19 (session 8)
 **Scoring Pipeline**: v3.1 (pairwise judge + citation coverage + observational budget)
 **Agent LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Judge LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Token Cap**: 32,768 (standard preset)
 **Dataset**: 6 scopes, 144 questions, 720 episodes
-**Unit Tests**: 784 passing (unit/ only)
+**Unit Tests**: 788 passing (unit/ only)
 **Adapters Tested**: 17 (13 systems on scope 01, 4 on full 6-scope)
 
 ---
@@ -426,7 +426,9 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 5. **Add remaining memory system adapters**: Zep, LangChain, LlamaIndex following the 5-step onboarding pattern (adapter file → guarded import → unit tests → conformance → integration).
 
-6. **Hindsight with async ingest**: Hindsight's synchronous LLM calls in retain() are the bottleneck. If Hindsight exposes async retain (`aretain_batch`), use it to pipeline multiple episodes. Expected to reduce ingest time 5-10x and push budget_compliance above 0.6.
+6. **✅ DONE — Hindsight async ingest**: `ingest()` now buffers episodes; `prepare()` flushes via `aretain_batch()`. Expected to cut ingest time 5-10x and push budget_compliance above 0.6. 4 new tests added (`tests/unit/test_adapter_hindsight.py`). Run scope 01 to validate.
+
+7. **✅ DONE — Experiment orchestrator**: `scripts/benchmark_orchestrator.py` + `experiments/matrix.json` (30 experiments: 5 adapters × 6 scopes). Run with `python3 scripts/benchmark_orchestrator.py --dry-run` to preview. State tracking + resume support. Hindsight configs added for scopes 02–06.
 
 ### Target Systems
 
@@ -462,6 +464,7 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-19 | Orchestrator + Hindsight async ingest | Built `scripts/benchmark_orchestrator.py` (30-experiment matrix orchestrator: parallel group {mem0-raw, chunked-hybrid, hindsight} via ThreadPoolExecutor, serial group {letta, letta-sleepy} on main thread; state file with atomic writes, resume, --filter, --dry-run). Created `experiments/matrix.json` (all 30 experiments, env var templates). Fixed Hindsight adapter: `ingest()` now buffers; `prepare()` flushes via `aretain_batch()` (was 20-100s/episode × 30 episodes). Added 4 new batch-ingest tests. Created `configs/hindsight_scope{02-06}.json`. 788 unit tests (+4). |
 | 2026-02-19 | 4-adapter × 6-scope full matrix | Ran all 4 adapters (letta, letta-sleepy V3, mem0-raw, chunked-hybrid) across scopes 02–06 (20 new runs). **Results**: chunked-hybrid wins 4/6 scopes (mean 0.5656), letta wins 1/6 (mean 0.5266), V3 wins 1/6 (scope01 only, mean 0.4982). Key finding: V3 sleep synthesis is conditionally useful — helps when letta is weak (+0.0469 scope01, +0.1290 scope03) but hurts when letta is strong (−0.1385 scope04, −0.0899 scope06). Env var fixes: LETTA_EMBED_MODEL must be `together-oai/text-embedding-3-small` (not bare model name); mem0-raw needs MEM0_LLM_* vars + MEM0_EMBED_DIMS=768 + Qdrant reset before each domain. |
 | 2026-02-19 | letta-sleepy adapter + sleep prompt matrix | Built `letta-sleepy` adapter with 4 sleep prompt variants (V0 control, V1 minimal, V2 actionable-filter, V3 delta-causal). Ran all 4 on scope 01. **V3: 0.5776 composite — new SOTA**. V3 specifically: answer_quality=0.8225 (best of any adapter), reasoning_quality=1.0000, longitudinal_advantage=−0.1790 (least negative, closest to 0 ever). V1/V2 both hurt (0.4290, 0.4596 vs control 0.5402) — only delta/causal framing adds value. 784 unit tests (+54). Key insight: sleep synthesis acts as a navigation document, not a replacement for retrieval. |
 | 2026-02-19 | Hindsight adapter + benchmark | Built Hindsight (vectorize.io) adapter with TEMPR retrieval and `memory_reflect` ExtraTool (longitudinal synthesis). Key discoveries: image is 17.3 GB; correct env vars are `HINDSIGHT_API_EMBEDDINGS_OPENAI_*` (not generic `HINDSIGHT_API_EMBEDDINGS_*`); Hindsight reformats text so `document_id` must carry episode IDs. Ran scope 01: **0.3511 composite** — below SOTA. 19/24 budget violations from 20-100s ingest latency (LLM entity extraction during retain()). reasoning_quality 0.9167 matches Letta. 730 unit tests (+47 Hindsight tests). |

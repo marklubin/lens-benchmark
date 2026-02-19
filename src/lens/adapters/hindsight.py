@@ -80,6 +80,8 @@ class HindsightAdapter(MemoryAdapter):
         self._bank_id: str | None = None
         # Local text cache for retrieve(): episode_id -> full text
         self._text_cache: dict[str, str] = {}
+        # Buffer for batch ingest: episodes accumulated since last prepare() flush
+        self._pending_episodes: list[dict] = []
 
     def _get_client(self):
         if self._client is None:
@@ -103,6 +105,7 @@ class HindsightAdapter(MemoryAdapter):
         run_suffix = uuid.uuid4().hex[:8]
         self._bank_id = f"{scope_id}-{run_suffix}"
         self._text_cache = {}
+        self._pending_episodes = []
 
         client = self._get_client()
         try:
@@ -125,35 +128,58 @@ class HindsightAdapter(MemoryAdapter):
         text: str,
         meta: dict | None = None,
     ) -> None:
-        """Store an episode as a Hindsight memory unit."""
+        """Buffer an episode for batch ingest via prepare().
+
+        Episodes are accumulated and flushed as a batch in prepare() to avoid
+        the per-episode sync HTTP + LLM overhead (was 20-100s per episode).
+        """
         if not self._bank_id:
             raise AdapterError("reset() must be called before ingest()")
 
         content = f"[{episode_id}] {timestamp}: {text}"
-        client = self._get_client()
+
+        # Convert ISO timestamp string to datetime for Hindsight's temporal index
+        from datetime import datetime  # noqa: PLC0415
 
         try:
-            # Convert ISO timestamp string to datetime for Hindsight's temporal index
-            from datetime import datetime  # noqa: PLC0415
+            ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            ts = None
 
-            try:
-                ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                ts = None
-
-            # Pass episode_id as document_id so it's preserved in recall results.
-            # Hindsight reformats content text, so the [ep_id] prefix may not survive.
-            client.retain(
-                bank_id=self._bank_id,
-                content=content,
-                timestamp=ts,
-                document_id=episode_id,
-            )
-        except Exception as e:
-            raise AdapterError(f"Failed to retain episode {episode_id!r}: {e}") from e
+        # Buffer for batch flush in prepare()
+        self._pending_episodes.append({
+            "content": content,
+            "timestamp": ts,
+            "document_id": episode_id,
+        })
 
         # Cache full text for retrieve()
         self._text_cache[episode_id] = text
+
+    def prepare(self, scope_id: str, checkpoint: int) -> None:
+        """Flush buffered episodes to Hindsight via aretain_batch().
+
+        Called once per checkpoint. Sends all episodes buffered since the last
+        prepare() call as a single batch request instead of N serial requests.
+        """
+        if not self._pending_episodes or not self._bank_id:
+            return
+
+        import asyncio  # noqa: PLC0415
+
+        client = self._get_client()
+        try:
+            asyncio.run(
+                client.aretain_batch(
+                    bank_id=self._bank_id,
+                    items=self._pending_episodes,
+                    retain_async=False,
+                )
+            )
+        except Exception as e:
+            raise AdapterError(f"Batch ingest failed at checkpoint {checkpoint}: {e}") from e
+
+        self._pending_episodes = []
 
     def search(
         self,

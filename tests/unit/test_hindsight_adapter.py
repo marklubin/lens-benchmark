@@ -90,6 +90,16 @@ class MockHindsightClient:
         self._store.setdefault(bank_id, []).append((content, timestamp, document_id))
         return _MockRetainResponse()
 
+    async def aretain_batch(self, bank_id: str, items: list, document_id=None,
+                            retain_async: bool = False) -> _MockRetainResponse:
+        """Async batch ingest: flush buffered episodes into the mock store."""
+        for item in items:
+            content = item.get("content", "")
+            ts = item.get("timestamp")
+            doc_id = item.get("document_id")
+            self._store.setdefault(bank_id, []).append((content, ts, doc_id))
+        return _MockRetainResponse()
+
     def recall(self, bank_id: str, query: str, types=None, max_tokens: int = 4096,
                budget: str = "mid", trace: bool = False, query_timestamp=None,
                include_entities: bool = False, max_entity_tokens: int = 500,
@@ -210,6 +220,8 @@ class TestHindsightIngest:
         adapter = _make_adapter()
         adapter.reset("scope_01")
         adapter.ingest("ep_001", "scope_01", "2024-01-01T00:00:00", "CPU at 85%")
+        # Episodes are buffered; must call prepare() to flush to the mock store
+        adapter.prepare("scope_01", 5)
 
         entries = adapter._client._store.get(adapter._bank_id, [])
         assert len(entries) == 1
@@ -218,6 +230,7 @@ class TestHindsightIngest:
         adapter = _make_adapter()
         adapter.reset("scope_01")
         adapter.ingest("ep_001", "scope_01", "2024-01-01T00:00:00", "CPU at 85%")
+        adapter.prepare("scope_01", 5)
 
         content, _, doc_id = adapter._client._store[adapter._bank_id][0]
         assert content.startswith("[ep_001]")
@@ -225,10 +238,11 @@ class TestHindsightIngest:
         assert "CPU at 85%" in content
 
     def test_ingest_passes_document_id(self):
-        """retain() is called with document_id=episode_id for reliable episode mapping."""
+        """aretain_batch() is called with document_id=episode_id for reliable episode mapping."""
         adapter = _make_adapter()
         adapter.reset("scope_01")
         adapter.ingest("ep_001", "scope_01", "2024-01-01T00:00:00", "CPU at 85%")
+        adapter.prepare("scope_01", 5)
 
         _, _, doc_id = adapter._client._store[adapter._bank_id][0]
         assert doc_id == "ep_001"
@@ -253,29 +267,22 @@ class TestHindsightIngest:
         adapter.reset("scope_01")
         for i in range(5):
             adapter.ingest(f"ep_{i:03d}", "scope_01", f"2024-01-0{i+1}T00:00:00", f"Episode {i}")
+        # Must flush to the mock store before checking
+        adapter.prepare("scope_01", 5)
 
         entries = adapter._client._store[adapter._bank_id]
         assert len(entries) == 5
         assert len(adapter._text_cache) == 5
 
-    def test_ingest_passes_timestamp_to_retain(self):
-        """retain() should receive a datetime object parsed from the ISO string."""
+    def test_ingest_passes_timestamp_to_batch(self):
+        """ingest() should convert ISO timestamp to a datetime in the pending buffer."""
         adapter = _make_adapter()
         adapter.reset("scope_01")
-
-        retain_calls = []
-        original_retain = adapter._client.retain
-
-        def capture_retain(**kwargs):
-            retain_calls.append(kwargs)
-            return original_retain(**kwargs)
-
-        adapter._client.retain = capture_retain
         adapter.ingest("ep_001", "scope_01", "2024-01-15T12:00:00", "Data")
 
-        assert len(retain_calls) == 1
-        # timestamp should be converted to a datetime (or None for invalid)
-        ts = retain_calls[0].get("timestamp")
+        # The timestamp is stored in the buffer before prepare() is called
+        assert len(adapter._pending_episodes) == 1
+        ts = adapter._pending_episodes[0].get("timestamp")
         if ts is not None:
             from datetime import datetime
             assert isinstance(ts, datetime)
@@ -303,10 +310,12 @@ class TestHindsightSearch:
         adapter = _make_adapter()
         adapter.reset("scope_01")
         adapter.ingest("ep_001", "scope_01", "2024-01-01T00:00:00", "CPU spike detected")
+        # Must flush buffered episodes before searching
+        adapter.prepare("scope_01", 5)
 
         results = adapter.search("CPU")
         assert len(results) >= 1
-        # ref_id should come from document_id set during retain
+        # ref_id should come from document_id set during aretain_batch
         assert results[0].ref_id == "ep_001"
 
     def test_search_empty_query_returns_empty(self):
