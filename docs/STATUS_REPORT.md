@@ -1,13 +1,13 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-19 (session 5)
+**Last Updated**: 2026-02-19 (session 6)
 **Scoring Pipeline**: v3.1 (pairwise judge + citation coverage + observational budget)
 **Agent LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Judge LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Token Cap**: 32,768 (standard preset)
 **Dataset**: 6 scopes, 144 questions, 720 episodes
-**Unit Tests**: 730 passing (unit/ only)
-**Adapters Tested**: 13 (9 systems on scope 01, 3 on full 6-scope)
+**Unit Tests**: 784 passing (unit/ only)
+**Adapters Tested**: 17 (13 systems on scope 01, 3 on full 6-scope)
 
 ---
 
@@ -17,7 +17,9 @@ LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluat
 
 **Current state**: Core infrastructure is feature-complete. We have 6 domain-diverse dataset scopes, a contamination-resistant two-stage data generation pipeline, a three-tier scoring system with pairwise LLM judging, and benchmark results across 3 SQLite-based retrieval variants. The scoring pipeline (v3.1) produces interpretable, non-zero composite scores that correctly rank retrieval strategies.
 
-**Key finding 1 — Letta is SOTA**: Letta (formerly MemGPT) achieves **0.5308 composite** (Qwen3 judge), +6.8pp above chunked-hybrid+batch_retrieve (0.4970). Letta's semantic vector search over archival passages with a neutral storage prompt achieves perfect evidence_grounding (1.0), answer_quality 0.7239, reasoning_quality 0.9167, and insight_depth 0.8750 — the highest on all three Tier-2 metrics. Budget compliance 0.8333 (5/30 violations, all from ingest latency).
+**Key finding 5 — letta-sleepy V3 is new SOTA at 0.5776**: Adding a delta/causal sleep consolidation cycle to Letta pushes composite to **0.5776** (+8.8% over base Letta 0.5308). V3 achieves answer_quality 0.8225 (best of any adapter) and longitudinal_advantage **−0.1790** (closest to zero ever observed — up from −0.2822 for base Letta). Critical insight: prompt framing matters enormously — V1 (comprehensive summary) and V2 (actionable filter) both *hurt* relative to control (0.4290, 0.4596 vs 0.5402), while V3's delta/causal framing delivers the improvement. The synthesis guides the agent to retrieve the right specific episodes rather than forcing it to reconstruct temporal patterns from scratch.
+
+**Key finding 1 — Letta is SOTA (base)**: Letta (formerly MemGPT) achieves **0.5308 composite** (Qwen3 judge), +6.8pp above chunked-hybrid+batch_retrieve (0.4970). Letta's semantic vector search over archival passages with a neutral storage prompt achieves perfect evidence_grounding (1.0), answer_quality 0.7239, reasoning_quality 0.9167, and insight_depth 0.8750 — the highest on all three Tier-2 metrics. Budget compliance 0.8333 (5/30 violations, all from ingest latency).
 
 **Key finding 4 — Hindsight disappoints despite graph+temporal**: Hindsight (TEMPR: semantic + BM25 + graph + temporal, RRF-fused) scores **0.3511** — below Letta (0.5308) and even below mem0-raw (0.3690). The graph-based entity extraction during ingest makes each retain() call take 20–100s, causing 19/24 budget violations (budget_compliance=0.2083). Despite exposing `memory_reflect` (native longitudinal synthesis), the agent rarely used it. The Hindsight image is 17.3 GB and contains its own PostgreSQL. reasoning_quality matches Letta (0.9167) suggesting the underlying synthesis is strong, but evidence/citation coverage (0.1667) show the agent struggles to ground answers in Hindsight's reformatted text.
 
@@ -39,11 +41,15 @@ Single scope (cascading_failure_01), 30 episodes, 24 questions. Together AI (Qwe
 
 | Adapter | Composite | Answer Quality | Fact Recall | Budget | Insight Depth | Reason | Evid Cov | Long. Adv | Run ID |
 |---------|-----------|----------------|------------|--------|--------------|--------|---------|-----------|--------|
-| **letta** | **0.5308** | **0.7239** | 0.2611 | 0.8333 | **0.8750** | **0.9167** | 0.4722 | -0.2822 | `be0003e5447b` |
+| **letta-sleepy V3** | **0.5776** | **0.8225** | — | 0.9167 | 0.7083 | **1.0000** | 0.4410 | **-0.1790** | `8ef0786f0eb5` |
+| letta-sleepy V0 (control) | 0.5402 | 0.7068 | — | **1.0000** | 0.8750 | 0.9167 | 0.4583 | -0.2660 | `8c415eba299e` |
+| **letta** | 0.5308 | 0.7239 | 0.2611 | 0.8333 | **0.8750** | 0.9167 | **0.4722** | -0.2822 | `be0003e5447b` |
 | sqlite-chunked-hybrid + batch_retrieve | 0.4970 | 0.6552 | 0.2507 | **0.7917** | 0.7917 | **0.9583** | **0.4618** | -0.3465 | `8581429063e7` |
 | sqlite-embedding-openai | 0.3891 | 0.5815 | 0.2323 | 0.2917 | 0.6667 | 0.8750 | 0.3264 | -0.4068 | `fef20b05d46b` |
 | mem0-raw | 0.3690 | 0.5707 | — | 0.7500 | 0.5417 | 0.9167 | 0.1562 | — | `830d711e5c17` |
 | sqlite-chunked-hybrid L=7 | 0.3670 | 0.6920 | — | 0.0000 | 0.5417 | 0.9167 | 0.2153 | — | `8b9e83ae9dec` |
+| letta-sleepy V2 (actionable) | 0.4596 | 0.7456 | — | 1.0000 | 0.3750 | 0.9583 | 0.3160 | -0.2828 | `6e6e53e7581d` |
+| letta-sleepy V1 (minimal) | 0.4290 | 0.6569 | — | 1.0000 | 0.5000 | 1.0000 | 0.2569 | -0.3365 | `1cbe02135799` |
 | hindsight | 0.3511 | 0.6687 | 0.2775 | 0.2083 | 0.6250 | 0.9167 | 0.1667 | -0.3311 | `040bb488abbd` |
 | sqlite-fts | 0.2837 | 0.4711 | 0.1914 | 0.3333 | 0.4583 | 0.7917 | 0.1840 | -0.5647 | `11d7bf53e4f0` |
 | mem0-extract | 0.0000 | — | — | — | — | — | — | — | `a119b4906684` |
@@ -68,6 +74,8 @@ Single scope (cascading_failure_01), 30 episodes, 24 questions. Together AI (Qwe
 2. **Evidence coverage tripled** — 0.22 → 0.46 because batch_retrieve fetches multiple episodes in one call, giving the agent richer, more diverse context to cite.
 
 3. **insight_depth and reasoning_quality improved** — 0.54 → 0.79 and 0.92 → 0.96. Richer evidence context enables deeper synthesis and better reasoning chains.
+
+5. **letta-sleepy V3 finds the longitudinal signal**: delta/causal framing reduces longitudinal_advantage from −0.2822 → −0.1790, the least negative observed across all runs. The sleep synthesis identifies turning points and cross-component correlations, giving the agent a navigation document that guides which specific episodes to retrieve. V3 achieves answer_quality 0.8225 — best of any adapter. Evidence: V1/V2 hurt (0.4290, 0.4596 vs control 0.5402), showing that only causally-framed synthesis adds value.
 
 4. **Embedding outperforms FTS on scope 01** — sqlite-embedding-openai (0.3891) beats sqlite-fts (0.2837) by 37%. Semantic similarity maps better to operational metrics progression than BM25 keyword matching. Notably, FTS shows the worst longitudinal_advantage (-0.5647) of all systems.
 
@@ -181,6 +189,7 @@ Each scope: 24 questions across 10 types (longitudinal, temporal, paraphrase, se
 | `mem0-extract` | Semantic (Mem0 + Qdrant, LLM extraction) | **Ran (scope 01): 0.0000** — `add(infer=True)` returns `{"results": []}` on structured log data; Mem0's extraction LLM finds no "personal memories" in operational metrics |
 | `letta` | Semantic (Letta archival passages, vector search) | **Benchmarked (scope 01)** — **0.5308, SOTA** |
 | `hindsight` | TEMPR: semantic + BM25 + graph + temporal, RRF | **Benchmarked (scope 01)** — **0.3511**. Graph entity extraction per retain() causes 20-100s ingest latency, 19/24 budget violations. reasoning_quality 0.9167 (matches Letta). 17.3 GB image. |
+| `letta-sleepy` | Semantic (archival passages) + LLM sleep consolidation | **Benchmarked (scope 01, 4 variants)** — **V3: 0.5776 (SOTA)**. V0=0.5402, V1=0.4290, V2=0.4596, V3=0.5776. Delta/causal framing wins; minimal and filter framings hurt. Adds ~30-60s prepare() per checkpoint for LLM synthesis call. |
 
 ### Testing Infrastructure
 
@@ -192,6 +201,7 @@ Each scope: 24 questions across 10 types (longitudinal, temporal, paraphrase, se
 | **Mem0 unit tests** (`tests/unit/test_mem0_adapter.py`) | 21 tests (mocked SDK, both strategies) | All passing |
 | **Letta unit tests** (`tests/unit/test_letta_adapter.py`) | 29 tests (mocked letta-client, full lifecycle) | All passing |
 | **Hindsight unit tests** (`tests/unit/test_hindsight_adapter.py`) | 47 tests (mocked hindsight-client, TEMPR+reflect lifecycle) | All passing |
+| **Letta-sleepy unit tests** (`tests/unit/test_letta_sleepy_adapter.py`) | 54 tests (mocked letta + OpenAI clients, all 4 variants) | All passing |
 
 ### LLM Metering Proxy
 
@@ -288,9 +298,30 @@ Hindsight scores 0.3511, placing 6th of 8 systems on scope 01. Its TEMPR multi-n
 
 **Positive signals**: answer_quality 0.6687 shows the underlying LLM synthesis is good. evidence_grounding 0.6374 (passes hard gate) shows retrieval works. The negative longitudinal_advantage (-0.3311) matches other adapters — not worse. Hindsight's graph-based memory for structured telemetry is a promising architecture that suffers from an engineering mismatch (sync LLM calls in hot ingest path).
 
+#### Finding 5: Sleep consolidation — prompt framing determines value
+
+`letta-sleepy` V3 (delta/causal) scores 0.5776, a new SOTA. The four-variant matrix reveals that *how* you consolidate matters more than *whether* you consolidate:
+
+| Variant | Composite | LongAdv | Answer Q | EvidGrnd | Insight |
+|---------|-----------|---------|---------|---------|---------|
+| V0 — no sleep (control) | 0.5402 | -0.2660 | 0.7068 | 1.0000 | 0.8750 |
+| V1 — minimal summary | 0.4290 | -0.3365 | 0.6569 | 0.6974 | 0.5000 |
+| V2 — actionable filter | 0.4596 | -0.2828 | 0.7456 | 0.6825 | 0.3750 |
+| V3 — delta/causal | **0.5776** | **-0.1790** | **0.8225** | 0.7708 | 0.7083 |
+
+V1 and V2 both *hurt* relative to control. V3 is the only variant that beats it.
+
+**Why V1/V2 hurt**: A flat summary or a "what's important" filter produces a synthesis that is essentially a compressed episode list. It takes up one search-result slot without providing qualitatively different information than the episodes themselves. The synthesis displaces a passage result (evidence_grounding drops from 1.0 → 0.70), and the agent doesn't gain useful navigation toward specific episodes.
+
+**Why V3 wins**: The delta/causal prompt specifically asks for transitions, correlations, and turning-point episodes. The resulting synthesis says things like *"latency crossed 500ms at ep_012 correlating with auth-service errors beginning at ep_010; connection pool exhaustion appears at ep_018"*. This acts as a navigation document — the agent reads the synthesis, knows exactly which episodes to retrieve, and calls `batch_retrieve(["ep_010","ep_012","ep_018"])`. Retrieval is more targeted and answers are more precise.
+
+**longitudinal_advantage −0.1790** is the closest to zero of any system tested. It's still negative, but V3 is measurably approaching the theoretical floor where more episodes helps rather than hurts. V3's reasoning_quality reaches 1.0 (perfect on all questions where grounding passes).
+
+**The fairness check holds**: V3's synthesis is produced without any knowledge of the specific benchmark questions, using only the same data the agent has access to and the same LLM. The only difference from base Letta is that cross-episode patterns have been pre-organised causally.
+
 ### What Needs Attention
 
-1. **longitudinal_advantage is negative for every system (-0.33 to -0.57)**. Agents score lower on synthesis questions than on null_hypothesis controls. No current adapter flips this positive — which is expected for naive RAG, but is the core thing LENS is measuring. A memory system with genuine temporal reasoning should be the first to cross zero.
+1. **longitudinal_advantage is still negative for all systems (−0.18 to −0.57)**. Agents score lower on synthesis questions than on null_hypothesis controls. No current adapter flips this positive — which is expected for naive RAG, but is the core thing LENS is measuring. A memory system with genuine temporal reasoning should be the first to cross zero.
 
 2. **fact_recall is low (0.18–0.25)**. Expected — key_facts use domain terms that agents paraphrase rather than quote. The judge-based answer_quality is the more accurate measure of correctness.
 
@@ -327,7 +358,9 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 ### Immediate
 
-1. **Scale Letta to all 6 scopes** — highest priority. Letta at 0.5308 on scope 01 (Qwen3 judge) is the new SOTA. Running all 6 scopes establishes whether this advantage is consistent across domains.
+1. **Scale letta-sleepy V3 to all 6 scopes** — new SOTA (0.5776). Verify delta/causal framing generalises across domains (finance, pharma, environmental, cybersecurity, markets). If V3 holds, it confirms that causal synthesis is domain-agnostic.
+
+2. **Scale base Letta to all 6 scopes** — highest priority. Letta at 0.5308 on scope 01 (Qwen3 judge) is the new SOTA. Running all 6 scopes establishes whether this advantage is consistent across domains.
 
 2. **Add `batch_retrieve` to letta + mem0-raw** — harness already supports `ref_ids` tracking from any tool. Expected to improve budget_compliance for Letta (currently 0.8333, violations from 400ms+ ingest latency, not tool calls). Mem0-raw should improve from 0.3690 toward 0.45+.
 
@@ -373,6 +406,7 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-19 | letta-sleepy adapter + sleep prompt matrix | Built `letta-sleepy` adapter with 4 sleep prompt variants (V0 control, V1 minimal, V2 actionable-filter, V3 delta-causal). Ran all 4 on scope 01. **V3: 0.5776 composite — new SOTA**. V3 specifically: answer_quality=0.8225 (best of any adapter), reasoning_quality=1.0000, longitudinal_advantage=−0.1790 (least negative, closest to 0 ever). V1/V2 both hurt (0.4290, 0.4596 vs control 0.5402) — only delta/causal framing adds value. 784 unit tests (+54). Key insight: sleep synthesis acts as a navigation document, not a replacement for retrieval. |
 | 2026-02-19 | Hindsight adapter + benchmark | Built Hindsight (vectorize.io) adapter with TEMPR retrieval and `memory_reflect` ExtraTool (longitudinal synthesis). Key discoveries: image is 17.3 GB; correct env vars are `HINDSIGHT_API_EMBEDDINGS_OPENAI_*` (not generic `HINDSIGHT_API_EMBEDDINGS_*`); Hindsight reformats text so `document_id` must carry episode IDs. Ran scope 01: **0.3511 composite** — below SOTA. 19/24 budget violations from 20-100s ingest latency (LLM entity extraction during retain()). reasoning_quality 0.9167 matches Letta. 730 unit tests (+47 Hindsight tests). |
 | 2026-02-19 | Letta adapter + new SOTA | Built full Letta adapter (archival passages, vector search, batch_retrieve, neutral storage persona). Setup: Podman container (letta/letta + TOGETHER_API_KEY) + local embed proxy (port 7878, rewrites model names → GTE-ModernBERT, needed for Together AI embedding compat). Ran scope 01: **0.5308 composite** (new SOTA, +6.8pp vs chunked-hybrid+batch_retrieve). Key metrics: evidence_grounding=1.0, answer_quality=0.7239, reasoning_quality=0.9167, insight_depth=0.8750. 683 unit tests passing (+29 Letta tests). |
 | 2026-02-18 | Scope 01 sweep + mem0-extract investigation | Scored FTS (0.2837) and embedding (0.3891) with Qwen3 judge. Investigated mem0-extract's 0.0000 score: Mem0's `FACT_RETRIEVAL_PROMPT` is hardcoded for personal assistant memory ("Personal Information Organizer... names, preferences, dates") — correctly returns `{"facts":[]}` on telemetry, logs "No new facts retrieved, skipping", stores nothing. No config to override without forking. mem0-raw (infer=False) works fine at 0.3690. Full scope 01 ranking: chunked-hybrid+batch_retrieve (0.4970) > embedding (0.3891) > mem0-raw (0.3690) > hybrid-L7 (0.3670) > fts (0.2837) > mem0-extract (0.0000). |
