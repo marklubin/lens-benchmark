@@ -1,13 +1,13 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-19 (session 6)
+**Last Updated**: 2026-02-19 (session 7)
 **Scoring Pipeline**: v3.1 (pairwise judge + citation coverage + observational budget)
 **Agent LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Judge LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Token Cap**: 32,768 (standard preset)
 **Dataset**: 6 scopes, 144 questions, 720 episodes
 **Unit Tests**: 784 passing (unit/ only)
-**Adapters Tested**: 17 (13 systems on scope 01, 3 on full 6-scope)
+**Adapters Tested**: 17 (13 systems on scope 01, 4 on full 6-scope)
 
 ---
 
@@ -17,7 +17,9 @@ LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluat
 
 **Current state**: Core infrastructure is feature-complete. We have 6 domain-diverse dataset scopes, a contamination-resistant two-stage data generation pipeline, a three-tier scoring system with pairwise LLM judging, and benchmark results across 3 SQLite-based retrieval variants. The scoring pipeline (v3.1) produces interpretable, non-zero composite scores that correctly rank retrieval strategies.
 
-**Key finding 5 — letta-sleepy V3 is new SOTA at 0.5776**: Adding a delta/causal sleep consolidation cycle to Letta pushes composite to **0.5776** (+8.8% over base Letta 0.5308). V3 achieves answer_quality 0.8225 (best of any adapter) and longitudinal_advantage **−0.1790** (closest to zero ever observed — up from −0.2822 for base Letta). Critical insight: prompt framing matters enormously — V1 (comprehensive summary) and V2 (actionable filter) both *hurt* relative to control (0.4290, 0.4596 vs 0.5402), while V3's delta/causal framing delivers the improvement. The synthesis guides the agent to retrieve the right specific episodes rather than forcing it to reconstruct temporal patterns from scratch.
+**Key finding 6 — Full 6-scope matrix reveals sqlite-chunked-hybrid as most consistent adapter**: Across all 6 domains, `sqlite-chunked-hybrid` wins 4/6 scopes with cross-scope mean **0.5656** — outperforming both Letta (0.5266) and letta-sleepy V3 (0.4982). The sleep synthesis V3 wins only 2/6 scopes and underperforms letta in 4/6. Key insight: the V3 delta/causal synthesis is conditionally useful — it helps when letta's base retrieval is weak (scopes 01, 03: letta=0.5308, 0.3177), but hurts when letta is already performing well (scopes 04-06: letta=0.5942, 0.5723, 0.6027). The synthesis introduces navigational noise when retrieval is already confident.
+
+**Key finding 5 — letta-sleepy V3 is new SOTA at 0.5776 on scope 01**: Adding a delta/causal sleep consolidation cycle to Letta pushes composite to **0.5776** (+8.8% over base Letta 0.5308). V3 achieves answer_quality 0.8225 (best of any adapter) and longitudinal_advantage **−0.1790** (closest to zero ever observed — up from −0.2822 for base Letta). Critical insight: prompt framing matters enormously — V1 (comprehensive summary) and V2 (actionable filter) both *hurt* relative to control (0.4290, 0.4596 vs 0.5402), while V3's delta/causal framing delivers the improvement. The synthesis guides the agent to retrieve the right specific episodes rather than forcing it to reconstruct temporal patterns from scratch.
 
 **Key finding 1 — Letta is SOTA (base)**: Letta (formerly MemGPT) achieves **0.5308 composite** (Qwen3 judge), +6.8pp above chunked-hybrid+batch_retrieve (0.4970). Letta's semantic vector search over archival passages with a neutral storage prompt achieves perfect evidence_grounding (1.0), answer_quality 0.7239, reasoning_quality 0.9167, and insight_depth 0.8750 — the highest on all three Tier-2 metrics. Budget compliance 0.8333 (5/30 violations, all from ingest latency).
 
@@ -84,6 +86,62 @@ Single scope (cascading_failure_01), 30 episodes, 24 questions. Together AI (Qwe
 5. **Score discrimination is now irrelevant** — batch_retrieve works despite RRF's low scores (~0.03). The agent searches (low confidence → searches more), then batches all retrieves into one call. This is actually optimal: more search variety + fewer retrieve calls.
 
 **Note**: Scope-01 scores not directly comparable to full 6-scope results below (different LLM, provider, dataset scope).
+
+### Full 6-Scope Matrix — 4 Adapters × 6 Domains (2026-02-19)
+
+Together AI infrastructure (Qwen3-235B-A22B agent + judge, GTE-ModernBERT-base embeddings). All runs: 30 episodes, 24 questions, standard budget preset (32K tokens, 20 tool calls, 10 turns). Scored with same Qwen3 judge for cross-scope comparability.
+
+#### Composite Score Matrix
+
+| Scope | Domain | letta | letta-sleepy V3 | mem0-raw | chunked-hybrid |
+|-------|--------|-------|-----------------|----------|----------------|
+| 01 | cascading_failure | 0.5308 | **0.5776** | 0.3714 | 0.4970 |
+| 02 | financial_irregularity | 0.5420 | 0.4945 | 0.3822 | **0.5915** |
+| 03 | clinical_signal | 0.3177 | **0.4467** | 0.2267 | 0.4913 |
+| 04 | environmental_drift | 0.5942 | 0.4557 | 0.4150 | **0.6128** |
+| 05 | insider_threat | 0.5723 | 0.5020 | 0.3794 | **0.6061** |
+| 06 | market_regime | **0.6027** | 0.5127 | 0.3493 | 0.5949 |
+| **Mean** | | 0.5266 | 0.4982 | 0.3540 | **0.5656** |
+| **Rank** | | 2nd | 3rd | 4th | **1st** |
+
+#### Run IDs (6-scope matrix)
+
+| Scope | letta | letta-sleepy V3 | mem0-raw | chunked-hybrid |
+|-------|-------|-----------------|----------|----------------|
+| 01 | `be0003e5447b` | `8ef0786f0eb5` | `830d711e5c17` | `8581429063e7` |
+| 02 | `413f8720bc5e` | `9640157a5f46` | `4438fabdc805` | `e53fe0b780bd` |
+| 03 | `16c7109069f2` | `a70a0ec7d2f0` | `881ee9c69467` | `5651ffcdc3ce` |
+| 04 | `6a8ba4330bed` | `fdb19d860dab` | `1586a78a1774` | `9eebc450872b` |
+| 05 | `44b597f74624` | `8b0c6dcf2169` | `45a66bffefdd` | `6a01b08f081d` |
+| 06 | `97e6fe2e4a99` | `3434fea9ddd8` | `553c4cc5964f` | `22cca5d429eb` |
+
+#### V3 vs Letta Per Scope
+
+| Scope | V3 − letta | Winner |
+|-------|-----------|--------|
+| 01 cascading_failure | +0.0469 | V3 |
+| 02 financial_irregularity | −0.0475 | letta |
+| 03 clinical_signal | +0.1290 | V3 |
+| 04 environmental_drift | −0.1385 | letta |
+| 05 insider_threat | −0.0703 | letta |
+| 06 market_regime | −0.0899 | letta |
+| **V3 win rate** | | **2/6** |
+
+#### Key 6-scope Findings
+
+1. **chunked-hybrid is most consistent**: Wins 4/6 scopes, mean 0.5656. No external server, no LLM preprocessing, pure retrieval with batch_retrieve. The simplest architecture is the strongest overall.
+
+2. **letta-sleepy V3 is conditionally useful**: V3 helps only when base letta is struggling (scope 01: letta=0.5308, scope 03: letta=0.3177). When letta already performs well (scope 04: letta=0.5942), V3 hurts (−0.1385). The delta/causal synthesis adds navigational noise when retrieval is already confident.
+
+3. **V3 advantage correlates inversely with letta base score**: Linear correlation between letta score and V3 advantage is strongly negative — meaning synthesis is compensatory, not additive. Sleep consolidation is a patch for weak retrieval, not a universal enhancement.
+
+4. **mem0-raw is the most stable floor**: Consistent in the 0.22–0.42 range. No catastrophic failures, no domain-specific anomalies. Shows pure vector search over raw documents as a reliable baseline.
+
+5. **Scope 03 (clinical_signal) is hardest**: All adapters score lowest here. letta=0.3177, mem0-raw=0.2267. The clinical/pharmacological signal may involve subtle cross-episode correlations that require causal reasoning, making V3's synthesis (+0.1290) most impactful.
+
+6. **Scope 04/06 are easiest for retrieval-based systems**: chunked-hybrid 0.6128/0.5949, letta 0.5942/0.6027. Environmental and market signals may be more locally recoverable from single passages.
+
+---
 
 ### Full 6-Scope Baselines (2026-02-17)
 
@@ -358,13 +416,11 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 ### Immediate
 
-1. **Scale letta-sleepy V3 to all 6 scopes** — new SOTA (0.5776). Verify delta/causal framing generalises across domains (finance, pharma, environmental, cybersecurity, markets). If V3 holds, it confirms that causal synthesis is domain-agnostic.
+1. **✅ DONE — 6-scope matrix complete**: All 4 adapters × 6 scopes = 24 runs completed and scored. chunked-hybrid wins 4/6, letta 1/6, letta-sleepy V3 1/6. V3 advantage is conditional on letta weakness, not universal.
 
-2. **Scale base Letta to all 6 scopes** — highest priority. Letta at 0.5308 on scope 01 (Qwen3 judge) is the new SOTA. Running all 6 scopes establishes whether this advantage is consistent across domains.
+2. **letta-sleepy V4 with adaptive synthesis**: Based on 6-scope findings, V3's synthesis is a static one-shot compression at prepare() time. The hypothesis: synthesis should track what the agent *actually queries* and adapt its framing to what the specific scope reveals. A checkpoint-aware synthesis that evolves based on the query patterns seen so far could close the gap on scopes where V3 currently underperforms. This is the most promising research direction.
 
-2. **Add `batch_retrieve` to letta + mem0-raw** — harness already supports `ref_ids` tracking from any tool. Expected to improve budget_compliance for Letta (currently 0.8333, violations from 400ms+ ingest latency, not tool calls). Mem0-raw should improve from 0.3690 toward 0.45+.
-
-3. **Scale chunked-hybrid + batch_retrieve to all 6 scopes** — establishes definitive cross-domain baselines. All future runs via Together AI (Qwen3-235B judge, GTE-ModernBERT embeddings).
+3. **Add `batch_retrieve` to mem0-raw** — harness already supports `ref_ids` tracking from any tool. Expected to push mem0-raw from 0.35 toward 0.45+. Follow 5-step adapter pattern.
 
 4. **Run judge reliability analysis**: `scripts/judge_reliability.py` ready. Target: Cohen's kappa >= 0.6 across duplicate question pairs.
 
@@ -406,6 +462,7 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-19 | 4-adapter × 6-scope full matrix | Ran all 4 adapters (letta, letta-sleepy V3, mem0-raw, chunked-hybrid) across scopes 02–06 (20 new runs). **Results**: chunked-hybrid wins 4/6 scopes (mean 0.5656), letta wins 1/6 (mean 0.5266), V3 wins 1/6 (scope01 only, mean 0.4982). Key finding: V3 sleep synthesis is conditionally useful — helps when letta is weak (+0.0469 scope01, +0.1290 scope03) but hurts when letta is strong (−0.1385 scope04, −0.0899 scope06). Env var fixes: LETTA_EMBED_MODEL must be `together-oai/text-embedding-3-small` (not bare model name); mem0-raw needs MEM0_LLM_* vars + MEM0_EMBED_DIMS=768 + Qdrant reset before each domain. |
 | 2026-02-19 | letta-sleepy adapter + sleep prompt matrix | Built `letta-sleepy` adapter with 4 sleep prompt variants (V0 control, V1 minimal, V2 actionable-filter, V3 delta-causal). Ran all 4 on scope 01. **V3: 0.5776 composite — new SOTA**. V3 specifically: answer_quality=0.8225 (best of any adapter), reasoning_quality=1.0000, longitudinal_advantage=−0.1790 (least negative, closest to 0 ever). V1/V2 both hurt (0.4290, 0.4596 vs control 0.5402) — only delta/causal framing adds value. 784 unit tests (+54). Key insight: sleep synthesis acts as a navigation document, not a replacement for retrieval. |
 | 2026-02-19 | Hindsight adapter + benchmark | Built Hindsight (vectorize.io) adapter with TEMPR retrieval and `memory_reflect` ExtraTool (longitudinal synthesis). Key discoveries: image is 17.3 GB; correct env vars are `HINDSIGHT_API_EMBEDDINGS_OPENAI_*` (not generic `HINDSIGHT_API_EMBEDDINGS_*`); Hindsight reformats text so `document_id` must carry episode IDs. Ran scope 01: **0.3511 composite** — below SOTA. 19/24 budget violations from 20-100s ingest latency (LLM entity extraction during retain()). reasoning_quality 0.9167 matches Letta. 730 unit tests (+47 Hindsight tests). |
 | 2026-02-19 | Letta adapter + new SOTA | Built full Letta adapter (archival passages, vector search, batch_retrieve, neutral storage persona). Setup: Podman container (letta/letta + TOGETHER_API_KEY) + local embed proxy (port 7878, rewrites model names → GTE-ModernBERT, needed for Together AI embedding compat). Ran scope 01: **0.5308 composite** (new SOTA, +6.8pp vs chunked-hybrid+batch_retrieve). Key metrics: evidence_grounding=1.0, answer_quality=0.7239, reasoning_quality=0.9167, insight_depth=0.8750. 683 unit tests passing (+29 Letta tests). |
