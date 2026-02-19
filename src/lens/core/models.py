@@ -255,6 +255,7 @@ class CheckpointResult:
     validation_errors: list[str] = field(default_factory=list)
     budget_used: dict = field(default_factory=dict)
     timing: dict = field(default_factory=dict)
+    adapter_internal_tokens: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -264,6 +265,7 @@ class CheckpointResult:
             "validation_errors": self.validation_errors,
             "budget_used": self.budget_used,
             "timing": self.timing,
+            "adapter_internal_tokens": self.adapter_internal_tokens,
         }
 
     @classmethod
@@ -277,6 +279,7 @@ class CheckpointResult:
             validation_errors=d.get("validation_errors", []),
             budget_used=d.get("budget_used", {}),
             timing=d.get("timing", {}),
+            adapter_internal_tokens=d.get("adapter_internal_tokens", 0),
         )
 
 

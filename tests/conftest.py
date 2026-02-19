@@ -75,6 +75,16 @@ def sample_question_result(sample_question, sample_answer) -> QuestionResult:
 
 
 @pytest.fixture
+def mini_episodes() -> list[tuple[str, str, str, str]]:
+    """3 episodes for quick adapter validation: (ep_id, scope_id, timestamp, text)."""
+    return [
+        ("ep_001", "mini", "2024-01-01T00:00:00", "Server CPU usage at 45%. Memory 2.1GB. No alerts."),
+        ("ep_002", "mini", "2024-01-02T00:00:00", "CPU spike to 92%. Memory 3.8GB. Alert triggered."),
+        ("ep_003", "mini", "2024-01-03T00:00:00", "CPU normalized to 50%. Memory leak patched. Postmortem scheduled."),
+    ]
+
+
+@pytest.fixture
 def smoke_dataset_path() -> Path:
     """Path to the bundled smoke dataset."""
     return Path(__file__).parent.parent / "src" / "lens" / "datasets" / "smoke" / "smoke_dataset.json"

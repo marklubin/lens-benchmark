@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -21,6 +22,7 @@ from lens.core.models import (
     QuestionResult,
     RunResult,
 )
+from lens.metering.manager import MeteringManager
 from lens.runner.anticheat import EpisodeVault
 
 
@@ -38,6 +40,7 @@ class RunEngine:
         self.vault = EpisodeVault()
         self.run_id = uuid.uuid4().hex[:12]
         self.llm_client = llm_client or MockLLMClient()
+        self._metering: MeteringManager | None = None
 
     def run(
         self,
@@ -51,48 +54,68 @@ class RunEngine:
         )
 
         adapter_cls = get_adapter(self.config.adapter)
-        adapter = adapter_cls()
 
-        # Group questions by scope_id and checkpoint
-        questions = questions or []
-        q_index: dict[str, dict[int, list[Question]]] = {}
-        for q in questions:
-            q_index.setdefault(q.scope_id, {}).setdefault(q.checkpoint_after, []).append(q)
+        # Start metering proxy if adapter needs it
+        needs_metering = getattr(adapter_cls, "requires_metering", False)
+        original_base_url = os.environ.get("OPENAI_BASE_URL")
 
-        # Validate: every question's checkpoint_after must be reachable for its scope
-        scope_reachable: dict[str, set[int]] = {}
-        for scope_id, episodes in scopes.items():
-            reachable = set(self.config.checkpoints)
-            reachable.add(len(episodes))  # final episode is always a checkpoint
-            scope_reachable[scope_id] = reachable
-        for q in questions:
-            reachable = scope_reachable.get(q.scope_id, set())
-            if q.checkpoint_after not in reachable:
-                raise ConfigError(
-                    f"Question {q.question_id!r} targets checkpoint_after={q.checkpoint_after} "
-                    f"for scope {q.scope_id!r}, but that checkpoint is not reachable. "
-                    f"Reachable checkpoints: {sorted(reachable)}. "
-                    f"This question would be silently skipped."
-                )
+        if needs_metering:
+            self._metering = MeteringManager()
+            proxy_url = self._metering.start()
+            os.environ["OPENAI_BASE_URL"] = proxy_url
+            self.logger.info(f"Metering proxy started at {proxy_url}")
 
-        scope_results: list[ScopeResult] = []
+        try:
+            adapter = adapter_cls()
 
-        for scope_id, episodes in scopes.items():
-            self.logger.info(f"Scope [bold]{scope_id}[/bold]: {len(episodes)} episodes")
-            scope_questions = q_index.get(scope_id, {})
-            result = self._run_scope(adapter, scope_id, episodes, scope_questions)
-            scope_results.append(result)
+            # Group questions by scope_id and checkpoint
+            questions = questions or []
+            q_index: dict[str, dict[int, list[Question]]] = {}
+            for q in questions:
+                q_index.setdefault(q.scope_id, {}).setdefault(q.checkpoint_after, []).append(q)
 
-        run_result = RunResult(
-            run_id=self.run_id,
-            adapter=self.config.adapter,
-            dataset_version="",  # Set by caller
-            budget_preset=self.config.agent_budget.preset,
-            scopes=scope_results,
-        )
+            # Validate: every question's checkpoint_after must be reachable for its scope
+            scope_reachable: dict[str, set[int]] = {}
+            for scope_id, episodes in scopes.items():
+                reachable = set(self.config.checkpoints)
+                reachable.add(len(episodes))  # final episode is always a checkpoint
+                scope_reachable[scope_id] = reachable
+            for q in questions:
+                reachable = scope_reachable.get(q.scope_id, set())
+                if q.checkpoint_after not in reachable:
+                    raise ConfigError(
+                        f"Question {q.question_id!r} targets checkpoint_after={q.checkpoint_after} "
+                        f"for scope {q.scope_id!r}, but that checkpoint is not reachable. "
+                        f"Reachable checkpoints: {sorted(reachable)}. "
+                        f"This question would be silently skipped."
+                    )
 
-        self.logger.success(f"Run {self.run_id} complete")
-        return run_result
+            scope_results: list[ScopeResult] = []
+
+            for scope_id, episodes in scopes.items():
+                self.logger.info(f"Scope [bold]{scope_id}[/bold]: {len(episodes)} episodes")
+                scope_questions = q_index.get(scope_id, {})
+                result = self._run_scope(adapter, scope_id, episodes, scope_questions)
+                scope_results.append(result)
+
+            run_result = RunResult(
+                run_id=self.run_id,
+                adapter=self.config.adapter,
+                dataset_version="",  # Set by caller
+                budget_preset=self.config.agent_budget.preset,
+                scopes=scope_results,
+            )
+
+            self.logger.success(f"Run {self.run_id} complete")
+            return run_result
+        finally:
+            if self._metering is not None:
+                self._metering.stop()
+                if original_base_url is not None:
+                    os.environ["OPENAI_BASE_URL"] = original_base_url
+                elif "OPENAI_BASE_URL" in os.environ:
+                    del os.environ["OPENAI_BASE_URL"]
+                self._metering = None
 
     def _run_scope(
         self,
@@ -136,6 +159,10 @@ class RunEngine:
                 checkpoint_result = self._run_checkpoint(
                     adapter, scope_id, idx, questions_by_checkpoint.get(idx, [])
                 )
+                if self._metering is not None:
+                    usage = self._metering.get_usage()
+                    checkpoint_result.adapter_internal_tokens = usage.total_tokens
+                    self._metering.reset()
                 checkpoints_done.append(checkpoint_result)
 
         # Also run checkpoint at final episode if not already done
@@ -144,6 +171,10 @@ class RunEngine:
             checkpoint_result = self._run_checkpoint(
                 adapter, scope_id, final, questions_by_checkpoint.get(final, [])
             )
+            if self._metering is not None:
+                usage = self._metering.get_usage()
+                checkpoint_result.adapter_internal_tokens = usage.total_tokens
+                self._metering.reset()
             checkpoints_done.append(checkpoint_result)
 
         return ScopeResult(scope_id=scope_id, checkpoints=checkpoints_done)

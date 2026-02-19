@@ -51,15 +51,7 @@ class SQLiteAdapter(MemoryAdapter):
 
     def reset(self, scope_id: str) -> None:
         cur = self._conn.cursor()
-        # Get rowids to delete from FTS
-        cur.execute("SELECT rowid, episode_id, text FROM episodes WHERE scope_id = ?", (scope_id,))
-        rows = cur.fetchall()
-        for row in rows:
-            cur.execute(
-                "INSERT INTO episodes_fts(episodes_fts, rowid, episode_id, text) "
-                "VALUES ('delete', ?, ?, ?)",
-                (row[0], row[1], row[2]),
-            )
+        # DELETE trigger (episodes_ad) handles FTS cleanup automatically
         cur.execute("DELETE FROM episodes WHERE scope_id = ?", (scope_id,))
         self._conn.commit()
 

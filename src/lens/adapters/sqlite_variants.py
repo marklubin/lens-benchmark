@@ -6,6 +6,7 @@ Provides retrieval strategies sharing the same SQLite episode storage:
 - sqlite-hybrid: RRF fusion of FTS + Ollama embeddings
 - sqlite-embedding-openai: Semantic search via OpenAI embeddings
 - sqlite-hybrid-openai: RRF fusion of FTS + OpenAI embeddings
+- sqlite-chunked: Chunked semantic search via OpenAI-compatible embeddings
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import urllib.request
 from lens.adapters.base import (
     CapabilityManifest,
     Document,
+    ExtraTool,
     FilterField,
     MemoryAdapter,
     SearchResult,
@@ -102,9 +104,10 @@ def _embed_texts_openai(
     texts: list[str],
     model: str = _DEFAULT_OPENAI_EMBED_MODEL,
     api_key: str | None = None,
+    base_url: str | None = None,
     _max_retries: int = 3,
 ) -> list[list[float]]:
-    """Call OpenAI embedding API. Returns one vector per input text."""
+    """Call OpenAI-compatible embedding API. Returns one vector per input text."""
     import logging
     import time
 
@@ -113,14 +116,17 @@ def _embed_texts_openai(
     if not api_key:
         raise ValueError("OpenAI API key required: set OPENAI_API_KEY or LENS_LLM_API_KEY")
 
+    embed_url = base_url.rstrip("/") + "/embeddings" if base_url else _OPENAI_EMBED_URL
+
     body = json.dumps({"model": model, "input": texts}).encode()
     for attempt in range(_max_retries):
         req = urllib.request.Request(
-            _OPENAI_EMBED_URL,
+            embed_url,
             data=body,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
+                "User-Agent": "lens-benchmark/1.0",
             },
         )
         try:
@@ -593,22 +599,29 @@ def _rrf_merge(
 
 @register_adapter("sqlite-embedding-openai")
 class SQLiteEmbeddingOpenAIAdapter(SQLiteEmbeddingAdapter):
-    """SQLite adapter with OpenAI embedding-based semantic search."""
+    """SQLite adapter with OpenAI-compatible embedding-based semantic search."""
 
     def __init__(
         self,
         db_path: str = ":memory:",
-        embed_model: str = _DEFAULT_OPENAI_EMBED_MODEL,
+        embed_model: str | None = None,
         api_key: str | None = None,
+        base_url: str | None = None,
     ) -> None:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
-        self._embed_model = embed_model
+        self._embed_model = embed_model or os.environ.get(
+            "LENS_EMBED_MODEL", _DEFAULT_OPENAI_EMBED_MODEL
+        )
         self._api_key = api_key
+        self._base_url = base_url or os.environ.get("LENS_EMBED_BASE_URL")
         self._ensure_tables()
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        return _embed_texts_openai(texts, model=self._embed_model, api_key=self._api_key)
+        return _embed_texts_openai(
+            texts, model=self._embed_model, api_key=self._api_key,
+            base_url=self._base_url,
+        )
 
     def ingest(
         self,
@@ -685,24 +698,31 @@ class SQLiteEmbeddingOpenAIAdapter(SQLiteEmbeddingAdapter):
 
 @register_adapter("sqlite-hybrid-openai")
 class SQLiteHybridOpenAIAdapter(SQLiteHybridAdapter):
-    """SQLite hybrid adapter with OpenAI embeddings + FTS5."""
+    """SQLite hybrid adapter with OpenAI-compatible embeddings + FTS5."""
 
     def __init__(
         self,
         db_path: str = ":memory:",
-        embed_model: str = _DEFAULT_OPENAI_EMBED_MODEL,
+        embed_model: str | None = None,
         api_key: str | None = None,
+        base_url: str | None = None,
         rrf_k: int = 60,
     ) -> None:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
-        self._embed_model = embed_model
+        self._embed_model = embed_model or os.environ.get(
+            "LENS_EMBED_MODEL", _DEFAULT_OPENAI_EMBED_MODEL
+        )
         self._api_key = api_key
+        self._base_url = base_url or os.environ.get("LENS_EMBED_BASE_URL")
         self._rrf_k = rrf_k
         self._ensure_tables()
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        return _embed_texts_openai(texts, model=self._embed_model, api_key=self._api_key)
+        return _embed_texts_openai(
+            texts, model=self._embed_model, api_key=self._api_key,
+            base_url=self._base_url,
+        )
 
     def ingest(
         self,
@@ -768,3 +788,535 @@ class SQLiteHybridOpenAIAdapter(SQLiteHybridAdapter):
             )
         scored.sort(key=lambda r: r.score, reverse=True)
         return scored[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Chunked embedding adapter (section-based splitting)
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+
+def _chunk_episode(text: str, max_chunk_words: int = 150) -> list[str]:
+    """Split episode text into section-based chunks.
+
+    Strategy:
+    1. Split on markdown ### headers (each section = a chunk).
+    2. Prepend the date header (first line) to every chunk for context.
+    3. If a section exceeds max_chunk_words, split at paragraph boundaries.
+    4. Discard chunks shorter than 20 words (noise).
+    """
+    lines = text.split("\n")
+    # Extract date header (first non-empty line, usually "## 2024-01-15 ...")
+    date_header = ""
+    for line in lines:
+        if line.strip():
+            date_header = line.strip()
+            break
+
+    # Split on ### headers
+    sections: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        if _re.match(r"^###\s+", line) and current:
+            sections.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append("\n".join(current).strip())
+
+    # Process each section
+    chunks: list[str] = []
+    for section in sections:
+        words = section.split()
+        if len(words) < 20:
+            continue
+        if len(words) <= max_chunk_words:
+            if date_header and not section.startswith(date_header):
+                chunks.append(f"{date_header}\n{section}")
+            else:
+                chunks.append(section)
+        else:
+            paragraphs = section.split("\n\n")
+            buf: list[str] = []
+            buf_words = 0
+            for para in paragraphs:
+                pw = len(para.split())
+                if buf_words + pw > max_chunk_words and buf:
+                    chunk_text = "\n\n".join(buf).strip()
+                    if date_header and not chunk_text.startswith(date_header):
+                        chunk_text = f"{date_header}\n{chunk_text}"
+                    chunks.append(chunk_text)
+                    buf = [para]
+                    buf_words = pw
+                else:
+                    buf.append(para)
+                    buf_words += pw
+            if buf:
+                chunk_text = "\n\n".join(buf).strip()
+                if len(chunk_text.split()) >= 20:
+                    if date_header and not chunk_text.startswith(date_header):
+                        chunk_text = f"{date_header}\n{chunk_text}"
+                    chunks.append(chunk_text)
+
+    if not chunks:
+        chunks = [text]
+
+    return chunks
+
+
+@register_adapter("sqlite-chunked")
+class SQLiteChunkedAdapter(MemoryAdapter):
+    """SQLite adapter with section-level chunking and OpenAI-compatible embeddings.
+
+    Splits each episode into ~100-150 word chunks by section headers,
+    embeds each chunk independently for sharper vector search, and
+    deduplicates results by episode_id to avoid flooding the agent.
+    """
+
+    def __init__(
+        self,
+        db_path: str = ":memory:",
+        embed_model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        max_chunk_words: int = 150,
+    ) -> None:
+        self._conn = sqlite3.connect(db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._embed_model = embed_model or os.environ.get(
+            "LENS_EMBED_MODEL", _DEFAULT_OPENAI_EMBED_MODEL
+        )
+        self._api_key = api_key
+        self._base_url = base_url or os.environ.get("LENS_EMBED_BASE_URL")
+        self._max_chunk_words = max_chunk_words
+        self._ensure_tables()
+
+    def _ensure_tables(self) -> None:
+        cur = self._conn.cursor()
+        cur.executescript("""
+            CREATE TABLE IF NOT EXISTS episodes (
+                episode_id TEXT PRIMARY KEY,
+                scope_id   TEXT NOT NULL,
+                timestamp  TEXT NOT NULL,
+                text       TEXT NOT NULL,
+                meta       TEXT DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS chunks (
+                chunk_id   TEXT PRIMARY KEY,
+                episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
+                chunk_idx  INTEGER NOT NULL,
+                text       TEXT NOT NULL,
+                embedding  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunks_episode ON chunks(episode_id);
+        """)
+        self._conn.commit()
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        return _embed_texts_openai(
+            texts, model=self._embed_model, api_key=self._api_key,
+            base_url=self._base_url,
+        )
+
+    def reset(self, scope_id: str) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            "DELETE FROM chunks WHERE episode_id IN "
+            "(SELECT episode_id FROM episodes WHERE scope_id = ?)",
+            (scope_id,),
+        )
+        cur.execute("DELETE FROM episodes WHERE scope_id = ?", (scope_id,))
+        self._conn.commit()
+
+    def ingest(
+        self,
+        episode_id: str,
+        scope_id: str,
+        timestamp: str,
+        text: str,
+        meta: dict | None = None,
+    ) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO episodes (episode_id, scope_id, timestamp, text, meta) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (episode_id, scope_id, timestamp, text, json.dumps(meta or {})),
+        )
+
+        chunk_texts = _chunk_episode(text, max_chunk_words=self._max_chunk_words)
+        vectors = self._embed(chunk_texts)
+
+        cur.execute("DELETE FROM chunks WHERE episode_id = ?", (episode_id,))
+
+        for idx, (ct, vec) in enumerate(zip(chunk_texts, vectors)):
+            chunk_id = f"{episode_id}_c{idx}"
+            cur.execute(
+                "INSERT INTO chunks (chunk_id, episode_id, chunk_idx, text, embedding) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (chunk_id, episode_id, idx, ct, json.dumps(vec)),
+            )
+        self._conn.commit()
+
+    def search(
+        self,
+        query: str,
+        filters: dict | None = None,
+        limit: int | None = None,
+    ) -> list[SearchResult]:
+        if not query or not query.strip():
+            return []
+
+        limit = limit or 5
+
+        query_vec = self._embed([query])[0]
+
+        sql = (
+            "SELECT c.chunk_id, c.episode_id, c.text, c.embedding, e.meta "
+            "FROM chunks c "
+            "JOIN episodes e ON c.episode_id = e.episode_id "
+            "WHERE 1=1 "
+        )
+        params: list = []
+        if filters:
+            if "scope_id" in filters:
+                sql += "AND e.scope_id = ? "
+                params.append(filters["scope_id"])
+            if "start_date" in filters:
+                sql += "AND e.timestamp >= ? "
+                params.append(filters["start_date"])
+            if "end_date" in filters:
+                sql += "AND e.timestamp <= ? "
+                params.append(filters["end_date"])
+
+        cur = self._conn.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+
+        scored = []
+        for row in rows:
+            emb = json.loads(row["embedding"])
+            sim = cosine_similarity(query_vec, emb)
+            meta = json.loads(row["meta"]) if row["meta"] else {}
+            scored.append({
+                "episode_id": row["episode_id"],
+                "chunk_text": row["text"],
+                "score": sim,
+                "metadata": meta,
+            })
+
+        scored.sort(key=lambda r: r["score"], reverse=True)
+
+        # Deduplicate by episode_id — keep best chunk per episode
+        seen: set[str] = set()
+        results: list[SearchResult] = []
+        for item in scored:
+            ep_id = item["episode_id"]
+            if ep_id in seen:
+                continue
+            seen.add(ep_id)
+            results.append(SearchResult(
+                ref_id=ep_id,
+                text=item["chunk_text"][:500],
+                score=item["score"],
+                metadata=item["metadata"],
+            ))
+            if len(results) >= limit:
+                break
+
+        return results
+
+    def retrieve(self, ref_id: str) -> Document | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT episode_id, text, meta FROM episodes WHERE episode_id = ?",
+            (ref_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        meta = json.loads(row["meta"]) if row["meta"] else {}
+        return Document(ref_id=row["episode_id"], text=row["text"], metadata=meta)
+
+    def get_capabilities(self) -> CapabilityManifest:
+        return CapabilityManifest(
+            search_modes=["semantic"],
+            filter_fields=[
+                FilterField(name="scope_id", field_type="string", description="Filter by scope ID"),
+                FilterField(name="start_date", field_type="string", description="Filter episodes after this ISO date"),
+                FilterField(name="end_date", field_type="string", description="Filter episodes before this ISO date"),
+            ],
+            max_results_per_search=5,
+            supports_date_range=True,
+            extra_tools=[],
+        )
+
+
+@register_adapter("sqlite-chunked-hybrid")
+class SQLiteChunkedHybridAdapter(MemoryAdapter):
+    """SQLite adapter: section-chunked embeddings + FTS5 keyword search, fused via RRF.
+
+    Combines the precision of chunked embeddings (sharper vectors from
+    ~100-150 word sections) with keyword recall from FTS5 (finds exact
+    terms like "geo-lookup" or "service-B"). Results are deduplicated
+    by episode_id after RRF fusion.
+    """
+
+    def __init__(
+        self,
+        db_path: str = ":memory:",
+        embed_model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        max_chunk_words: int = 150,
+        rrf_k: int = 60,
+    ) -> None:
+        self._conn = sqlite3.connect(db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._embed_model = embed_model or os.environ.get(
+            "LENS_EMBED_MODEL", _DEFAULT_OPENAI_EMBED_MODEL
+        )
+        self._api_key = api_key
+        self._base_url = base_url or os.environ.get("LENS_EMBED_BASE_URL")
+        self._max_chunk_words = max_chunk_words
+        self._rrf_k = rrf_k
+        self._ensure_tables()
+
+    def _ensure_tables(self) -> None:
+        cur = self._conn.cursor()
+        cur.executescript("""
+            CREATE TABLE IF NOT EXISTS episodes (
+                episode_id TEXT PRIMARY KEY,
+                scope_id   TEXT NOT NULL,
+                timestamp  TEXT NOT NULL,
+                text       TEXT NOT NULL,
+                meta       TEXT DEFAULT '{}'
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts
+                USING fts5(episode_id, text, content=episodes, content_rowid=rowid);
+            CREATE TRIGGER IF NOT EXISTS episodes_ai AFTER INSERT ON episodes BEGIN
+                INSERT INTO episodes_fts(rowid, episode_id, text)
+                    VALUES (new.rowid, new.episode_id, new.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
+                INSERT INTO episodes_fts(episodes_fts, rowid, episode_id, text)
+                    VALUES ('delete', old.rowid, old.episode_id, old.text);
+            END;
+            CREATE TABLE IF NOT EXISTS chunks (
+                chunk_id   TEXT PRIMARY KEY,
+                episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
+                chunk_idx  INTEGER NOT NULL,
+                text       TEXT NOT NULL,
+                embedding  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunks_episode ON chunks(episode_id);
+        """)
+        self._conn.commit()
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        return _embed_texts_openai(
+            texts, model=self._embed_model, api_key=self._api_key,
+            base_url=self._base_url,
+        )
+
+    def reset(self, scope_id: str) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            "DELETE FROM chunks WHERE episode_id IN "
+            "(SELECT episode_id FROM episodes WHERE scope_id = ?)",
+            (scope_id,),
+        )
+        cur.execute("DELETE FROM episodes WHERE scope_id = ?", (scope_id,))
+        self._conn.commit()
+
+    def ingest(
+        self,
+        episode_id: str,
+        scope_id: str,
+        timestamp: str,
+        text: str,
+        meta: dict | None = None,
+    ) -> None:
+        cur = self._conn.cursor()
+        # Store full episode (for FTS and retrieve)
+        cur.execute(
+            "INSERT OR REPLACE INTO episodes (episode_id, scope_id, timestamp, text, meta) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (episode_id, scope_id, timestamp, text, json.dumps(meta or {})),
+        )
+
+        # Chunk, embed, and store
+        chunk_texts = _chunk_episode(text, max_chunk_words=self._max_chunk_words)
+        vectors = self._embed(chunk_texts)
+        cur.execute("DELETE FROM chunks WHERE episode_id = ?", (episode_id,))
+        for idx, (ct, vec) in enumerate(zip(chunk_texts, vectors)):
+            chunk_id = f"{episode_id}_c{idx}"
+            cur.execute(
+                "INSERT INTO chunks (chunk_id, episode_id, chunk_idx, text, embedding) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (chunk_id, episode_id, idx, ct, json.dumps(vec)),
+            )
+        self._conn.commit()
+
+    def _fts_search(self, query: str, filters: dict | None, limit: int) -> list[SearchResult]:
+        """BM25 keyword search on full episodes."""
+        safe_query = _fts5_escape(query)
+        if not safe_query:
+            return []
+
+        sql = (
+            "SELECT e.episode_id, e.text, e.meta, bm25(episodes_fts) AS rank "
+            "FROM episodes_fts f "
+            "JOIN episodes e ON e.episode_id = f.episode_id "
+            "WHERE episodes_fts MATCH ? "
+        )
+        params: list = [safe_query]
+        if filters:
+            if "scope_id" in filters:
+                sql += "AND e.scope_id = ? "
+                params.append(filters["scope_id"])
+        sql += "ORDER BY rank LIMIT ?"
+        params.append(limit)
+
+        cur = self._conn.cursor()
+        try:
+            cur.execute(sql, params)
+        except sqlite3.OperationalError:
+            return []
+
+        results = []
+        for row in cur.fetchall():
+            meta = json.loads(row["meta"]) if row["meta"] else {}
+            results.append(SearchResult(
+                ref_id=row["episode_id"],
+                text=row["text"][:500],
+                score=abs(row["rank"]),
+                metadata=meta,
+            ))
+        return results
+
+    def _chunk_embedding_search(self, query: str, filters: dict | None, limit: int) -> list[SearchResult]:
+        """Semantic search on chunked embeddings, deduplicated by episode."""
+        query_vec = self._embed([query])[0]
+
+        sql = (
+            "SELECT c.chunk_id, c.episode_id, c.text, c.embedding, e.meta "
+            "FROM chunks c "
+            "JOIN episodes e ON c.episode_id = e.episode_id "
+            "WHERE 1=1 "
+        )
+        params: list = []
+        if filters:
+            if "scope_id" in filters:
+                sql += "AND e.scope_id = ? "
+                params.append(filters["scope_id"])
+
+        cur = self._conn.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+
+        scored = []
+        for row in rows:
+            emb = json.loads(row["embedding"])
+            sim = cosine_similarity(query_vec, emb)
+            meta = json.loads(row["meta"]) if row["meta"] else {}
+            scored.append({
+                "episode_id": row["episode_id"],
+                "chunk_text": row["text"],
+                "score": sim,
+                "metadata": meta,
+            })
+        scored.sort(key=lambda r: r["score"], reverse=True)
+
+        # Deduplicate by episode — keep best chunk per episode
+        seen: set[str] = set()
+        results: list[SearchResult] = []
+        for item in scored:
+            ep_id = item["episode_id"]
+            if ep_id in seen:
+                continue
+            seen.add(ep_id)
+            results.append(SearchResult(
+                ref_id=ep_id,
+                text=item["chunk_text"][:500],
+                score=item["score"],
+                metadata=item["metadata"],
+            ))
+            if len(results) >= limit:
+                break
+        return results
+
+    def search(
+        self,
+        query: str,
+        filters: dict | None = None,
+        limit: int | None = None,
+    ) -> list[SearchResult]:
+        if not query or not query.strip():
+            return []
+
+        limit = limit or 7
+        fetch_limit = limit * 3
+
+        fts_results = self._fts_search(query, filters, fetch_limit)
+        emb_results = self._chunk_embedding_search(query, filters, fetch_limit)
+
+        return _rrf_merge(fts_results, emb_results, k=self._rrf_k, limit=limit)
+
+    def retrieve(self, ref_id: str) -> Document | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT episode_id, text, meta FROM episodes WHERE episode_id = ?",
+            (ref_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        meta = json.loads(row["meta"]) if row["meta"] else {}
+        return Document(ref_id=row["episode_id"], text=row["text"], metadata=meta)
+
+    def get_capabilities(self) -> CapabilityManifest:
+        return CapabilityManifest(
+            search_modes=["keyword", "semantic"],
+            filter_fields=[
+                FilterField(name="scope_id", field_type="string", description="Filter by scope ID"),
+                FilterField(name="start_date", field_type="string", description="Filter episodes after this ISO date"),
+                FilterField(name="end_date", field_type="string", description="Filter episodes before this ISO date"),
+            ],
+            max_results_per_search=7,
+            supports_date_range=True,
+            extra_tools=[
+                ExtraTool(
+                    name="batch_retrieve",
+                    description=(
+                        "Retrieve multiple full documents by their reference IDs in a single call. "
+                        "PREFER this over calling memory_retrieve multiple times — it is far more "
+                        "efficient and uses only one tool call instead of one per document. "
+                        "After memory_search, pass all ref_ids you want to read to this tool."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "ref_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of reference IDs to retrieve (from search results).",
+                            },
+                        },
+                        "required": ["ref_ids"],
+                    },
+                ),
+            ],
+        )
+
+    def call_extended_tool(self, tool_name: str, arguments: dict) -> object:
+        if tool_name == "batch_retrieve":
+            ref_ids = arguments.get("ref_ids", [])
+            docs = []
+            for ref_id in ref_ids:
+                doc = self.retrieve(ref_id)
+                if doc is not None:
+                    docs.append(doc.to_dict())
+            return {"documents": docs, "count": len(docs)}
+        return super().call_extended_tool(tool_name, arguments)

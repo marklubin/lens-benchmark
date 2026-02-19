@@ -16,7 +16,9 @@ Instructions:
 - Use memory_search to find relevant information for the question.
 - Use memory_retrieve to get full document details when you need specifics.
 - Use memory_capabilities to understand what the memory system offers, \
-including available search modes and filter fields.
+including available search modes, filter fields, and any extra tools.
+- If extra tools are available (e.g. batch_retrieve), prefer them for efficiency \
+— they can fetch multiple documents in one call instead of one call per document.
 - Synthesize your findings into a clear, concise answer.
 - IMPORTANT: For each claim in your answer, cite the supporting episode using \
 the format [ref_id]. Every factual statement must have at least one citation.
@@ -92,11 +94,16 @@ class AgentHarness:
             enforcer.check_latency(latency_ms)
             enforcer.check_payload(len(result.content.encode("utf-8")))
 
-            # Track ref_ids from memory_retrieve calls
-            if tool_call.name == "memory_retrieve" and not result.is_error:
-                ref_id = tool_call.arguments.get("ref_id", "")
-                if ref_id:
-                    refs_cited.append(ref_id)
+            # Track ref_ids from memory_retrieve and any extended tool with ref_ids
+            if not result.is_error:
+                if tool_call.name == "memory_retrieve":
+                    ref_id = tool_call.arguments.get("ref_id", "")
+                    if ref_id:
+                        refs_cited.append(ref_id)
+                # Extended tools that accept a list of ref_ids (e.g. batch_retrieve)
+                ref_ids = tool_call.arguments.get("ref_ids")
+                if isinstance(ref_ids, list):
+                    refs_cited.extend(r for r in ref_ids if isinstance(r, str) and r)
 
             return result
 

@@ -19,7 +19,11 @@ def _make_openai_judge(model: str, api_key: str | None = None):
         raise click.ClickException(
             "Judge requires an API key. Set OPENAI_API_KEY or LENS_LLM_API_KEY."
         )
-    client = openai.OpenAI(api_key=key)
+    base_url = os.environ.get("LENS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+    client_kwargs: dict = {"api_key": key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = openai.OpenAI(**client_kwargs)
 
     def judge_fn(prompt: str) -> str:
         resp = client.chat.completions.create(

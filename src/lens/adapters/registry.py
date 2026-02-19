@@ -79,3 +79,7 @@ def _ensure_builtins() -> None:
     import lens.adapters.null  # noqa: F401
     import lens.adapters.sqlite  # noqa: F401
     import lens.adapters.sqlite_variants  # noqa: F401
+    try:
+        import lens.adapters.mem0  # noqa: F401
+    except ImportError:
+        pass  # mem0ai not installed
