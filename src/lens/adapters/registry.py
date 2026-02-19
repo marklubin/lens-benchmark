@@ -83,3 +83,7 @@ def _ensure_builtins() -> None:
         import lens.adapters.mem0  # noqa: F401
     except ImportError:
         pass  # mem0ai not installed
+    try:
+        import lens.adapters.letta  # noqa: F401
+    except ImportError:
+        pass  # letta-client not installed
