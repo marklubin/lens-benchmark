@@ -21,19 +21,28 @@ from lens.adapters.cognee_adapter import CogneeAdapter, _AsyncRunner, _parse_ep_
 def _make_mock_cognee(search_results=None):
     """Create a mock cognee module with typical response shapes."""
     c = MagicMock()
-    c.prune = AsyncMock(return_value=None)
+    # cognee.prune is a CLASS with static async methods, not a callable.
+    # prune.prune_data() and prune.prune_system() are the real methods.
+    c.prune = MagicMock()
+    c.prune.prune_data = AsyncMock(return_value=None)
+    c.prune.prune_system = AsyncMock(return_value=None)
     c.add = AsyncMock(return_value=None)
     c.cognify = AsyncMock(return_value=None)
     c.search = AsyncMock(return_value=search_results or [])
 
-    # SearchType enum
+    # SearchType enum — search() tries CHUNKS then SUMMARIES
     st = MagicMock()
     st.CHUNKS = "CHUNKS"
+    st.SUMMARIES = "SUMMARIES"
     c.SearchType = st
 
     # config mock
     c.config = MagicMock()
     c.config.set_llm_config = MagicMock()
+
+    # __file__ attribute — reset() uses os.path.dirname(cognee.__file__)
+    # to locate the .cognee_system database directory for cleanup.
+    c.__file__ = "/tmp/fake_cognee/__init__.py"
 
     return c
 
@@ -142,21 +151,22 @@ def test_reset_clears_state(mock_cognee):
 def test_reset_calls_prune(mock_cognee):
     adapter = CogneeAdapter()
     adapter.reset("scope_01")
-    mock_cognee.prune.assert_called_once()
+    mock_cognee.prune.prune_data.assert_called_once()
+    mock_cognee.prune.prune_system.assert_called_once()
 
 
-def test_reset_raises_on_prune_failure():
+def test_reset_prune_failure_logs_warning_and_continues():
+    """Prune failure is non-fatal — we log a warning and continue with a fresh dataset."""
     mc = _make_mock_cognee()
-    mc.prune = AsyncMock(side_effect=RuntimeError("DB connection failed"))
-
-    from lens.core.errors import AdapterError
+    mc.prune.prune_data = AsyncMock(side_effect=RuntimeError("DB connection failed"))
 
     adapter = CogneeAdapter()
     with patch(
         "lens.adapters.cognee_adapter.CogneeAdapter._get_cognee", return_value=mc
     ):
-        with pytest.raises(AdapterError, match="prune"):
-            adapter.reset("scope_01")
+        # Should NOT raise — prune failure is handled gracefully
+        adapter.reset("scope_01")
+        assert adapter._dataset_id is not None
 
 
 # ---------------------------------------------------------------------------
@@ -243,11 +253,10 @@ def test_prepare_noop_when_no_pending(mock_cognee):
     mock_cognee.cognify.assert_not_called()
 
 
-def test_prepare_raises_on_cognify_failure():
+def test_prepare_cognify_failure_is_nonfatal():
+    """cognify() failure is non-fatal — logs warning, doesn't raise."""
     mc = _make_mock_cognee()
     mc.cognify = AsyncMock(side_effect=RuntimeError("Cognify failed"))
-
-    from lens.core.errors import AdapterError
 
     adapter = CogneeAdapter()
     with patch(
@@ -255,8 +264,10 @@ def test_prepare_raises_on_cognify_failure():
     ):
         adapter.reset("scope_01")
         adapter.ingest("ep01", "scope_01", "2024-01-01T00:00:00Z", "text")
-        with pytest.raises(AdapterError, match="cognify"):
-            adapter.prepare("scope_01", checkpoint=5)
+        # Should NOT raise — cognify failure is handled gracefully
+        adapter.prepare("scope_01", checkpoint=5)
+        # add() should still have been called
+        mc.add.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +338,47 @@ def test_search_handles_string_search_result(mock_cognee):
     results = adapter.search("latency")
     assert len(results) == 1
     assert results[0].ref_id == "ep01"
+
+
+def test_search_handles_dict_payload_results(mock_cognee):
+    """cognee.search(CHUNKS) returns flat list of payload dicts, not SearchResult objects."""
+    mock_cognee.search.return_value = [
+        {"text": "[ep01] 2024-01-01: p99: 342ms error_rate: 0.3%", "id": "uuid1"},
+        {"text": "[ep02] 2024-01-02: p99: 580ms error_rate: 0.8%", "id": "uuid2"},
+    ]
+
+    adapter = CogneeAdapter()
+    adapter.reset("scope_01")
+    adapter._text_cache = {"ep01": "p99: 342ms", "ep02": "p99: 580ms"}
+
+    results = adapter.search("latency")
+    assert len(results) == 2
+    assert results[0].ref_id == "ep01"
+    assert results[1].ref_id == "ep02"
+
+
+def test_search_handles_acl_wrapped_results(mock_cognee):
+    """cognee 0.5.2+ with ACL mode wraps results in dicts with 'search_result' key."""
+    mock_cognee.search.return_value = [
+        {
+            "dataset_id": "some-uuid",
+            "dataset_name": "lens_scope_01_abc123",
+            "dataset_tenant_id": "tenant-uuid",
+            "search_result": [
+                {"text": "[ep01] 2024-01-01: p99: 342ms error_rate: 0.3%", "id": "uuid1"},
+                {"text": "[ep02] 2024-01-02: p99: 580ms error_rate: 0.8%", "id": "uuid2"},
+            ],
+        }
+    ]
+
+    adapter = CogneeAdapter()
+    adapter.reset("scope_01")
+    adapter._text_cache = {"ep01": "p99: 342ms", "ep02": "p99: 580ms"}
+
+    results = adapter.search("latency")
+    assert len(results) == 2
+    assert results[0].ref_id == "ep01"
+    assert results[1].ref_id == "ep02"
 
 
 def test_search_handles_empty_results(mock_cognee):

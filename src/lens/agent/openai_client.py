@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 import uuid
 from typing import TYPE_CHECKING
 
@@ -8,6 +10,8 @@ from lens.agent.llm_client import AgentTurn, BaseLLMClient, ToolCall, ToolDefini
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+log = logging.getLogger(__name__)
 
 
 class OpenAIClient(BaseLLMClient):
@@ -41,6 +45,31 @@ class OpenAIClient(BaseLLMClient):
         self._temperature = temperature
         self._seed = seed
 
+    def _completions_with_retry(self, max_retries: int = 5, **kwargs):
+        """Call chat.completions.create with exponential backoff on transient errors."""
+        import openai as _openai  # noqa: PLC0415
+
+        for attempt in range(max_retries + 1):
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except (
+                _openai.InternalServerError,
+                _openai.RateLimitError,
+                _openai.APIConnectionError,
+                _openai.APITimeoutError,
+            ) as e:
+                if attempt == max_retries:
+                    raise
+                wait = min(2 ** attempt * 2, 60)
+                log.warning(
+                    "LLM API error (attempt %d/%d, retrying in %ds): %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    wait,
+                    e,
+                )
+                time.sleep(wait)
+
     def run_agent_loop(
         self,
         system_prompt: str,
@@ -68,7 +97,7 @@ class OpenAIClient(BaseLLMClient):
             if self._seed is not None:
                 kwargs["seed"] = self._seed
 
-            response = self._client.chat.completions.create(**kwargs)
+            response = self._completions_with_retry(**kwargs)
             choice = response.choices[0]
             message = choice.message
             usage = response.usage

@@ -73,7 +73,7 @@ def mock_graphiti_modules():
             "graphiti_core.driver": MagicMock(),
             "graphiti_core.driver.falkordb_driver": MagicMock(FalkorDriver=mock_falkor_cls),
             "graphiti_core.llm_client": MagicMock(),
-            "graphiti_core.llm_client.openai_client": MagicMock(OpenAIClient=mock_llm_cls),
+            "graphiti_core.llm_client.openai_generic_client": MagicMock(OpenAIGenericClient=mock_llm_cls),
             "graphiti_core.llm_client.config": MagicMock(LLMConfig=mock_llm_config_cls),
             "graphiti_core.embedder": MagicMock(),
             "graphiti_core.embedder.openai": MagicMock(

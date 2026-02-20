@@ -130,25 +130,48 @@ class GraphitiAdapter(MemoryAdapter):
                 OpenAIEmbedderConfig,
             )
             from graphiti_core.llm_client.config import LLMConfig  # noqa: PLC0415
-            from graphiti_core.llm_client.openai_client import OpenAIClient  # noqa: PLC0415
+            from graphiti_core.llm_client.openai_generic_client import (  # noqa: PLC0415
+                OpenAIGenericClient,
+            )
         except ImportError as e:
             raise AdapterError(
                 "graphiti-core[falkordb] not installed. Run: uv add graphiti-core[falkordb]"
             ) from e
 
-        llm_client = OpenAIClient(
+        # Use OpenAIGenericClient (chat.completions) not OpenAIClient (responses.parse)
+        # — Together AI doesn't support the OpenAI Responses API
+        llm_client = OpenAIGenericClient(
             LLMConfig(
                 api_key=self._llm_api_key,
                 model=self._llm_model,
                 base_url=self._llm_base_url,
             )
         )
-        embedder = OpenAIEmbedder(
+
+        # Subclass OpenAIEmbedder to chunk large batches — Together AI rejects
+        # requests over ~1MB (HTTP 413) when many entity embeddings are batched.
+        embed_dim = self._embed_dim
+        embed_model = self._embed_model
+        embed_api_key = self._embed_api_key
+        embed_base_url = self._embed_base_url
+
+        class _ChunkedEmbedder(OpenAIEmbedder):
+            _BATCH = 20  # max items per embedding request to avoid 413
+
+            async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
+                results: list[list[float]] = []
+                for i in range(0, len(input_data_list), self._BATCH):
+                    chunk = input_data_list[i : i + self._BATCH]
+                    chunk_results = await super().create_batch(chunk)
+                    results.extend(chunk_results)
+                return results
+
+        embedder = _ChunkedEmbedder(
             OpenAIEmbedderConfig(
-                embedding_model=self._embed_model,
-                api_key=self._embed_api_key,
-                base_url=self._embed_base_url,
-                embedding_dim=self._embed_dim,
+                embedding_model=embed_model,
+                api_key=embed_api_key,
+                base_url=embed_base_url,
+                embedding_dim=embed_dim,
             )
         )
         # FalkorDB database parameter provides scope isolation at the DB level

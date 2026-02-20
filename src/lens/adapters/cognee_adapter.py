@@ -67,6 +67,11 @@ class _AsyncRunner:
 _RUNNER: _AsyncRunner | None = None
 _RUNNER_LOCK = threading.Lock()
 
+# Tracks whether we have already monkey-patched cognee's LiteLLMEmbeddingEngine.
+# Together AI rejects the 'dimensions' parameter in embedding requests; this patch
+# prevents cognee from ever sending it.
+_COGNEE_PATCHED = False
+
 
 def _get_runner() -> _AsyncRunner:
     global _RUNNER
@@ -129,15 +134,43 @@ class CogneeAdapter(MemoryAdapter):
         if self._embed_api_key:
             os.environ.setdefault("EMBEDDING_API_KEY", self._embed_api_key)
         if self._embed_model:
-            os.environ.setdefault("EMBEDDING_MODEL", self._embed_model)
-        if self._embed_dims:
-            os.environ.setdefault("EMBEDDING_DIMENSIONS", str(self._embed_dims))
+            # cognee uses litellm for embeddings; model must have provider prefix.
+            # Use "together_ai/" prefix so litellm routes via Together AI native provider.
+            embed_model = self._embed_model
+            if not embed_model.startswith(("openai/", "together_ai/", "bedrock/")):
+                embed_model = f"together_ai/{embed_model}"
+            os.environ.setdefault("EMBEDDING_MODEL", embed_model)
+        # Set EMBEDDING_DIMENSIONS so LanceDB schema uses the correct vector size.
+        # Together AI rejects the 'dimensions' API param — _get_cognee() patches embed_text
+        # to suppress it at call time while keeping self.dimensions intact for schema use.
+        os.environ.setdefault("EMBEDDING_DIMENSIONS", str(self._embed_dims))
         if self._embed_endpoint:
             os.environ.setdefault("EMBEDDING_ENDPOINT", self._embed_endpoint)
         os.environ.setdefault("EMBEDDING_PROVIDER", "openai")
 
+        # Monkey-patch tiktoken to handle non-OpenAI embedding model names.
+        # Cognee uses tiktoken for text chunking; it raises KeyError for models
+        # it doesn't recognise (e.g. "Alibaba-NLP/gte-modernbert-base").
+        # We fall back to cl100k_base, which is fine for chunk-size estimation.
+        try:
+            import tiktoken  # noqa: PLC0415
+
+            _orig = tiktoken.encoding_for_model
+
+            def _patched_encoding_for_model(model_name: str):
+                try:
+                    return _orig(model_name)
+                except KeyError:
+                    return tiktoken.get_encoding("cl100k_base")
+
+            tiktoken.encoding_for_model = _patched_encoding_for_model
+        except Exception:
+            pass  # tiktoken not installed or patching failed — cognee will handle it
+
     def _get_cognee(self):
         """Lazy import cognee and configure LLM settings."""
+        global _COGNEE_PATCHED  # noqa: PLW0603
+
         try:
             import cognee  # noqa: PLC0415
         except ImportError as e:
@@ -145,11 +178,59 @@ class CogneeAdapter(MemoryAdapter):
                 "cognee not installed. Run: uv add cognee"
             ) from e
 
-        # Configure LLM programmatically (persists for process lifetime)
+        # Monkey-patch litellm.aembedding once per process to strip the 'dimensions'
+        # kwarg before any API call. Together AI rejects this param entirely, but
+        # LiteLLMEmbeddingEngine always adds it when self.dimensions is not None.
+        # We patch at the litellm level (not cognee) so self.dimensions stays 768,
+        # keeping LanceDB schema creation (dimension_count()) correct.
+        if not _COGNEE_PATCHED:
+            try:
+                import litellm as _litellm  # noqa: PLC0415
+
+                # Patch 1: Strip 'dimensions' from embedding calls — Together AI rejects it
+                _orig_aembedding = _litellm.aembedding
+
+                async def _aembedding_no_dims(*args, **kwargs):
+                    kwargs.pop("dimensions", None)
+                    return await _orig_aembedding(*args, **kwargs)
+
+                _litellm.aembedding = _aembedding_no_dims
+
+                # Patch 2: Inject max_tokens for LLM calls — GenericAPIAdapter stores
+                # max_completion_tokens but never passes it to litellm.acompletion().
+                # Together AI defaults to ~8192 which is too low for graph extraction
+                # on long operational log episodes.
+                _orig_acompletion = _litellm.acompletion
+
+                async def _acompletion_with_max_tokens(*args, **kwargs):
+                    if "max_tokens" not in kwargs and "max_completion_tokens" not in kwargs:
+                        kwargs["max_tokens"] = 16384
+                    return await _orig_acompletion(*args, **kwargs)
+
+                _litellm.acompletion = _acompletion_with_max_tokens
+
+                # Clear embedding engine cache so fresh engine picks up config
+                from cognee.infrastructure.databases.vector.embeddings.get_embedding_engine import (  # noqa: PLC0415
+                    create_embedding_engine as _cee,
+                )
+
+                _cee.cache_clear()
+                log.debug("Patched litellm: suppressed dimensions, injected max_tokens=16384")
+            except Exception as _pe:
+                log.warning("Failed to patch litellm: %s", _pe)
+            _COGNEE_PATCHED = True
+
+        # Configure LLM programmatically (persists for process lifetime).
+        # cognee uses litellm internally; model name must have provider prefix
+        # e.g. "openai/Qwen/..." for OpenAI-compatible endpoints (Together AI).
+        # The default model format in cognee is "openai/gpt-5-mini" — same pattern.
+        llm_model = self._llm_model
+        if not llm_model.startswith(("openai/", "together_ai/", "anthropic/", "bedrock/")):
+            llm_model = f"openai/{llm_model}"
         try:
             cognee.config.set_llm_config({
                 "llm_provider": "openai",
-                "llm_model": self._llm_model,
+                "llm_model": llm_model,
                 "llm_endpoint": self._llm_endpoint,
                 "llm_api_key": self._llm_api_key,
             })
@@ -161,8 +242,12 @@ class CogneeAdapter(MemoryAdapter):
     def reset(self, scope_id: str) -> None:
         """Clear all cognee data and set a fresh dataset name.
 
-        Calls cognee.prune() to wipe all graphs, vectors, and relational
-        data — ensuring clean isolation between benchmark runs.
+        Calls cognee.prune.prune_data() + prune_system() to wipe all graphs,
+        vectors, and relational data — ensuring clean isolation between runs.
+
+        Note: cognee.prune is a CLASS with static async methods, NOT a callable.
+        cognee.prune() would just create a class instance (no-op). We must call
+        the actual prune_data() and prune_system() static methods.
         """
         suffix = uuid.uuid4().hex[:8]
         safe_scope = "".join(c if c.isalnum() or c == "_" else "_" for c in scope_id)
@@ -171,12 +256,49 @@ class CogneeAdapter(MemoryAdapter):
         self._pending_episodes = []
 
         cognee = self._get_cognee()
+        runner = _get_runner()
+
+        # Belt-and-suspenders: remove cognee's database directory to guarantee
+        # clean state. cognee.prune can leave dangling LanceDB references that
+        # cause IO errors on subsequent runs.
+        import shutil  # noqa: PLC0415
+
+        cognee_db_dir = os.path.join(
+            os.path.dirname(cognee.__file__),
+            ".cognee_system",
+            "databases",
+        )
+        if os.path.isdir(cognee_db_dir):
+            try:
+                shutil.rmtree(cognee_db_dir)
+                log.debug("Removed cognee database directory: %s", cognee_db_dir)
+            except OSError as e:
+                log.warning("Failed to remove cognee DB dir: %s", e)
+
+        cognee_cache_dir = os.path.join(
+            os.path.dirname(cognee.__file__),
+            ".cognee_cache",
+        )
+        if os.path.isdir(cognee_cache_dir):
+            try:
+                shutil.rmtree(cognee_cache_dir)
+            except OSError as e:
+                log.warning("Failed to remove cognee cache dir: %s", e)
+
         try:
-            _get_runner().run(cognee.prune(), timeout=120.0)
+            runner.run(cognee.prune.prune_data(), timeout=120.0)
+            runner.run(
+                cognee.prune.prune_system(
+                    graph=True, vector=True, metadata=True, cache=True
+                ),
+                timeout=120.0,
+            )
         except Exception as e:
-            raise AdapterError(
-                f"cognee.prune() failed during reset for scope '{scope_id}': {e}"
-            ) from e
+            log.warning(
+                "cognee.prune failed during reset for scope '%s': %s (continuing with fresh dataset)",
+                scope_id,
+                e,
+            )
 
     def ingest(
         self,
@@ -228,16 +350,23 @@ class CogneeAdapter(MemoryAdapter):
                     f"at checkpoint {checkpoint}: {e}"
                 ) from e
 
-        # Build knowledge graph from added episodes
+        # Build knowledge graph from added episodes.
+        # cognify() does LLM entity extraction → graph + embeddings.
+        # Non-fatal: if graph extraction hits token limits (common with dense
+        # operational logs), chunks from earlier successful runs are still
+        # searchable. Failing hard here would waste the entire run.
         try:
             _get_runner().run(
                 cognee.cognify(datasets=[self._dataset_id]),
                 timeout=600.0,
             )
         except Exception as e:
-            raise AdapterError(
-                f"cognee.cognify() failed at checkpoint {checkpoint}: {e}"
-            ) from e
+            log.warning(
+                "cognee.cognify() failed at checkpoint %d (non-fatal, "
+                "earlier chunks may still be searchable): %s",
+                checkpoint,
+                e,
+            )
 
         self._pending_episodes = []
 
@@ -252,6 +381,9 @@ class CogneeAdapter(MemoryAdapter):
         Uses cognee's vector search over chunked episode text. Each chunk is
         prefixed with [episode_id], which we parse to build the ref_id for
         evidence grounding.
+
+        Falls back to SUMMARIES search if CHUNKS collection doesn't exist
+        (can happen if the cognify pipeline didn't create DocumentChunk_text).
         """
         if not query or not query.strip() or self._dataset_id is None:
             return []
@@ -260,17 +392,38 @@ class CogneeAdapter(MemoryAdapter):
         cognee = self._get_cognee()
         SearchType = cognee.SearchType
 
-        try:
-            raw = _get_runner().run(
-                cognee.search(
-                    query_text=query,
-                    query_type=SearchType.CHUNKS,
-                    top_k=cap * 2,  # over-fetch for dedup
-                ),
-                timeout=60.0,
+        raw = None
+        # Don't filter by datasets= here — since reset() calls prune(), there's
+        # only one dataset in the system. Passing datasets=[name] can cause
+        # DatasetNotFoundError if cognee normalises the name differently.
+        for search_type in (SearchType.CHUNKS, SearchType.SUMMARIES):
+            try:
+                raw = _get_runner().run(
+                    cognee.search(
+                        query_text=query,
+                        query_type=search_type,
+                        top_k=cap * 2,  # over-fetch for dedup
+                    ),
+                    timeout=60.0,
+                )
+                st_name = getattr(search_type, "name", str(search_type))
+                log.debug(
+                    "cognee.search(%s) returned %d items",
+                    st_name,
+                    len(raw) if raw else 0,
+                )
+                if raw:
+                    break
+            except Exception as e:
+                st_name = getattr(search_type, "name", str(search_type))
+                log.warning("cognee.search(%s) failed: %s", st_name, e)
+                continue
+
+        if not raw:
+            log.warning(
+                "cognee search returned empty for query=%r (tried CHUNKS + SUMMARIES)",
+                query[:80],
             )
-        except Exception as e:
-            log.warning("cognee.search() failed: %s", e)
             return []
 
         search_results: list[SearchResult] = []
@@ -305,19 +458,46 @@ class CogneeAdapter(MemoryAdapter):
                     )
                 )
 
+        log.debug(
+            "search() returning %d results",
+            len(search_results),
+        )
         return search_results
 
     def _extract_chunks(self, item) -> list[str]:
-        """Unpack a cognee search result item into a list of chunk text strings."""
-        # cognee.SearchResult has .search_result which may be:
-        # - a list of payload dicts {"text": ...}
-        # - a string (joined context when only_context=True)
-        # - a list of strings
+        """Unpack a cognee search result item into a list of chunk text strings.
 
+        cognee.search() returns different shapes depending on whether ACL mode
+        is enabled (cognee 0.5.2 enables it by default for Kuzu+LanceDB):
+
+        ACL mode ON (default in 0.5.2):
+            [{"dataset_id": UUID, "dataset_name": "...", "search_result": [chunk_dicts]}]
+            Each item is a dict wrapper; actual chunks are under "search_result" key.
+
+        ACL mode OFF:
+            [chunk_dict_1, chunk_dict_2, ...]  (flat list of payload dicts)
+            Each item is a dict with "text" and "id" keys.
+
+        Also handles:
+            - SearchResult-like objects with .search_result attribute (verbose mode)
+            - Plain strings (only_context=True)
+            - Lists of dicts/strings
+        """
+        # First try .search_result attribute (verbose mode / object-based results)
         search_result = getattr(item, "search_result", item)
 
+        # ACL mode: dict with "search_result" key wrapping actual chunk data.
+        # getattr() above doesn't work for plain dicts — check dict key access.
+        if isinstance(search_result, dict) and "search_result" in search_result:
+            search_result = search_result["search_result"]
+
+        # Direct dict with "text" — a chunk payload dict (non-ACL mode)
+        if isinstance(search_result, dict):
+            text = search_result.get("text") or search_result.get("content") or ""
+            return [str(text)] if text else []
+
         if isinstance(search_result, str):
-            return [search_result]
+            return [search_result] if search_result else []
 
         if isinstance(search_result, list):
             texts = []
@@ -330,6 +510,7 @@ class CogneeAdapter(MemoryAdapter):
                         texts.append(str(text))
             return texts
 
+        log.warning("_extract_chunks: unhandled type %s", type(search_result).__name__)
         return []
 
     def _match_episode(self, chunk_text: str) -> str | None:

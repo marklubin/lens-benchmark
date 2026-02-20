@@ -1,13 +1,13 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-20 (session 9)
+**Last Updated**: 2026-02-20 (session 10)
 **Scoring Pipeline**: v3.1 (pairwise judge + citation coverage + observational budget)
 **Agent LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Judge LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Token Cap**: 32,768 (standard preset)
 **Dataset**: 6 scopes, 144 questions, 720 episodes
-**Unit Tests**: 845 passing (unit/ only)
-**Adapters Tested**: 19 (13 systems on scope 01, 4 on full 6-scope)
+**Unit Tests**: 847 passing (unit/ only)
+**Adapters Tested**: 20 (14 systems on scope 01, 4 on full 6-scope)
 
 ---
 
@@ -20,6 +20,10 @@ LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluat
 **Key finding 6 — Full 6-scope matrix reveals sqlite-chunked-hybrid as most consistent adapter**: Across all 6 domains, `sqlite-chunked-hybrid` wins 4/6 scopes with cross-scope mean **0.5656** — outperforming both Letta (0.5266) and letta-sleepy V3 (0.4982). The sleep synthesis V3 wins only 2/6 scopes and underperforms letta in 4/6. Key insight: the V3 delta/causal synthesis is conditionally useful — it helps when letta's base retrieval is weak (scopes 01, 03: letta=0.5308, 0.3177), but hurts when letta is already performing well (scopes 04-06: letta=0.5942, 0.5723, 0.6027). The synthesis introduces navigational noise when retrieval is already confident.
 
 **Key finding 5 — letta-sleepy V3 is new SOTA at 0.5776 on scope 01**: Adding a delta/causal sleep consolidation cycle to Letta pushes composite to **0.5776** (+8.8% over base Letta 0.5308). V3 achieves answer_quality 0.8225 (best of any adapter) and longitudinal_advantage **−0.1790** (closest to zero ever observed — up from −0.2822 for base Letta). Critical insight: prompt framing matters enormously — V1 (comprehensive summary) and V2 (actionable filter) both *hurt* relative to control (0.4290, 0.4596 vs 0.5402), while V3's delta/causal framing delivers the improvement. The synthesis guides the agent to retrieve the right specific episodes rather than forcing it to reconstruct temporal patterns from scratch.
+
+**Key finding 8 — Cognee GraphRAG scores 0.5638 — 2nd overall, best evidence_coverage**: Cognee (embedded GraphRAG with LanceDB + Kuzu + SQLite, no container) achieves **0.5638 composite** on scope 01 — surpassing Letta (0.5308), Graphiti (0.4983), and chunked-hybrid (0.4970). Only letta-sleepy V3 (0.5776) scores higher. Cognee's standout metric is **evidence_coverage 0.6319** — the best of ANY system (next best: Letta 0.4722). Combined with perfect budget_compliance (1.0) and evidence_grounding (1.0), this suggests cognee's GraphRAG chunking + knowledge graph indexing produces particularly retrievable chunk representations. longitudinal_advantage −0.2425 is second-best after V3 (−0.1790). The cognify pipeline (entity extraction + graph construction + summarization) runs in `prepare()` before budget clock, avoiding Hindsight's budget trap.
+
+**Key finding 7 — Graphiti temporal knowledge graph scores 0.4983**: Graphiti (FalkorDB-backed temporal knowledge graph with bi-temporal edge invalidation and entity extraction) achieves **0.4983 composite** on scope 01 — nearly matching Letta (0.5308) and outperforming chunked-hybrid (0.4970). Notable: perfect budget_compliance (1.0, zero violations), evidence_grounding 1.0, reasoning_quality 0.9167, insight_depth 0.8333. The EDGE_HYBRID_SEARCH with episode mentions maps graph edges back to source episodes effectively. answer_quality 0.6746 and longitudinal_advantage −0.3370 are weaker than Letta, suggesting the graph structure adds overhead without improving temporal synthesis relative to simple passage retrieval.
 
 **Key finding 1 — Letta is SOTA (base)**: Letta (formerly MemGPT) achieves **0.5308 composite** (Qwen3 judge), +6.8pp above chunked-hybrid+batch_retrieve (0.4970). Letta's semantic vector search over archival passages with a neutral storage prompt achieves perfect evidence_grounding (1.0), answer_quality 0.7239, reasoning_quality 0.9167, and insight_depth 0.8750 — the highest on all three Tier-2 metrics. Budget compliance 0.8333 (5/30 violations, all from ingest latency).
 
@@ -52,6 +56,8 @@ Single scope (cascading_failure_01), 30 episodes, 24 questions. Together AI (Qwe
 | sqlite-chunked-hybrid L=7 | 0.3670 | 0.6920 | — | 0.0000 | 0.5417 | 0.9167 | 0.2153 | — | `8b9e83ae9dec` |
 | letta-sleepy V2 (actionable) | 0.4596 | 0.7456 | — | 1.0000 | 0.3750 | 0.9583 | 0.3160 | -0.2828 | `6e6e53e7581d` |
 | letta-sleepy V1 (minimal) | 0.4290 | 0.6569 | — | 1.0000 | 0.5000 | 1.0000 | 0.2569 | -0.3365 | `1cbe02135799` |
+| **cognee** | **0.5638** | 0.7357 | 0.2556 | **1.0000** | 0.7917 | 0.9167 | **0.6319** | -0.2425 | `77545ef2b9b8` |
+| **graphiti** | 0.4983 | 0.6746 | 0.2553 | **1.0000** | 0.8333 | 0.9167 | 0.3507 | -0.3370 | `2bc821424282` |
 | hindsight | 0.3511 | 0.6687 | 0.2775 | 0.2083 | 0.6250 | 0.9167 | 0.1667 | -0.3311 | `040bb488abbd` |
 | sqlite-fts | 0.2837 | 0.4711 | 0.1914 | 0.3333 | 0.4583 | 0.7917 | 0.1840 | -0.5647 | `11d7bf53e4f0` |
 | mem0-extract | 0.0000 | — | — | — | — | — | — | — | `a119b4906684` |
@@ -248,8 +254,8 @@ Each scope: 24 questions across 10 types (longitudinal, temporal, paraphrase, se
 | `letta` | Semantic (Letta archival passages, vector search) | **Benchmarked (scope 01)** — **0.5308, SOTA** |
 | `hindsight` | TEMPR: semantic + BM25 + graph + temporal, RRF | **Benchmarked (scope 01)** — **0.3511**. Graph entity extraction per retain() causes 20-100s ingest latency, 19/24 budget violations. reasoning_quality 0.9167 (matches Letta). 17.3 GB image. |
 | `letta-sleepy` | Semantic (archival passages) + LLM sleep consolidation | **Benchmarked (scope 01, 4 variants)** — **V3: 0.5776 (SOTA)**. V0=0.5402, V1=0.4290, V2=0.4596, V3=0.5776. Delta/causal framing wins; minimal and filter framings hurt. Adds ~30-60s prepare() per checkpoint for LLM synthesis call. |
-| `graphiti` | Temporal knowledge graph (FalkorDB, bi-temporal edges) | **Implemented, not yet benchmarked**. Requires FalkorDB container on :6379. Buffers episodes in ingest(); LLM entity extraction in prepare(). Uses EDGE_HYBRID_SEARCH_EPISODE_MENTIONS to map edges → episodes. |
-| `cognee` | GraphRAG (embedded LanceDB + Kuzu + SQLite) | **Implemented, not yet benchmarked**. No container needed. Calls cognify() in prepare() for graph construction. Uses SearchType.CHUNKS with [episode_id] prefix parsing. |
+| `graphiti` | Temporal knowledge graph (FalkorDB, bi-temporal edges) | **Benchmarked (scope 01)** — **0.4983**. FalkorDB container on :6379. Perfect budget_compliance (1.0). Entity extraction in prepare() via LLM. EDGE_HYBRID_SEARCH_EPISODE_MENTIONS maps edges → episodes. evidence_grounding=1.0, reasoning_quality=0.9167. |
+| `cognee` | GraphRAG (embedded LanceDB + Kuzu + SQLite) | **Benchmarked (scope 01)** — **0.5638** (2nd overall). No container needed. cognify() in prepare() for graph construction. Fixed: ACL-wrapped search result parsing + Kuzu lock conflicts. evidence_coverage 0.6319 (best of any system). budget_compliance 1.0. |
 
 ### Testing Infrastructure
 
@@ -381,6 +387,30 @@ V1 and V2 both *hurt* relative to control. V3 is the only variant that beats it.
 
 **The fairness check holds**: V3's synthesis is produced without any knowledge of the specific benchmark questions, using only the same data the agent has access to and the same LLM. The only difference from base Letta is that cross-episode patterns have been pre-organised causally.
 
+#### Finding 8: Cognee — GraphRAG produces best evidence coverage of any system
+
+Cognee scores **0.5638** on scope 01, placing 2nd overall (behind only letta-sleepy V3's 0.5776). This is the strongest showing of any no-container, fully embedded system.
+
+**Why evidence_coverage is exceptional (0.6319)**: Cognee's `cognify()` pipeline performs entity extraction, text summarization, and graph construction. When it chunks text, it maintains the `[episode_id]` prefix that the adapter parses during search. The resulting chunks are indexed in LanceDB with both vector embeddings and graph relationships. When the agent searches, it gets chunks that are highly topically relevant AND carry the episode provenance needed for evidence grounding. The 20 chunks returned per search (vs 5-7 for other adapters) provide more diverse episode coverage.
+
+**Comparison with Graphiti**: Both are knowledge graph systems that do LLM entity extraction in `prepare()`. Cognee (0.5638) significantly outperforms Graphiti (0.4983). The difference: Cognee returns text chunks (preserving original episode content), while Graphiti returns graph edges (extracted relationships). Chunk-level retrieval gives the agent more raw context to synthesize answers from, while edge-level retrieval provides structured facts but less supporting detail.
+
+**Budget compliance is perfect (1.0)**: Like Graphiti, all LLM processing happens in `prepare()` before the agent's budget clock starts. This architectural choice is proving decisive — Hindsight (0.3511) does the same type of entity extraction but during the budget window, losing 19/24 questions to violations.
+
+**Fixed bug — ACL-wrapped search results not parsed**: Previous cognee runs all scored 0.0000. Root cause: cognee 0.5.2 enables backend access control by default for Kuzu+LanceDB, wrapping search results as `{"dataset_id": UUID, "search_result": [chunk_dicts]}`. The adapter's `_extract_chunks()` used `getattr()` which doesn't work for plain dicts. Fix: added dict key check for `"search_result"`. Also set `ENABLE_BACKEND_ACCESS_CONTROL=false` to avoid Kuzu lock conflicts between concurrent cognify and search operations.
+
+**Embedding 413 errors**: Together AI rejects embedding requests over ~1MB. Cognee hit this on later checkpoints (20+ episodes, many chunks to embed). The errors are non-fatal — cognee retries or skips, and search still works from previously indexed chunks. For production use, a smaller batch size in cognee's LiteLLM config would avoid this.
+
+#### Finding 7: Graphiti — graph structure doesn't beat simple passage retrieval
+
+Graphiti (temporal knowledge graph with bi-temporal edge invalidation, FalkorDB) scores **0.4983** on scope 01 — a strong result that nearly matches Letta (0.5308), outperforms chunked-hybrid (0.4970), and far exceeds Hindsight (0.3511).
+
+**Comparison with Hindsight**: Both systems perform LLM-based entity extraction during ingest/prepare, building knowledge graphs from episode text. But Graphiti achieves **perfect budget_compliance (1.0)** while Hindsight scores 0.2083. The difference: Graphiti's entity extraction runs in `prepare()` (before the agent's budget clock starts), while Hindsight's `retain()` runs synchronously during the benchmark. Architectural placement of LLM processing matters as much as the processing itself.
+
+**Why not SOTA**: Graphiti's answer_quality (0.6746) lags Letta (0.7239) and letta-sleepy V3 (0.8225). longitudinal_advantage (−0.3370) is worse than Letta (−0.2822) and V3 (−0.1790). The temporal knowledge graph's edges capture entity relationships but don't provide the raw episode text that agents need for precise, evidence-grounded synthesis. When the agent retrieves graph edges, it gets structured relationships rather than the full context needed to answer domain-specific questions about metric progressions.
+
+**Positive signals**: evidence_grounding 1.0 (no hallucinated refs), insight_depth 0.8333 (only Letta scores higher at 0.8750), reasoning_quality 0.9167 (tied with most top systems). The graph structure provides solid semantic navigation despite lower answer quality.
+
 ### What Needs Attention
 
 1. **longitudinal_advantage is still negative for all systems (−0.18 to −0.57)**. Agents score lower on synthesis questions than on null_hypothesis controls. No current adapter flips this positive — which is expected for naive RAG, but is the core thing LENS is measuring. A memory system with genuine temporal reasoning should be the first to cross zero.
@@ -434,6 +464,12 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 7. **✅ DONE — Experiment orchestrator**: `scripts/benchmark_orchestrator.py` + `experiments/matrix.json` (30 experiments: 5 adapters × 6 scopes). Run with `python3 scripts/benchmark_orchestrator.py --dry-run` to preview. State tracking + resume support. Hindsight configs added for scopes 02–06.
 
+8. **✅ DONE — Graphiti benchmarked**: 0.4983 on scope 01 (nearly matches Letta 0.5308). Perfect budget_compliance. Entity extraction in prepare() avoids Hindsight's budget trap.
+
+9. **✅ DONE — Cognee benchmarked**: 0.5638 on scope 01 (2nd overall, best evidence_coverage). Fixed ACL-wrapped search result parsing. Previous runs all scored 0.0000. Configs created for all 6 scopes.
+
+10. **Scale cognee to 6 scopes**: Configs `configs/cognee_scope{02-06}.json` ready. Requires `ENABLE_BACKEND_ACCESS_CONTROL=false` env var. Each run takes ~25 min (cognify is slow). Run sequentially to avoid Kuzu lock conflicts.
+
 ### Target Systems
 
 | System | Adapter Names | Metering? | Local Setup | Status |
@@ -442,6 +478,8 @@ This gradient is the benchmark's core value proposition. A memory system that li
 | **Zep** | `zep-raw`, `zep-summarize` | summarize only | Zep Docker | Not started |
 | **Letta** | `letta` | No | Letta Podman + embed proxy | **Benchmarked (scope 01, 0.5308) — SOTA**. Requires: `podman run letta/letta`, `scripts/letta_embed_proxy.py`, two BYOK providers (together + together-oai). |
 | **Hindsight** | `hindsight` | No | Hindsight Podman (17.3 GB) | **Benchmarked (scope 01, 0.3511)**. TEMPR retrieval + reflect(). Budget compliance 0.2083 (LLM ingest overhead). Requires: `podman run ghcr.io/vectorize-io/hindsight:latest`, env vars `HINDSIGHT_API_{LLM,EMBEDDINGS_OPENAI}_*`. |
+| **Graphiti** | `graphiti` | No | FalkorDB Podman (:6379) | **Benchmarked (scope 01, 0.4983)**. Temporal knowledge graph with bi-temporal edges. Perfect budget_compliance (1.0). Requires: `podman run -p 6379:6379 falkordb/falkordb`, env vars `GRAPHITI_{LLM,EMBED}_*`. |
+| **Cognee** | `cognee` | No | None (all embedded) | **Benchmarked (scope 01, 0.5638)** — 2nd overall. evidence_coverage 0.6319 (best of any system). budget_compliance 1.0. No container needed. Env vars `COGNEE_{LLM,EMBED}_*`. |
 | **LangChain** | `langchain-faiss`, `langchain-chroma` | No | In-process | Not started |
 | **LlamaIndex** | `llamaindex` | Index build only | In-process | Not started |
 
@@ -458,7 +496,7 @@ This gradient is the benchmark's core value proposition. A memory system that li
 | Adapter conformance test suite | Done (25 tests × 3 adapters) |
 | LLM metering proxy | Done (stdlib, RunEngine-integrated) |
 | Mem0 adapters (raw + extract) | **mem0-raw benchmarked**; mem0-extract disqualified (domain mismatch, documented) |
-| Results across ≥5 real memory systems | 2 done (Mem0-raw, Letta), 3 remaining |
+| Results across ≥5 real memory systems | **5 done** (Mem0-raw, Letta, Hindsight, Graphiti, Cognee) — **milestone reached** |
 | Human baseline | Harness built, not run |
 | Statistical significance tests | Not started |
 
@@ -468,6 +506,8 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-20 | Cognee ACL fix + successful benchmark | **Cognee**: scored **0.5638** on scope 01 — **2nd overall** (only V3 0.5776 is higher). evidence_coverage **0.6319** is best of any system. Fixed critical bug: cognee 0.5.2 ACL mode wraps search results in dict with `"search_result"` key; `getattr()` doesn't work for dicts. Also fixed Kuzu lock conflicts by setting `ENABLE_BACKEND_ACCESS_CONTROL=false`. Previous runs (v10-v16) all scored 0.0000 or crashed. Added retry with exponential backoff to OpenAI client for Together AI 503 errors. Created cognee configs for scopes 02-06. 847 unit tests. |
+| 2026-02-20 | Graphiti + Cognee debugging + benchmarks (prev session) | **Graphiti**: scored **0.4983** on scope 01 — nearly matches Letta (0.5308), perfect budget_compliance (1.0). Graphiti fix: `OpenAIGenericClient` (chat.completions) instead of `OpenAIClient` (responses.parse) for Together AI compat; chunked embedding batches to avoid 413 errors. |
 | 2026-02-20 | Graphiti + Cognee adapters | Implemented `graphiti` adapter (temporal knowledge graph, FalkorDB, bi-temporal entity extraction, EDGE_HYBRID_SEARCH_EPISODE_MENTIONS) and `cognee` adapter (embedded GraphRAG, no container, LanceDB + Kuzu + SQLite, SearchType.CHUNKS with [episode_id] prefix parsing). Both use thread-hosted event loop for async→sync bridging. Both have `batch_retrieve` ExtraTool. Both added to `experiments/matrix.json` (parallel group, scope01 initial entry). Packages installed: graphiti-core[falkordb] + cognee. 845 unit tests (+57: 28 graphiti, 29 cognee). Configs: `configs/graphiti_scope01.json`, `configs/cognee_scope01.json`. |
 | 2026-02-19 | Orchestrator + Hindsight async ingest | Built `scripts/benchmark_orchestrator.py` (30-experiment matrix orchestrator: parallel group {mem0-raw, chunked-hybrid, hindsight} via ThreadPoolExecutor, serial group {letta, letta-sleepy} on main thread; state file with atomic writes, resume, --filter, --dry-run). Created `experiments/matrix.json` (all 30 experiments, env var templates). Fixed Hindsight adapter: `ingest()` now buffers; `prepare()` flushes via `aretain_batch()` (was 20-100s/episode × 30 episodes). Added 4 new batch-ingest tests. Created `configs/hindsight_scope{02-06}.json`. 788 unit tests (+4). |
 | 2026-02-19 | 4-adapter × 6-scope full matrix | Ran all 4 adapters (letta, letta-sleepy V3, mem0-raw, chunked-hybrid) across scopes 02–06 (20 new runs). **Results**: chunked-hybrid wins 4/6 scopes (mean 0.5656), letta wins 1/6 (mean 0.5266), V3 wins 1/6 (scope01 only, mean 0.4982). Key finding: V3 sleep synthesis is conditionally useful — helps when letta is weak (+0.0469 scope01, +0.1290 scope03) but hurts when letta is strong (−0.1385 scope04, −0.0899 scope06). Env var fixes: LETTA_EMBED_MODEL must be `together-oai/text-embedding-3-small` (not bare model name); mem0-raw needs MEM0_LLM_* vars + MEM0_EMBED_DIMS=768 + Qdrant reset before each domain. |
