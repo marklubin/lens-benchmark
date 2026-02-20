@@ -5,7 +5,7 @@ import pytest
 
 from lens.adapters.registry import get_adapter
 
-_ADAPTER_NAMES = ["null", "sqlite", "sqlite-fts"]
+_ADAPTER_NAMES = ["null", "sqlite", "sqlite-fts", "compaction"]
 
 
 @pytest.fixture(params=_ADAPTER_NAMES)

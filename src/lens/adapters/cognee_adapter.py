@@ -9,7 +9,7 @@ Requires:
 
 Environment variables:
     COGNEE_LLM_API_KEY     LLM API key (required)
-    COGNEE_LLM_MODEL       LLM model (default: Qwen/Qwen3-235B-A22B-Instruct-2507-tput)
+    COGNEE_LLM_MODEL       LLM model (default: meta-llama/Llama-3.3-70B-Instruct-Turbo)
     COGNEE_LLM_ENDPOINT    LLM API base URL (default: https://api.together.xyz/v1)
     COGNEE_EMBED_API_KEY   Embedding API key (required)
     COGNEE_EMBED_MODEL     Embedding model (default: Alibaba-NLP/gte-modernbert-base)
@@ -107,7 +107,7 @@ class CogneeAdapter(MemoryAdapter):
     def __init__(self) -> None:
         self._llm_api_key = os.environ.get("COGNEE_LLM_API_KEY", "")
         self._llm_model = os.environ.get(
-            "COGNEE_LLM_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+            "COGNEE_LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
         )
         self._llm_endpoint = os.environ.get(
             "COGNEE_LLM_ENDPOINT", "https://api.together.xyz/v1"
@@ -239,7 +239,7 @@ class CogneeAdapter(MemoryAdapter):
 
         return cognee
 
-    def reset(self, scope_id: str) -> None:
+    def reset(self, scope_id: str, cache_key: str | None = None) -> None:
         """Clear all cognee data and set a fresh dataset name.
 
         Calls cognee.prune.prune_data() + prune_system() to wipe all graphs,
@@ -248,8 +248,11 @@ class CogneeAdapter(MemoryAdapter):
         Note: cognee.prune is a CLASS with static async methods, NOT a callable.
         cognee.prune() would just create a class instance (no-op). We must call
         the actual prune_data() and prune_system() static methods.
+
+        If cache_key is provided, it is used as the suffix for deterministic
+        dataset naming (enables cache reconnection).
         """
-        suffix = uuid.uuid4().hex[:8]
+        suffix = cache_key or uuid.uuid4().hex[:8]
         safe_scope = "".join(c if c.isalnum() or c == "_" else "_" for c in scope_id)
         self._dataset_id = f"lens_{safe_scope}_{suffix}"
         self._text_cache = {}
@@ -435,6 +438,12 @@ class CogneeAdapter(MemoryAdapter):
 
             # Unwrap cognee SearchResult → payload dicts or plain strings
             chunk_list = self._extract_chunks(item)
+            if not chunk_list:
+                log.warning(
+                    "_extract_chunks: empty from type=%s repr=%.200s",
+                    type(item).__name__,
+                    repr(item),
+                )
             for chunk_text in chunk_list:
                 if len(search_results) >= cap:
                     break
@@ -510,7 +519,11 @@ class CogneeAdapter(MemoryAdapter):
                         texts.append(str(text))
             return texts
 
-        log.warning("_extract_chunks: unhandled type %s", type(search_result).__name__)
+        log.warning(
+            "_extract_chunks: unhandled type=%s repr=%.200s",
+            type(search_result).__name__,
+            repr(search_result),
+        )
         return []
 
     def _match_episode(self, chunk_text: str) -> str | None:
@@ -568,3 +581,30 @@ class CogneeAdapter(MemoryAdapter):
                     docs.append(doc.to_dict())
             return {"documents": docs, "count": len(docs)}
         return super().call_extended_tool(tool_name, arguments)
+
+    def get_cache_state(self) -> dict | None:
+        """Return state needed to reconnect to cognee's embedded databases."""
+        if not self._dataset_id:
+            return None
+        return {
+            "dataset_id": self._dataset_id,
+            "text_cache": self._text_cache,
+        }
+
+    def restore_cache_state(self, state: dict) -> bool:
+        """Restore from cached state — skip prune and cognify, just reconnect."""
+        try:
+            self._dataset_id = state["dataset_id"]
+            self._text_cache = state.get("text_cache", {})
+            self._pending_episodes = []
+            # Ensure cognee module is loaded (patches applied)
+            self._get_cognee()
+            log.info(
+                "Restored Cognee cache: dataset=%s, %d episodes",
+                self._dataset_id,
+                len(self._text_cache),
+            )
+            return True
+        except Exception as e:
+            log.warning("Failed to restore Cognee cache: %s", e)
+            return False

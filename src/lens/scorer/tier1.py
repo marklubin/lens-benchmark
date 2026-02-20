@@ -155,6 +155,7 @@ class BudgetCompliance(BaseMetric):
         max_tokens = 0
         total_wall_ms = 0.0
         max_wall_ms = 0.0
+        per_question_timing: list[dict] = []
         for qr in qrs:
             total_violations += len(qr.answer.budget_violations)
             tokens = qr.answer.total_tokens
@@ -165,6 +166,17 @@ class BudgetCompliance(BaseMetric):
             total_wall_ms += wall
             if wall > max_wall_ms:
                 max_wall_ms = wall
+            per_question_timing.append({
+                "question_id": qr.question.question_id,
+                "question_type": qr.question.question_type,
+                "checkpoint": qr.question.checkpoint_after,
+                "wall_time_ms": round(wall, 1),
+                "total_tokens": tokens,
+                "tool_calls": qr.answer.tool_calls_made,
+            })
+
+        # Sort by wall_time descending (slowest first)
+        per_question_timing.sort(key=lambda x: x["wall_time_ms"], reverse=True)
 
         n = len(qrs) if qrs else 1
         value = max(0.0, 1.0 - total_violations / n)
@@ -182,6 +194,7 @@ class BudgetCompliance(BaseMetric):
                 "total_wall_time_minutes": round(total_wall_ms / 60_000, 2),
                 "avg_wall_time_ms": round(total_wall_ms / n, 1),
                 "max_wall_time_ms": round(max_wall_ms, 1),
+                "per_question_timing": per_question_timing,
             },
         )
 

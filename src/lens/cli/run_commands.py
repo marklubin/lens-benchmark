@@ -19,10 +19,12 @@ def _default_dataset() -> str:
 @click.option("--adapter", default="sqlite", help="Adapter name")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config JSON file")
 @click.option("--out", "output_dir", default="output", help="Output directory")
-@click.option("--budget", default="standard", type=click.Choice(["fast", "standard", "extended"]))
+@click.option("--budget", default="standard", type=click.Choice(["fast", "standard", "extended", "constrained-4k", "constrained-2k"]))
 @click.option("--seed", default=42, type=int)
 @click.option("--provider", default=None, help="LLM provider (mock, openai)")
 @click.option("--model", default=None, help="LLM model name")
+@click.option("--parallel-questions", default=None, type=int, help="Number of questions to answer concurrently (default: 1)")
+@click.option("--cache-dir", default=None, type=click.Path(), help="Directory for adapter state caching (enables cache)")
 @click.option("-v", "--verbose", count=True, help="Increase verbosity")
 def run(
     dataset: str | None,
@@ -33,6 +35,8 @@ def run(
     seed: int,
     provider: str | None,
     model: str | None,
+    parallel_questions: int | None,
+    cache_dir: str | None,
     verbose: int,
 ) -> None:
     """Run the LENS benchmark against a memory adapter."""
@@ -71,6 +75,12 @@ def run(
         config.llm.provider = provider
     if model is not None:
         config.llm.model = model
+
+    # CLI overrides for throughput options
+    if parallel_questions is not None:
+        config.parallel_questions = parallel_questions
+    if cache_dir is not None:
+        config.cache_dir = cache_dir
 
     # Resolve env vars into LLM config
     config.llm = config.llm.resolve_env()

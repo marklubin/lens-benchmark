@@ -165,6 +165,28 @@ class MemoryAdapter(ABC):
     def get_capabilities(self) -> CapabilityManifest:
         """Return the adapter's capability manifest."""
 
+    # --- Synthetic refs (adapter-generated documents) ---
+
+    def get_synthetic_refs(self) -> list[tuple[str, str]]:
+        """Return (ref_id, text) pairs for adapter-generated documents.
+
+        These are documents produced by the adapter (e.g. summaries,
+        consolidations) that don't correspond to original episodes but
+        should be treated as valid references for evidence grounding.
+        Called by the runner after prepare() to register in the vault.
+        """
+        return []
+
+    # --- Caching protocol (optional) ---
+
+    def get_cache_state(self) -> dict | None:
+        """Return serializable state for caching. None = not cacheable."""
+        return None
+
+    def restore_cache_state(self, state: dict) -> bool:
+        """Restore from cached state. Return True if successful."""
+        return False
+
     # --- Optional extended tools ---
 
     def call_extended_tool(self, tool_name: str, arguments: dict) -> object:

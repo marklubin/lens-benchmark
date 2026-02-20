@@ -90,11 +90,48 @@ def generate_html_report(scorecard: ScoreCard) -> str:
   <tbody>{metric_rows}
   </tbody>
 </table>
+<h2>Per-Question Timing</h2>
+{_build_timing_html(scorecard)}
 <h2>Details</h2>
 {details_sections}
 </body>
 </html>
 """
+
+
+def _build_timing_html(scorecard: ScoreCard) -> str:
+    """Build an HTML table of per-question timing data."""
+    budget_metric = next(
+        (m for m in scorecard.metrics if m.name == "budget_compliance"), None
+    )
+    timing = budget_metric.details.get("per_question_timing") if budget_metric else None
+    if not timing:
+        return "<p>No per-question timing data available.</p>"
+
+    rows = ""
+    for t in timing:
+        wall_s = t["wall_time_ms"] / 1000
+        if wall_s < 10:
+            color = "#22c55e"
+        elif wall_s < 30:
+            color = "#eab308"
+        else:
+            color = "#ef4444"
+        rows += f"""
+        <tr>
+          <td>{_esc(str(t['question_id']))}</td>
+          <td>{_esc(str(t['question_type']))}</td>
+          <td>{t['checkpoint']}</td>
+          <td style="color:{color};font-weight:600">{wall_s:.1f}s</td>
+          <td>{t['total_tokens']}</td>
+          <td>{t['tool_calls']}</td>
+        </tr>"""
+
+    return f"""<table>
+  <thead><tr><th>Question</th><th>Type</th><th>Checkpoint</th><th>Wall Time</th><th>Tokens</th><th>Tool Calls</th></tr></thead>
+  <tbody>{rows}
+  </tbody>
+</table>"""
 
 
 def _esc(text: str) -> str:

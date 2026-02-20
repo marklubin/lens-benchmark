@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import click
 from rich.console import Console
 
 console = Console()
+
+# Strip Qwen3-style <think>...</think> tags from model output
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks from Qwen3 reasoning output."""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _make_openai_judge(model: str, api_key: str | None = None):
@@ -25,16 +34,79 @@ def _make_openai_judge(model: str, api_key: str | None = None):
         client_kwargs["base_url"] = base_url
     client = openai.OpenAI(**client_kwargs)
 
+    # Detect Qwen3 models that default to thinking mode
+    _is_thinking_model = "qwen3" in model.lower()
+
     def judge_fn(prompt: str) -> str:
+        # Append /no_think for Qwen3 to avoid wasting tokens on reasoning
+        content = prompt + "\n/no_think" if _is_thinking_model else prompt
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": content}],
             temperature=0.0,
-            max_tokens=10,
+            max_tokens=20 if _is_thinking_model else 10,
         )
-        return resp.choices[0].message.content or "TIE"
+        raw = resp.choices[0].message.content or "TIE"
+        return _strip_think_tags(raw) if _is_thinking_model else raw
 
     return judge_fn
+
+
+def _make_baseline_llm_fn(model: str, api_key: str | None = None):
+    """Create a baseline_fn callable for naive baseline generation."""
+    import openai
+
+    key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LENS_LLM_API_KEY")
+    if not key:
+        raise click.ClickException(
+            "Baseline requires an API key. Set OPENAI_API_KEY or LENS_LLM_API_KEY."
+        )
+    base_url = os.environ.get("LENS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+    client_kwargs: dict = {"api_key": key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = openai.OpenAI(**client_kwargs)
+
+    _is_thinking_model = "qwen3" in model.lower()
+
+    def llm_fn(system_prompt: str, user_prompt: str) -> str:
+        content = user_prompt + "\n/no_think" if _is_thinking_model else user_prompt
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.0,
+            max_tokens=1024,
+        )
+        raw = resp.choices[0].message.content or ""
+        return _strip_think_tags(raw) if _is_thinking_model else raw
+
+    return llm_fn
+
+
+def _load_run_config(run_dir: str) -> dict | None:
+    """Load config.json from a run directory."""
+    config_path = Path(run_dir) / "config.json"
+    if config_path.exists():
+        try:
+            return json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
+def _load_episodes_for_baseline(dataset_path: str):
+    """Load episodes from the dataset file for naive baseline generation."""
+    from lens.datasets.loader import load_dataset, load_episodes
+    data = load_dataset(dataset_path)
+    scopes = load_episodes(data)
+    # Flatten: NaiveBaselineGenerator expects a flat list of Episode objects
+    all_episodes = []
+    for eps in scopes.values():
+        all_episodes.extend(eps)
+    return all_episodes
 
 
 @click.command()
@@ -43,8 +115,10 @@ def _make_openai_judge(model: str, api_key: str | None = None):
 @click.option("--tier", type=int, default=None, help="Only compute metrics of this tier")
 @click.option("--judge-model", default=None, help="OpenAI model for LLM judge (e.g. gpt-4o-mini)")
 @click.option("--no-gate", is_flag=True, help="Disable tier-1 hard gates (budget/grounding)")
+@click.option("--no-baseline", is_flag=True, help="Skip naive baseline generation (faster re-score)")
+@click.option("--parallel-judge", type=int, default=1, help="Concurrent judge calls (use >1 with self-hosted vLLM)")
 @click.option("-v", "--verbose", count=True)
-def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: str | None, no_gate: bool, verbose: int) -> None:
+def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: str | None, no_gate: bool, no_baseline: bool, parallel_judge: int, verbose: int) -> None:
     """Score a benchmark run."""
     from lens.artifacts.bundle import load_run_result
     from lens.core.errors import atomic_write
@@ -62,10 +136,54 @@ def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: 
         logger.info(f"Using LLM judge: {judge_model}")
         judge_fn = _make_openai_judge(judge_model)
 
+    # Build naive baseline generator if judge is enabled and not skipped
+    baseline_generator = None
+    if judge_model and not no_baseline:
+        run_config = _load_run_config(run_dir)
+        dataset_path = run_config.get("dataset") if run_config else None
+        agent_model = run_config.get("llm", {}).get("model") if run_config else None
+
+        if dataset_path and agent_model:
+            # Resolve dataset path relative to project root
+            ds_path = Path(dataset_path)
+            if not ds_path.is_absolute():
+                # Try relative to run dir, then cwd
+                candidates = [Path(run_dir) / ds_path, Path.cwd() / ds_path]
+                ds_path = next((p for p in candidates if p.exists()), ds_path)
+
+            if ds_path.exists():
+                logger.info(f"Generating naive baseline with model: {agent_model}")
+                from lens.scorer.naive_baseline import NaiveBaselineGenerator
+
+                # Read max_cumulative_result_tokens from run config for fair comparison
+                max_result_tokens = (
+                    run_config.get("agent_budget", {}).get("max_cumulative_result_tokens", 0)
+                    if run_config else 0
+                )
+
+                baseline_llm_fn = _make_baseline_llm_fn(agent_model)
+                episodes = _load_episodes_for_baseline(str(ds_path))
+                cache_dir = Path(run_dir) / "scores"
+                baseline_generator = NaiveBaselineGenerator(
+                    llm_fn=baseline_llm_fn,
+                    episodes=episodes,
+                    cache_dir=cache_dir,
+                    model_id=agent_model,
+                    max_result_tokens=max_result_tokens,
+                )
+            else:
+                logger.info(f"Dataset not found at {ds_path}, skipping naive baseline")
+        else:
+            logger.info("Run config missing dataset/model, skipping naive baseline")
+
     gate_thresholds = {} if no_gate else None
+    if parallel_judge > 1:
+        logger.info(f"Parallel judge workers: {parallel_judge}")
     scorer = ScorerEngine(
         tier_filter=tier, logger=logger, judge_fn=judge_fn,
         gate_thresholds=gate_thresholds,
+        baseline_generator=baseline_generator,
+        max_judge_workers=parallel_judge,
     )
     scorecard = scorer.score(result)
 
@@ -80,3 +198,24 @@ def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: 
 
     console.print(f"\n[bold green]Scoring complete![/bold green] Scorecard: {output_path}")
     console.print(f"Composite score: [bold]{scorecard.composite_score:.4f}[/bold]")
+
+    # Print timing summary
+    budget_metric = next(
+        (m for m in scorecard.metrics if m.name == "budget_compliance"), None
+    )
+    if budget_metric and budget_metric.details.get("avg_wall_time_ms"):
+        avg_s = budget_metric.details["avg_wall_time_ms"] / 1000
+        total_min = budget_metric.details.get("total_wall_time_minutes", 0)
+        console.print(f"Timing: {avg_s:.1f}s avg/question, {total_min:.1f} min total")
+
+    # Print naive baseline advantage if computed
+    nba_metric = next(
+        (m for m in scorecard.metrics if m.name == "naive_baseline_advantage"), None
+    )
+    if nba_metric and not nba_metric.details.get("not_configured"):
+        console.print(
+            f"Naive baseline advantage: [bold]{nba_metric.value:.4f}[/bold] "
+            f"(win:{nba_metric.details.get('win_rate', 0):.0%} "
+            f"loss:{nba_metric.details.get('loss_rate', 0):.0%} "
+            f"tie:{nba_metric.details.get('tie_rate', 0):.0%})"
+        )

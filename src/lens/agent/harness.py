@@ -92,7 +92,19 @@ class AgentHarness:
             # Post-flight: record and check
             enforcer.record_tool_call()
             enforcer.check_latency(latency_ms)
-            enforcer.check_payload(len(result.content.encode("utf-8")))
+            result_bytes = len(result.content.encode("utf-8"))
+            enforcer.check_payload(result_bytes)
+
+            # Check cumulative result token cap
+            if not result.is_error and not enforcer.check_cumulative_results(result_bytes):
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=(
+                        "[Context budget exhausted — synthesize answer from "
+                        "evidence already retrieved]"
+                    ),
+                    is_error=False,
+                )
 
             # Track ref_ids from memory_retrieve and any extended tool with ref_ids
             if not result.is_error:

@@ -18,6 +18,7 @@ class QuestionBudget:
     max_latency_per_call_ms: float = 5000
     max_total_tool_calls: int = 20
     max_agent_tokens: int = 8192
+    max_cumulative_result_tokens: int = 0  # 0 = unlimited
 
 
 class BudgetEnforcement:
@@ -29,6 +30,8 @@ class BudgetEnforcement:
         self.tool_calls_used: int = 0
         self.total_payload_bytes: int = 0
         self.total_tokens: int = 0
+        self.cumulative_result_tokens: int = 0
+        self.context_exhausted: bool = False
         self.violations: list[str] = []
         self.warnings: list[str] = []
 
@@ -86,6 +89,28 @@ class BudgetEnforcement:
         """Add to total tokens (without enforcement check)."""
         self.total_tokens += n
 
+    def check_cumulative_results(self, result_bytes: int) -> bool:
+        """Check if adding this result would exceed the cumulative result token cap.
+
+        Estimates tokens as bytes / 4. Returns True if within budget (or unlimited),
+        False if over limit. Records a violation when exceeded.
+        """
+        if self.budget.max_cumulative_result_tokens <= 0:
+            return True  # Unlimited
+
+        estimated_tokens = result_bytes // 4
+        self.cumulative_result_tokens += estimated_tokens
+
+        if self.cumulative_result_tokens > self.budget.max_cumulative_result_tokens:
+            self.context_exhausted = True
+            msg = (
+                f"Cumulative result token limit exceeded: "
+                f"{self.cumulative_result_tokens} > {self.budget.max_cumulative_result_tokens}"
+            )
+            self.violations.append(msg)
+            return False
+        return True
+
     @property
     def is_exhausted(self) -> bool:
         """True if any hard limit has been reached."""
@@ -93,11 +118,12 @@ class BudgetEnforcement:
             self.turns_used >= self.budget.max_turns
             or self.tool_calls_used >= self.budget.max_total_tool_calls
             or self.total_tokens >= self.budget.max_agent_tokens
+            or self.context_exhausted
         )
 
     def summary(self) -> dict:
         """Return a dict of all tracked values, violations, and warnings."""
-        return {
+        s: dict = {
             "turns_used": self.turns_used,
             "tool_calls_used": self.tool_calls_used,
             "total_payload_bytes": self.total_payload_bytes,
@@ -113,3 +139,9 @@ class BudgetEnforcement:
                 "max_agent_tokens": self.budget.max_agent_tokens,
             },
         }
+        if self.budget.max_cumulative_result_tokens > 0:
+            s["cumulative_result_tokens"] = self.cumulative_result_tokens
+            s["budget"]["max_cumulative_result_tokens"] = (
+                self.budget.max_cumulative_result_tokens
+            )
+        return s

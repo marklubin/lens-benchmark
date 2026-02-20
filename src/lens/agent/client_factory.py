@@ -36,6 +36,7 @@ def create_llm_client(config: LLMConfig) -> BaseLLMClient:
             base_url=config.api_base,
             temperature=config.temperature,
             seed=config.seed,
+            max_tokens=4096,
         )
 
     raise ConfigError(

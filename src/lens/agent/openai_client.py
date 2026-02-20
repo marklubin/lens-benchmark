@@ -14,6 +14,16 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+_THINK_RE = __import__("re").compile(r"<think>[\s\S]*?</think>\s*", __import__("re").DOTALL)
+
+
+def _strip_think(text: str | None) -> str:
+    """Remove <think>...</think> blocks produced by Qwen3 reasoning mode."""
+    if not text:
+        return text or ""
+    return _THINK_RE.sub("", text).strip()
+
+
 class OpenAIClient(BaseLLMClient):
     """LLM client using the OpenAI Python SDK with tool-use support.
 
@@ -28,6 +38,7 @@ class OpenAIClient(BaseLLMClient):
         base_url: str | None = None,
         temperature: float = 0.0,
         seed: int | None = None,
+        max_tokens: int = 4096,
     ) -> None:
         try:
             import openai
@@ -44,6 +55,9 @@ class OpenAIClient(BaseLLMClient):
         self._model = model
         self._temperature = temperature
         self._seed = seed
+        self._max_tokens = max_tokens
+        # Detect Qwen3 models — need /no_think suffix and <think> stripping
+        self._is_qwen3 = "qwen3" in model.lower()
 
     def _completions_with_retry(self, max_retries: int = 5, **kwargs):
         """Call chat.completions.create with exponential backoff on transient errors."""
@@ -79,8 +93,13 @@ class OpenAIClient(BaseLLMClient):
         max_turns: int = 10,
         turn_callback: Callable[[AgentTurn], None] | None = None,
     ) -> list[AgentTurn]:
+        # Suppress Qwen3 thinking mode to avoid massive <think> blocks
+        sys_content = system_prompt
+        if self._is_qwen3:
+            sys_content = system_prompt + "\n/no_think"
+
         messages: list[dict] = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": sys_content},
             {"role": "user", "content": user_message},
         ]
         openai_tools = [_to_openai_tool(td) for td in tools] if tools else None
@@ -91,6 +110,7 @@ class OpenAIClient(BaseLLMClient):
                 "model": self._model,
                 "messages": messages,
                 "temperature": self._temperature,
+                "max_tokens": self._max_tokens,
             }
             if openai_tools:
                 kwargs["tools"] = openai_tools
@@ -102,6 +122,10 @@ class OpenAIClient(BaseLLMClient):
             message = choice.message
             usage = response.usage
             tokens = (usage.total_tokens if usage else 0) or 0
+
+            # Strip <think> blocks from Qwen3 responses
+            if self._is_qwen3 and message.content:
+                message.content = _strip_think(message.content)
 
             tool_calls_in_msg = message.tool_calls or []
 

@@ -289,6 +289,41 @@ class Mem0RawAdapter(_Mem0Base):
 
         self._ep_index[f"{scope_id}:{episode_id}"] = _extract_mem_ids(result)
 
+    def get_cache_state(self) -> dict | None:
+        """Return state needed to skip re-ingest on cache hit."""
+        import logging
+
+        log = logging.getLogger(__name__)
+        if not self._ep_index:
+            return None
+        log.info(
+            "Caching mem0-raw state: %d ep_index entries, scope=%s",
+            len(self._ep_index),
+            self._current_scope_id,
+        )
+        return {
+            "ep_index": self._ep_index,
+            "current_scope_id": self._current_scope_id,
+        }
+
+    def restore_cache_state(self, state: dict) -> bool:
+        """Restore ep_index and scope; Qdrant data persists across runs."""
+        import logging
+
+        log = logging.getLogger(__name__)
+        try:
+            self._ep_index = state["ep_index"]
+            self._current_scope_id = state.get("current_scope_id")
+            log.info(
+                "Restored mem0-raw cache: %d ep_index entries, scope=%s",
+                len(self._ep_index),
+                self._current_scope_id,
+            )
+            return True
+        except Exception as e:
+            log.warning("Failed to restore mem0-raw cache: %s", e)
+            return False
+
 
 @register_adapter("mem0-extract")
 class Mem0ExtractAdapter(_Mem0Base):

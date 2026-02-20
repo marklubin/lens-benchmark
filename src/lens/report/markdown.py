@@ -27,6 +27,23 @@ def generate_markdown_report(scorecard: ScoreCard) -> str:
 
     lines.append("")
 
+    # Per-question timing table
+    budget_metric = next(
+        (m for m in scorecard.metrics if m.name == "budget_compliance"), None
+    )
+    if budget_metric and budget_metric.details.get("per_question_timing"):
+        lines.append("## Per-Question Timing")
+        lines.append("")
+        lines.append("| Question | Type | Checkpoint | Wall Time | Tokens | Tool Calls |")
+        lines.append("|----------|------|------------|-----------|--------|------------|")
+        for t in budget_metric.details["per_question_timing"]:
+            wall_s = t["wall_time_ms"] / 1000
+            lines.append(
+                f"| {t['question_id']} | {t['question_type']} | {t['checkpoint']} "
+                f"| {wall_s:.1f}s | {t['total_tokens']} | {t['tool_calls']} |"
+            )
+        lines.append("")
+
     # Details
     lines.append("## Details")
     lines.append("")
@@ -35,6 +52,8 @@ def generate_markdown_report(scorecard: ScoreCard) -> str:
             lines.append(f"### {metric.name}")
             lines.append("")
             for k, v in metric.details.items():
+                if k == "per_question_timing":
+                    continue  # Already rendered as a table above
                 lines.append(f"- **{k}**: {v}")
             lines.append("")
 
@@ -80,6 +99,36 @@ def generate_comparison_report(scorecards: list[ScoreCard]) -> str:
             )
             row += f" {value:.4f} |" if value is not None else " — |"
         lines.append(row)
+
+    # Timing comparison
+    has_timing = any(
+        m.name == "budget_compliance" and m.details.get("per_question_timing")
+        for sc in scorecards
+        for m in sc.metrics
+    )
+    if has_timing:
+        lines.append("")
+        lines.append("## Timing Comparison")
+        lines.append("")
+        t_header = "| Stat |"
+        t_sep = "|------|"
+        for sc in scorecards:
+            t_header += f" {sc.adapter} |"
+            t_sep += "------|"
+        lines.append(t_header)
+        lines.append(t_sep)
+
+        for stat_key, stat_label in [
+            ("total_wall_time_minutes", "Total (min)"),
+            ("avg_wall_time_ms", "Avg/question (ms)"),
+            ("max_wall_time_ms", "Max/question (ms)"),
+        ]:
+            row = f"| {stat_label} |"
+            for sc in scorecards:
+                bm = next((m for m in sc.metrics if m.name == "budget_compliance"), None)
+                val = bm.details.get(stat_key) if bm else None
+                row += f" {val} |" if val is not None else " -- |"
+            lines.append(row)
 
     lines.append("")
     return "\n".join(lines)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 from typing import Callable
 
 from lens.core.models import MetricResult, RunResult
@@ -23,11 +24,20 @@ class AnswerQuality(BaseMetric):
 
     def __init__(self, judge_fn: Callable[[str], str] | None = None) -> None:
         self._judge_fn = judge_fn
+        self._max_workers: int = 1
 
-    def configure(self, *, judge_fn: Callable[[str], str] | None = None) -> None:
+    def configure(
+        self,
+        *,
+        judge_fn: Callable[[str], str] | None = None,
+        max_judge_workers: int | None = None,
+        **kwargs,
+    ) -> None:
         """Inject the LLM judge callable after construction."""
         if judge_fn is not None:
             self._judge_fn = judge_fn
+        if max_judge_workers is not None:
+            self._max_workers = max_judge_workers
 
     @property
     def name(self) -> str:
@@ -56,28 +66,44 @@ class AnswerQuality(BaseMetric):
         if not qrs:
             return MetricResult(name=self.name, tier=self.tier, value=0.0)
 
-        scores: list[float] = []
-        per_question: list[dict] = []
+        # Separate questions with and without key facts
+        qrs_with_facts = [(qr, qr.question.ground_truth.key_facts) for qr in qrs]
+        no_fact_count = sum(1 for _, kf in qrs_with_facts if not kf)
 
-        for qr in qrs:
-            key_facts = qr.question.ground_truth.key_facts
+        def _score_question(args):
+            qr, key_facts = args
             if not key_facts:
-                scores.append(1.0)
-                continue
-
+                return None  # handled separately
             win_rate, details = pairwise_fact_judge(
                 candidate_answer=qr.answer.answer_text,
                 reference_answer=qr.question.ground_truth.canonical_answer,
                 key_facts=key_facts,
                 question=qr.question.prompt,
                 judge_fn=self._judge_fn,
+                max_workers=self._max_workers,
             )
-            scores.append(win_rate)
-            per_question.append({
+            return {
                 "question_id": qr.question.question_id,
                 "win_rate": win_rate,
                 "fact_details": details,
-            })
+            }
+
+        scoreable = [(qr, kf) for qr, kf in qrs_with_facts if kf]
+
+        if self._max_workers > 1 and len(scoreable) > 1:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(self._max_workers, len(scoreable))
+            ) as pool:
+                per_question_results = list(pool.map(_score_question, scoreable))
+        else:
+            per_question_results = [_score_question(args) for args in scoreable]
+
+        scores: list[float] = [1.0] * no_fact_count
+        per_question: list[dict] = []
+        for pq in per_question_results:
+            if pq is not None:
+                scores.append(pq["win_rate"])
+                per_question.append(pq)
 
         value = sum(scores) / len(scores) if scores else 0.0
         return MetricResult(

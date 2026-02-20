@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import concurrent.futures
+import hashlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -24,6 +27,18 @@ from lens.core.models import (
 )
 from lens.metering.manager import MeteringManager
 from lens.runner.anticheat import EpisodeVault
+
+log = logging.getLogger(__name__)
+
+
+def _cache_key(adapter_name: str, scope_id: str, episode_ids: list[str]) -> str:
+    """Deterministic hash for adapter + scope + episode set."""
+    h = hashlib.sha256()
+    h.update(adapter_name.encode())
+    h.update(scope_id.encode())
+    for eid in sorted(episode_ids):
+        h.update(eid.encode())
+    return h.hexdigest()[:12]
 
 
 class RunEngine:
@@ -126,12 +141,51 @@ class RunEngine:
     ) -> ScopeResult:
         """Run the benchmark for a single scope."""
         episodes = sorted(episodes, key=lambda e: e.timestamp)
+
+        # Always populate vault (needed for scoring regardless of cache)
+        for ep in episodes:
+            self.vault.store(ep.episode_id, ep.text)
+
+        # Check adapter state cache
+        cache_hit = False
+        manifest_path: Path | None = None
+        ck: str | None = None
+
+        if self.config.cache_dir:
+            adapter_name = type(adapter).__name__
+            ck = _cache_key(adapter_name, scope_id, [e.episode_id for e in episodes])
+            manifest_path = Path(self.config.cache_dir) / f"{adapter_name}_{ck}.json"
+            if manifest_path.exists():
+                try:
+                    state = json.loads(manifest_path.read_text())
+                    if adapter.restore_cache_state(state):
+                        cache_hit = True
+                        self.logger.info(
+                            f"  Cache hit for {adapter_name} / {scope_id} — skipping ingest/prepare"
+                        )
+                        # Register synthetic refs from cached adapter
+                        for ref_id, text in adapter.get_synthetic_refs():
+                            self.vault.store(ref_id, text)
+                except Exception as e:
+                    log.warning("Cache restore failed for %s/%s: %s", adapter_name, scope_id, e)
+
+        if cache_hit:
+            # Jump straight to questions — run only the final checkpoint
+            # (cache stores state after all episodes ingested + prepared)
+            all_questions: list[Question] = []
+            for qs in questions_by_checkpoint.values():
+                all_questions.extend(qs)
+            final = len(episodes)
+            checkpoint_result = self._run_checkpoint(
+                adapter, scope_id, final, all_questions, skip_prepare=True
+            )
+            return ScopeResult(scope_id=scope_id, checkpoints=[checkpoint_result])
+
+        # Normal path: reset + ingest + prepare
         adapter.reset(scope_id)
         checkpoints_done: list[CheckpointResult] = []
 
         for idx, episode in enumerate(episodes, start=1):
-            self.vault.store(episode.episode_id, episode.text)
-
             self.logger.start_step("ingest")
             t0 = time.monotonic()
             adapter.ingest(
@@ -177,6 +231,17 @@ class RunEngine:
                 self._metering.reset()
             checkpoints_done.append(checkpoint_result)
 
+        # Save cache after successful run
+        if manifest_path is not None:
+            state = adapter.get_cache_state()
+            if state is not None:
+                try:
+                    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                    manifest_path.write_text(json.dumps(state))
+                    self.logger.info(f"  Saved adapter cache to {manifest_path}")
+                except Exception as e:
+                    log.warning("Failed to save adapter cache: %s", e)
+
         return ScopeResult(scope_id=scope_id, checkpoints=checkpoints_done)
 
     def _run_checkpoint(
@@ -185,16 +250,22 @@ class RunEngine:
         scope_id: str,
         checkpoint: int,
         questions: list[Question],
+        skip_prepare: bool = False,
     ) -> CheckpointResult:
         """Execute prepare + agent questions at a checkpoint."""
         self.logger.info(f"  Checkpoint {checkpoint} for {scope_id}")
         errors: list[str] = []
         timing: dict[str, float] = {}
 
-        # Optional prepare hook
-        t0 = time.monotonic()
-        adapter.prepare(scope_id, checkpoint)
-        timing["prepare_ms"] = (time.monotonic() - t0) * 1000
+        if not skip_prepare:
+            # Optional prepare hook
+            t0 = time.monotonic()
+            adapter.prepare(scope_id, checkpoint)
+            timing["prepare_ms"] = (time.monotonic() - t0) * 1000
+
+            # Register adapter-generated synthetic documents in vault
+            for ref_id, text in adapter.get_synthetic_refs():
+                self.vault.store(ref_id, text)
 
         # Build agent budget from config
         budget = QuestionBudget(
@@ -203,13 +274,14 @@ class RunEngine:
             max_latency_per_call_ms=self.config.agent_budget.max_latency_per_call_ms,
             max_total_tool_calls=self.config.agent_budget.max_tool_calls,
             max_agent_tokens=self.config.agent_budget.max_agent_tokens,
+            max_cumulative_result_tokens=self.config.agent_budget.max_cumulative_result_tokens,
         )
         harness = AgentHarness(self.llm_client, budget)
 
         question_results: list[QuestionResult] = []
-        for question in questions:
-            self.logger.verbose(f"    Question: {question.question_id}")
 
+        def _answer_one(question: Question) -> tuple[QuestionResult, float]:
+            self.logger.verbose(f"    Question: {question.question_id}")
             t0 = time.monotonic()
             answer = harness.answer(
                 question_prompt=question.prompt,
@@ -217,18 +289,32 @@ class RunEngine:
                 question_id=question.question_id,
             )
             q_ms = (time.monotonic() - t0) * 1000
-            timing[f"question_{question.question_id}_ms"] = q_ms
-
-            # Validate refs against vault
             retrieved = answer.refs_cited
             valid = [r for r in retrieved if self.vault.has(r)]
-
-            question_results.append(QuestionResult(
+            return QuestionResult(
                 question=question,
                 answer=answer,
                 retrieved_ref_ids=retrieved,
                 valid_ref_ids=valid,
-            ))
+            ), q_ms
+
+        max_workers = min(self.config.parallel_questions, len(questions)) if questions else 1
+        if max_workers > 1:
+            self.logger.info(f"    Answering {len(questions)} questions with {max_workers} workers")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(_answer_one, q): i for i, q in enumerate(questions)}
+                indexed_results: list[tuple[int, QuestionResult]] = []
+                for future in concurrent.futures.as_completed(futures):
+                    idx = futures[future]
+                    qr, q_ms = future.result()
+                    timing[f"question_{qr.question.question_id}_ms"] = q_ms
+                    indexed_results.append((idx, qr))
+            question_results = [qr for _, qr in sorted(indexed_results)]
+        else:
+            for question in questions:
+                qr, q_ms = _answer_one(question)
+                timing[f"question_{qr.question.question_id}_ms"] = q_ms
+                question_results.append(qr)
 
         return CheckpointResult(
             scope_id=scope_id,

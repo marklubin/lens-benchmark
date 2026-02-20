@@ -42,6 +42,7 @@ class AgentBudgetConfig:
     max_latency_per_call_ms: float = 5000
     max_agent_tokens: int = 32768
     ingest_max_latency_ms: float = 200
+    max_cumulative_result_tokens: int = 0  # 0 = unlimited
 
     @classmethod
     def fast(cls) -> AgentBudgetConfig:
@@ -83,8 +84,42 @@ class AgentBudgetConfig:
         )
 
     @classmethod
+    def constrained_4k(cls) -> AgentBudgetConfig:
+        """Constrained budget — 4K token cap on cumulative tool results."""
+        return cls(
+            preset="constrained-4k",
+            max_turns=6,
+            max_tool_calls=12,
+            max_payload_bytes=65536,
+            max_latency_per_call_ms=5000,
+            max_agent_tokens=16384,
+            ingest_max_latency_ms=200,
+            max_cumulative_result_tokens=4096,
+        )
+
+    @classmethod
+    def constrained_2k(cls) -> AgentBudgetConfig:
+        """Constrained budget — 2K token cap on cumulative tool results."""
+        return cls(
+            preset="constrained-2k",
+            max_turns=6,
+            max_tool_calls=12,
+            max_payload_bytes=65536,
+            max_latency_per_call_ms=5000,
+            max_agent_tokens=16384,
+            ingest_max_latency_ms=200,
+            max_cumulative_result_tokens=2048,
+        )
+
+    @classmethod
     def from_preset(cls, name: str) -> AgentBudgetConfig:
-        presets = {"fast": cls.fast, "standard": cls.standard, "extended": cls.extended}
+        presets = {
+            "fast": cls.fast,
+            "standard": cls.standard,
+            "extended": cls.extended,
+            "constrained-4k": cls.constrained_4k,
+            "constrained-2k": cls.constrained_2k,
+        }
         if name not in presets:
             msg = f"Unknown agent budget preset: {name!r}. Choose from: {list(presets)}"
             raise ValueError(msg)
@@ -97,6 +132,7 @@ class AgentBudgetConfig:
         for key in (
             "max_turns", "max_tool_calls", "max_payload_bytes",
             "max_latency_per_call_ms", "max_agent_tokens", "ingest_max_latency_ms",
+            "max_cumulative_result_tokens",
         ):
             if key in d:
                 setattr(config, key, d[key])
@@ -114,6 +150,8 @@ class RunConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     checkpoints: list[int] = field(default_factory=lambda: [10, 20, 40, 80])
     seed: int = 42
+    parallel_questions: int = 1  # Number of questions to answer concurrently
+    cache_dir: str | None = None  # Directory for adapter state caching
 
     @classmethod
     def from_dict(cls, d: dict) -> RunConfig:
@@ -131,19 +169,26 @@ class RunConfig:
             llm=llm.resolve_env(),
             checkpoints=d.get("checkpoints", [10, 20, 40, 80]),
             seed=d.get("seed", 42),
+            parallel_questions=d.get("parallel_questions", 1),
+            cache_dir=d.get("cache_dir"),
         )
 
     def to_dict(self) -> dict:
-        return {
+        budget_dict: dict = {
+            "preset": self.agent_budget.preset,
+            "max_turns": self.agent_budget.max_turns,
+            "max_tool_calls": self.agent_budget.max_tool_calls,
+            "max_agent_tokens": self.agent_budget.max_agent_tokens,
+        }
+        if self.agent_budget.max_cumulative_result_tokens > 0:
+            budget_dict["max_cumulative_result_tokens"] = (
+                self.agent_budget.max_cumulative_result_tokens
+            )
+        d = {
             "adapter": self.adapter,
             "dataset": self.dataset,
             "output_dir": self.output_dir,
-            "agent_budget": {
-                "preset": self.agent_budget.preset,
-                "max_turns": self.agent_budget.max_turns,
-                "max_tool_calls": self.agent_budget.max_tool_calls,
-                "max_agent_tokens": self.agent_budget.max_agent_tokens,
-            },
+            "agent_budget": budget_dict,
             "llm": {
                 "provider": self.llm.provider,
                 "model": self.llm.model,
@@ -153,3 +198,8 @@ class RunConfig:
             "checkpoints": self.checkpoints,
             "seed": self.seed,
         }
+        if self.parallel_questions > 1:
+            d["parallel_questions"] = self.parallel_questions
+        if self.cache_dir is not None:
+            d["cache_dir"] = self.cache_dir
+        return d

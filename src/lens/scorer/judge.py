@@ -12,7 +12,11 @@ because:
 """
 from __future__ import annotations
 
+import concurrent.futures
+import logging
 import random
+
+logger = logging.getLogger(__name__)
 
 
 def pairwise_fact_judge(
@@ -22,6 +26,7 @@ def pairwise_fact_judge(
     question: str,
     judge_fn,
     seed: int = 42,
+    max_workers: int = 1,
 ) -> tuple[float, list[dict]]:
     """Compare candidate vs reference answer on key facts via pairwise judging.
 
@@ -36,6 +41,7 @@ def pairwise_fact_judge(
         question: The question that was asked.
         judge_fn: Callable(prompt: str) -> str that returns "A", "B", or "TIE".
         seed: Random seed for reproducible position assignment.
+        max_workers: Number of concurrent judge calls (>1 for parallel).
 
     Returns:
         (win_rate, per_fact_details) where win_rate is the fraction of facts
@@ -44,21 +50,25 @@ def pairwise_fact_judge(
     if not key_facts:
         return 1.0, []
 
+    # Pre-compute all position assignments deterministically before threading
     rng = random.Random(seed)
-    results: list[dict] = []
-    total_score = 0.0
-
+    tasks: list[tuple[str, bool, str]] = []
     for fact in key_facts:
-        # Randomly assign positions to debias
         candidate_is_a = rng.random() < 0.5
-
         if candidate_is_a:
             text_a, text_b = candidate_answer, reference_answer
         else:
             text_a, text_b = reference_answer, candidate_answer
-
         prompt = _build_pairwise_prompt(question, fact, text_a, text_b)
-        verdict_raw = judge_fn(prompt).strip().upper()
+        tasks.append((fact, candidate_is_a, prompt))
+
+    def _judge_one(args: tuple[str, bool, str]) -> dict:
+        fact, candidate_is_a, prompt = args
+        try:
+            verdict_raw = judge_fn(prompt).strip().upper()
+        except Exception:
+            logger.warning("Judge call failed for fact %r, defaulting to TIE", fact, exc_info=True)
+            verdict_raw = "TIE"
 
         # Map positional verdict back to candidate/reference
         if verdict_raw.startswith("A"):
@@ -76,15 +86,23 @@ def pairwise_fact_judge(
         else:
             fact_score = 0.0
 
-        total_score += fact_score
-        results.append({
+        return {
             "fact": fact,
             "winner": winner,
             "verdict_raw": verdict_raw,
             "candidate_position": "A" if candidate_is_a else "B",
             "fact_score": fact_score,
-        })
+        }
 
+    if max_workers > 1 and len(tasks) > 1:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(max_workers, len(tasks))
+        ) as pool:
+            results = list(pool.map(_judge_one, tasks))
+    else:
+        results = [_judge_one(t) for t in tasks]
+
+    total_score = sum(r["fact_score"] for r in results)
     win_rate = total_score / len(key_facts)
     return win_rate, results
 

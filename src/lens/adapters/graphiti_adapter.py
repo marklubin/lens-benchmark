@@ -11,7 +11,7 @@ Requires:
 
 Environment variables:
     GRAPHITI_LLM_API_KEY      LLM provider API key (required)
-    GRAPHITI_LLM_MODEL        LLM model name (default: Qwen/Qwen3-235B-A22B-Instruct-2507-tput)
+    GRAPHITI_LLM_MODEL        LLM model name (default: meta-llama/Llama-3.3-70B-Instruct-Turbo)
     GRAPHITI_LLM_BASE_URL     LLM API base URL (default: https://api.together.xyz/v1)
     GRAPHITI_EMBED_API_KEY    Embedding API key (required)
     GRAPHITI_EMBED_MODEL      Embedding model (default: Alibaba-NLP/gte-modernbert-base)
@@ -55,7 +55,7 @@ class _AsyncRunner:
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
 
-    def run(self, coro, timeout: float = 300.0):
+    def run(self, coro, timeout: float = 600.0):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
 
@@ -97,7 +97,7 @@ class GraphitiAdapter(MemoryAdapter):
     def __init__(self) -> None:
         self._llm_api_key = os.environ.get("GRAPHITI_LLM_API_KEY", "")
         self._llm_model = os.environ.get(
-            "GRAPHITI_LLM_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+            "GRAPHITI_LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
         )
         self._llm_base_url = os.environ.get(
             "GRAPHITI_LLM_BASE_URL", "https://api.together.xyz/v1"
@@ -182,13 +182,15 @@ class GraphitiAdapter(MemoryAdapter):
         )
         return Graphiti(graph_driver=driver, llm_client=llm_client, embedder=embedder)
 
-    def reset(self, scope_id: str) -> None:
+    def reset(self, scope_id: str, cache_key: str | None = None) -> None:
         """Create a fresh FalkorDB database with a unique run-scoped name.
 
         Each reset produces a distinct database name, ensuring complete
         isolation between benchmark runs without needing to delete old data.
+        If cache_key is provided, it is used as the suffix for deterministic
+        database naming (enables cache reconnection).
         """
-        suffix = uuid.uuid4().hex[:8]
+        suffix = cache_key or uuid.uuid4().hex[:8]
         # FalkorDB names: alphanumeric + underscores only
         safe_scope = "".join(c if c.isalnum() or c == "_" else "_" for c in scope_id)
         self._db_name = f"lens_{safe_scope}_{suffix}"
@@ -211,6 +213,31 @@ class GraphitiAdapter(MemoryAdapter):
                 f"Start with: podman run -d -p 6379:6379 --name falkordb falkordb/falkordb. "
                 f"Error: {e}"
             ) from e
+
+    def get_cache_state(self) -> dict | None:
+        """Return state needed to reconnect to this FalkorDB database."""
+        if not self._db_name:
+            return None
+        return {
+            "db_name": self._db_name,
+            "text_cache": self._text_cache,
+            "ep_uuid_to_id": self._ep_uuid_to_id,
+        }
+
+    def restore_cache_state(self, state: dict) -> bool:
+        """Reconnect to an existing FalkorDB database from cached state."""
+        try:
+            db_name = state["db_name"]
+            self._graphiti = self._make_graphiti(db_name)
+            self._db_name = db_name
+            self._text_cache = state.get("text_cache", {})
+            self._ep_uuid_to_id = state.get("ep_uuid_to_id", {})
+            self._pending_episodes = []
+            log.info("Restored Graphiti cache: db=%s, %d episodes", db_name, len(self._text_cache))
+            return True
+        except Exception as e:
+            log.warning("Failed to restore Graphiti cache: %s", e)
+            return False
 
     def ingest(
         self,
@@ -264,7 +291,7 @@ class GraphitiAdapter(MemoryAdapter):
                         reference_time=item["timestamp"],
                         source=EpisodeType.text,
                     ),
-                    timeout=300.0,
+                    timeout=600.0,
                 )
                 # Track episode UUID for ref_id → episode_id reverse lookup in search()
                 if result and result.episode:

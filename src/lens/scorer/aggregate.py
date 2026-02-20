@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from lens.core.models import MetricResult, ScoreCard
 
-# Default v3 composite weights
+# Default v3.2 composite weights
 DEFAULT_WEIGHTS: dict[str, float] = {
     "evidence_grounding": 0.08,
     "fact_recall": 0.07,
@@ -12,8 +12,9 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "answer_quality": 0.15,
     "insight_depth": 0.15,
     "reasoning_quality": 0.10,
-    "longitudinal_advantage": 0.15,
+    "naive_baseline_advantage": 0.15,
     "action_quality": 0.05,
+    # longitudinal_advantage kept registered (backward compat) but 0 weight
 }
 
 # Tier 1 hard gate — if ANY gated metric falls below its threshold,

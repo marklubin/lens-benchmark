@@ -112,7 +112,7 @@ def _embed_texts_openai(
     import time
 
     log = logging.getLogger(__name__)
-    api_key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LENS_LLM_API_KEY")
+    api_key = api_key or os.environ.get("LENS_EMBED_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("LENS_LLM_API_KEY")
     if not api_key:
         raise ValueError("OpenAI API key required: set OPENAI_API_KEY or LENS_LLM_API_KEY")
 
@@ -187,7 +187,7 @@ class SQLiteEmbeddingAdapter(MemoryAdapter):
         embed_model: str = _DEFAULT_EMBED_MODEL,
         ollama_url: str = _DEFAULT_OLLAMA_URL,
     ) -> None:
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._embed_model = embed_model
         self._ollama_url = ollama_url
@@ -342,7 +342,7 @@ class SQLiteHybridAdapter(MemoryAdapter):
         ollama_url: str = _DEFAULT_OLLAMA_URL,
         rrf_k: int = 60,
     ) -> None:
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._embed_model = embed_model
         self._ollama_url = ollama_url
@@ -608,7 +608,7 @@ class SQLiteEmbeddingOpenAIAdapter(SQLiteEmbeddingAdapter):
         api_key: str | None = None,
         base_url: str | None = None,
     ) -> None:
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._embed_model = embed_model or os.environ.get(
             "LENS_EMBED_MODEL", _DEFAULT_OPENAI_EMBED_MODEL
@@ -708,7 +708,7 @@ class SQLiteHybridOpenAIAdapter(SQLiteHybridAdapter):
         base_url: str | None = None,
         rrf_k: int = 60,
     ) -> None:
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._embed_model = embed_model or os.environ.get(
             "LENS_EMBED_MODEL", _DEFAULT_OPENAI_EMBED_MODEL
@@ -883,7 +883,7 @@ class SQLiteChunkedAdapter(MemoryAdapter):
         base_url: str | None = None,
         max_chunk_words: int = 150,
     ) -> None:
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._embed_model = embed_model or os.environ.get(
             "LENS_EMBED_MODEL", _DEFAULT_OPENAI_EMBED_MODEL
@@ -1072,7 +1072,7 @@ class SQLiteChunkedHybridAdapter(MemoryAdapter):
         max_chunk_words: int = 150,
         rrf_k: int = 60,
     ) -> None:
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._embed_model = embed_model or os.environ.get(
             "LENS_EMBED_MODEL", _DEFAULT_OPENAI_EMBED_MODEL
@@ -1309,6 +1309,83 @@ class SQLiteChunkedHybridAdapter(MemoryAdapter):
                 ),
             ],
         )
+
+    def get_cache_state(self) -> dict | None:
+        """Serialize in-memory SQLite state for caching."""
+        import logging
+
+        log = logging.getLogger(__name__)
+        cur = self._conn.cursor()
+
+        # Dump episodes
+        cur.execute("SELECT episode_id, scope_id, timestamp, text, meta FROM episodes")
+        episodes = [
+            {
+                "episode_id": r["episode_id"],
+                "scope_id": r["scope_id"],
+                "timestamp": r["timestamp"],
+                "text": r["text"],
+                "meta": r["meta"],
+            }
+            for r in cur.fetchall()
+        ]
+
+        # Dump chunks (including embeddings)
+        cur.execute("SELECT chunk_id, episode_id, chunk_idx, text, embedding FROM chunks")
+        chunks = [
+            {
+                "chunk_id": r["chunk_id"],
+                "episode_id": r["episode_id"],
+                "chunk_idx": r["chunk_idx"],
+                "text": r["text"],
+                "embedding": r["embedding"],
+            }
+            for r in cur.fetchall()
+        ]
+
+        if not episodes:
+            return None
+
+        log.info(
+            "Caching chunked-hybrid state: %d episodes, %d chunks",
+            len(episodes),
+            len(chunks),
+        )
+        return {"episodes": episodes, "chunks": chunks}
+
+    def restore_cache_state(self, state: dict) -> bool:
+        """Rebuild SQLite from cached state, skip re-ingest."""
+        import logging
+
+        log = logging.getLogger(__name__)
+        try:
+            episodes = state["episodes"]
+            chunks = state.get("chunks", [])
+
+            cur = self._conn.cursor()
+            for ep in episodes:
+                cur.execute(
+                    "INSERT OR REPLACE INTO episodes (episode_id, scope_id, timestamp, text, meta) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (ep["episode_id"], ep["scope_id"], ep["timestamp"], ep["text"], ep["meta"]),
+                )
+            for ch in chunks:
+                cur.execute(
+                    "INSERT OR REPLACE INTO chunks (chunk_id, episode_id, chunk_idx, text, embedding) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (ch["chunk_id"], ch["episode_id"], ch["chunk_idx"], ch["text"], ch["embedding"]),
+                )
+            self._conn.commit()
+
+            log.info(
+                "Restored chunked-hybrid cache: %d episodes, %d chunks",
+                len(episodes),
+                len(chunks),
+            )
+            return True
+        except Exception as e:
+            log.warning("Failed to restore chunked-hybrid cache: %s", e)
+            return False
 
     def call_extended_tool(self, tool_name: str, arguments: dict) -> object:
         if tool_name == "batch_retrieve":
