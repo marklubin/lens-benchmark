@@ -95,3 +95,11 @@ def _ensure_builtins() -> None:
         import lens.adapters.letta_sleepy  # noqa: F401
     except ImportError:
         pass  # letta-client not installed
+    try:
+        import lens.adapters.graphiti_adapter  # noqa: F401
+    except ImportError:
+        pass  # graphiti-core not installed
+    try:
+        import lens.adapters.cognee_adapter  # noqa: F401
+    except ImportError:
+        pass  # cognee not installed

@@ -1,13 +1,13 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-19 (session 8)
+**Last Updated**: 2026-02-20 (session 9)
 **Scoring Pipeline**: v3.1 (pairwise judge + citation coverage + observational budget)
 **Agent LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Judge LLM**: Qwen3-235B-A22B (Together AI) / gpt-4o-mini (OpenAI)
 **Token Cap**: 32,768 (standard preset)
 **Dataset**: 6 scopes, 144 questions, 720 episodes
-**Unit Tests**: 788 passing (unit/ only)
-**Adapters Tested**: 17 (13 systems on scope 01, 4 on full 6-scope)
+**Unit Tests**: 845 passing (unit/ only)
+**Adapters Tested**: 19 (13 systems on scope 01, 4 on full 6-scope)
 
 ---
 
@@ -248,6 +248,8 @@ Each scope: 24 questions across 10 types (longitudinal, temporal, paraphrase, se
 | `letta` | Semantic (Letta archival passages, vector search) | **Benchmarked (scope 01)** — **0.5308, SOTA** |
 | `hindsight` | TEMPR: semantic + BM25 + graph + temporal, RRF | **Benchmarked (scope 01)** — **0.3511**. Graph entity extraction per retain() causes 20-100s ingest latency, 19/24 budget violations. reasoning_quality 0.9167 (matches Letta). 17.3 GB image. |
 | `letta-sleepy` | Semantic (archival passages) + LLM sleep consolidation | **Benchmarked (scope 01, 4 variants)** — **V3: 0.5776 (SOTA)**. V0=0.5402, V1=0.4290, V2=0.4596, V3=0.5776. Delta/causal framing wins; minimal and filter framings hurt. Adds ~30-60s prepare() per checkpoint for LLM synthesis call. |
+| `graphiti` | Temporal knowledge graph (FalkorDB, bi-temporal edges) | **Implemented, not yet benchmarked**. Requires FalkorDB container on :6379. Buffers episodes in ingest(); LLM entity extraction in prepare(). Uses EDGE_HYBRID_SEARCH_EPISODE_MENTIONS to map edges → episodes. |
+| `cognee` | GraphRAG (embedded LanceDB + Kuzu + SQLite) | **Implemented, not yet benchmarked**. No container needed. Calls cognify() in prepare() for graph construction. Uses SearchType.CHUNKS with [episode_id] prefix parsing. |
 
 ### Testing Infrastructure
 
@@ -260,6 +262,8 @@ Each scope: 24 questions across 10 types (longitudinal, temporal, paraphrase, se
 | **Letta unit tests** (`tests/unit/test_letta_adapter.py`) | 29 tests (mocked letta-client, full lifecycle) | All passing |
 | **Hindsight unit tests** (`tests/unit/test_hindsight_adapter.py`) | 47 tests (mocked hindsight-client, TEMPR+reflect lifecycle) | All passing |
 | **Letta-sleepy unit tests** (`tests/unit/test_letta_sleepy_adapter.py`) | 54 tests (mocked letta + OpenAI clients, all 4 variants) | All passing |
+| **Graphiti unit tests** (`tests/unit/test_graphiti_adapter.py`) | 28 tests (mocked graphiti-core, FalkorDB; full lifecycle) | All passing |
+| **Cognee unit tests** (`tests/unit/test_cognee_adapter.py`) | 29 tests (mocked cognee; full lifecycle with chunk parsing) | All passing |
 
 ### LLM Metering Proxy
 
@@ -464,6 +468,7 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-20 | Graphiti + Cognee adapters | Implemented `graphiti` adapter (temporal knowledge graph, FalkorDB, bi-temporal entity extraction, EDGE_HYBRID_SEARCH_EPISODE_MENTIONS) and `cognee` adapter (embedded GraphRAG, no container, LanceDB + Kuzu + SQLite, SearchType.CHUNKS with [episode_id] prefix parsing). Both use thread-hosted event loop for async→sync bridging. Both have `batch_retrieve` ExtraTool. Both added to `experiments/matrix.json` (parallel group, scope01 initial entry). Packages installed: graphiti-core[falkordb] + cognee. 845 unit tests (+57: 28 graphiti, 29 cognee). Configs: `configs/graphiti_scope01.json`, `configs/cognee_scope01.json`. |
 | 2026-02-19 | Orchestrator + Hindsight async ingest | Built `scripts/benchmark_orchestrator.py` (30-experiment matrix orchestrator: parallel group {mem0-raw, chunked-hybrid, hindsight} via ThreadPoolExecutor, serial group {letta, letta-sleepy} on main thread; state file with atomic writes, resume, --filter, --dry-run). Created `experiments/matrix.json` (all 30 experiments, env var templates). Fixed Hindsight adapter: `ingest()` now buffers; `prepare()` flushes via `aretain_batch()` (was 20-100s/episode × 30 episodes). Added 4 new batch-ingest tests. Created `configs/hindsight_scope{02-06}.json`. 788 unit tests (+4). |
 | 2026-02-19 | 4-adapter × 6-scope full matrix | Ran all 4 adapters (letta, letta-sleepy V3, mem0-raw, chunked-hybrid) across scopes 02–06 (20 new runs). **Results**: chunked-hybrid wins 4/6 scopes (mean 0.5656), letta wins 1/6 (mean 0.5266), V3 wins 1/6 (scope01 only, mean 0.4982). Key finding: V3 sleep synthesis is conditionally useful — helps when letta is weak (+0.0469 scope01, +0.1290 scope03) but hurts when letta is strong (−0.1385 scope04, −0.0899 scope06). Env var fixes: LETTA_EMBED_MODEL must be `together-oai/text-embedding-3-small` (not bare model name); mem0-raw needs MEM0_LLM_* vars + MEM0_EMBED_DIMS=768 + Qdrant reset before each domain. |
 | 2026-02-19 | letta-sleepy adapter + sleep prompt matrix | Built `letta-sleepy` adapter with 4 sleep prompt variants (V0 control, V1 minimal, V2 actionable-filter, V3 delta-causal). Ran all 4 on scope 01. **V3: 0.5776 composite — new SOTA**. V3 specifically: answer_quality=0.8225 (best of any adapter), reasoning_quality=1.0000, longitudinal_advantage=−0.1790 (least negative, closest to 0 ever). V1/V2 both hurt (0.4290, 0.4596 vs control 0.5402) — only delta/causal framing adds value. 784 unit tests (+54). Key insight: sleep synthesis acts as a navigation document, not a replacement for retrieval. |
