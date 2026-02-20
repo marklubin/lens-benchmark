@@ -100,6 +100,16 @@ class MockHindsightClient:
             self._store.setdefault(bank_id, []).append((content, ts, doc_id))
         return _MockRetainResponse()
 
+    def retain_batch(self, bank_id: str, items: list, document_id=None,
+                     document_tags=None, retain_async: bool = False) -> _MockRetainResponse:
+        """Sync batch ingest: flush buffered episodes into the mock store."""
+        for item in items:
+            content = item.get("content", "")
+            ts = item.get("timestamp")
+            doc_id = item.get("document_id")
+            self._store.setdefault(bank_id, []).append((content, ts, doc_id))
+        return _MockRetainResponse()
+
     def recall(self, bank_id: str, query: str, types=None, max_tokens: int = 4096,
                budget: str = "mid", trace: bool = False, query_timestamp=None,
                include_entities: bool = False, max_entity_tokens: int = 500,

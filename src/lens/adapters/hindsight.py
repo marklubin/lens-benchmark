@@ -157,27 +157,34 @@ class HindsightAdapter(MemoryAdapter):
         self._text_cache[episode_id] = text
 
     def prepare(self, scope_id: str, checkpoint: int) -> None:
-        """Flush buffered episodes to Hindsight via aretain_batch().
+        """Flush buffered episodes to Hindsight via individual retain() calls.
 
-        Called once per checkpoint. Sends all episodes buffered since the last
-        prepare() call as a single batch request instead of N serial requests.
+        Called once per checkpoint. Sends each buffered episode to Hindsight
+        sequentially. Moving the retain() calls here (vs. in ingest()) means
+        ingest() is instant and the LLM entity-extraction latency happens before
+        the agent's question-answering budget clock starts.
+
+        Note: retain_batch() was tried but causes HTTP 413 from the embedding
+        provider when batching multiple episodes together. Individual retain()
+        calls are safe.
         """
         if not self._pending_episodes or not self._bank_id:
             return
 
-        import asyncio  # noqa: PLC0415
-
         client = self._get_client()
-        try:
-            asyncio.run(
-                client.aretain_batch(
+        for item in self._pending_episodes:
+            try:
+                client.retain(
                     bank_id=self._bank_id,
-                    items=self._pending_episodes,
-                    retain_async=False,
+                    content=item["content"],
+                    timestamp=item.get("timestamp"),
+                    document_id=item.get("document_id"),
                 )
-            )
-        except Exception as e:
-            raise AdapterError(f"Batch ingest failed at checkpoint {checkpoint}: {e}") from e
+            except Exception as e:
+                raise AdapterError(
+                    f"Failed to retain episode '{item.get('document_id', '?')}' "
+                    f"at checkpoint {checkpoint}: {e}"
+                ) from e
 
         self._pending_episodes = []
 
