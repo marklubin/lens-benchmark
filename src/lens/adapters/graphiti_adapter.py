@@ -270,6 +270,7 @@ class GraphitiAdapter(MemoryAdapter):
         """Add buffered episodes to the Graphiti knowledge graph.
 
         LLM entity extraction happens here, before the agent's budget clock.
+        Uses 8-way concurrent asyncio.gather for ~8x speedup over sequential.
         Populates _ep_uuid_to_id for reverse-lookup during search().
         """
         if not self._pending_episodes or not self._graphiti:
@@ -280,34 +281,59 @@ class GraphitiAdapter(MemoryAdapter):
         except ImportError as e:
             raise AdapterError("graphiti-core not installed") from e
 
-        for item in self._pending_episodes:
-            episode_id = item["episode_id"]
-            try:
-                result = _get_runner().run(
-                    self._graphiti.add_episode(
-                        name=episode_id,
+        graphiti = self._graphiti
+        pending = list(self._pending_episodes)
+
+        async def _add_batch():
+            sem = asyncio.Semaphore(8)  # 8 concurrent episodes
+
+            async def _add_one(item):
+                async with sem:
+                    result = await graphiti.add_episode(
+                        name=item["episode_id"],
                         episode_body=item["content"],
                         source_description="LENS longitudinal operational log episode",
                         reference_time=item["timestamp"],
                         source=EpisodeType.text,
-                    ),
-                    timeout=600.0,
-                )
-                # Track episode UUID for ref_id → episode_id reverse lookup in search()
-                if result and result.episode:
-                    ep_uuid = str(result.episode.uuid)
-                    self._ep_uuid_to_id[ep_uuid] = episode_id
-                else:
-                    log.warning(
-                        "add_episode returned no episode node for %r", episode_id
                     )
-            except Exception as e:
-                raise AdapterError(
-                    f"Graphiti add_episode failed for episode '{episode_id}' "
-                    f"at checkpoint {checkpoint}: {e}"
-                ) from e
+                    return item["episode_id"], result
+
+            return await asyncio.gather(
+                *[_add_one(i) for i in pending], return_exceptions=True
+            )
+
+        timeout = 60.0 * len(pending)
+        results = _get_runner().run(_add_batch(), timeout=timeout)
+
+        errors = []
+        for i, result in enumerate(results):
+            episode_id = pending[i]["episode_id"]
+            if isinstance(result, BaseException):
+                log.error(
+                    "add_episode failed for %r at checkpoint %d: %s",
+                    episode_id, checkpoint, result,
+                )
+                errors.append((episode_id, result))
+                continue
+
+            # result is (episode_id, add_episode_result) tuple
+            _, ep_result = result
+            if ep_result and ep_result.episode:
+                ep_uuid = str(ep_result.episode.uuid)
+                self._ep_uuid_to_id[ep_uuid] = episode_id
+            else:
+                log.warning(
+                    "add_episode returned no episode node for %r", episode_id
+                )
 
         self._pending_episodes = []
+
+        if errors:
+            failed_ids = [eid for eid, _ in errors]
+            raise AdapterError(
+                f"Graphiti add_episode failed for {len(errors)} episode(s) "
+                f"at checkpoint {checkpoint}: {failed_ids}"
+            )
 
     def search(
         self,

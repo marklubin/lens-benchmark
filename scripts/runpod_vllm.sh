@@ -1,54 +1,44 @@
 #!/usr/bin/env bash
-# Launch vLLM on a RunPod A100-80GB pod with auto-shutdown watchdog.
+# Launch vLLM on a RunPod A100-80GB pod.
 #
 # Usage (on the RunPod pod):
 #   bash runpod_vllm.sh
 #
 # Environment variables:
-#   IDLE_TIMEOUT  - seconds before auto-shutdown (default: 3600 = 1 hour)
+#   VLLM_MODEL    - model to serve (default: Qwen/Qwen3-32B-AWQ)
 #   VLLM_API_KEY  - API key for the vLLM server (default: lens-benchmark)
 #   PORT          - server port (default: 8000)
+#   HF_HOME       - HuggingFace cache dir (default: /runpod-volume/hub)
+#
+# Docker image: vllm/vllm-openai:v0.8.5.post1
+# Flags aligned with ~/runpod-infra/profiles/qwen3-32b-awq.env
 set -euo pipefail
 
-MODEL="hugging-quants/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
+MODEL="${VLLM_MODEL:-Qwen/Qwen3-32B-AWQ}"
 PORT="${PORT:-8000}"
-IDLE_TIMEOUT="${IDLE_TIMEOUT:-3600}"
 VLLM_API_KEY="${VLLM_API_KEY:-lens-benchmark}"
 
-echo "=== RunPod vLLM Launcher ==="
+# Use network volume for model cache if available
+export HF_HOME="${HF_HOME:-/runpod-volume/hub}"
+export HUGGINGFACE_HUB_CACHE="${HF_HOME}"
+
+echo "=== RunPod vLLM Launcher (V1 engine) ==="
 echo "Model:        $MODEL"
 echo "Port:         $PORT"
-echo "Idle timeout: ${IDLE_TIMEOUT}s"
+echo "HF_HOME:      $HF_HOME"
 echo "Pod ID:       ${RUNPOD_POD_ID:-unknown}"
 
-# Install vLLM if not already available
-if ! python -c "import vllm" 2>/dev/null; then
-    echo "Installing vLLM..."
-    pip install -q vllm
-fi
-
-# Auto-shutdown watchdog (background)
-# Stops pod after $IDLE_TIMEOUT seconds of no requests
-if [ -n "${RUNPOD_POD_ID:-}" ]; then
-    (
-        echo "Watchdog: will stop pod after ${IDLE_TIMEOUT}s idle"
-        sleep "${IDLE_TIMEOUT}"
-        echo "Idle timeout reached (${IDLE_TIMEOUT}s) — stopping pod ${RUNPOD_POD_ID}"
-        runpodctl stop pod "$RUNPOD_POD_ID" || echo "WARNING: runpodctl stop failed"
-    ) &
-    WATCHDOG_PID=$!
-    echo "Watchdog PID: $WATCHDOG_PID"
-else
-    echo "WARNING: RUNPOD_POD_ID not set — auto-shutdown disabled"
-fi
-
-# Launch vLLM OpenAI-compatible server
-echo "Starting vLLM server on port $PORT..."
+# V1 engine (vLLM 0.8.5+): prefix caching + chunked prefill ON by default.
+# DO NOT pass --enable-prefix-caching or --enable-chunked-prefill (forces V0 fallback).
+# AWQ quantization is auto-detected from model config — no --quantization flag needed.
 exec python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
-    --quantization awq \
-    --dtype auto \
-    --max-model-len 16384 \
-    --gpu-memory-utilization 0.92 \
     --port "$PORT" \
+    --host 0.0.0.0 \
+    --max-model-len 14000 \
+    --gpu-memory-utilization 0.95 \
+    --max-num-seqs 16 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --trust-remote-code \
+    --disable-log-requests \
     --api-key "$VLLM_API_KEY"

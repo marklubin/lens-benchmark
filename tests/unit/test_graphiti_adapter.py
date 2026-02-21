@@ -283,6 +283,70 @@ def test_prepare_noop_when_no_pending(mock_graphiti_modules):
     mock_instance.add_episode.assert_not_called()
 
 
+def test_prepare_parallel_error_raises_adapter_error(mock_graphiti_modules):
+    """When add_episode fails for some episodes, prepare() raises AdapterError."""
+    mock_instance = _make_mock_graphiti()
+    # Make add_episode fail on second call
+    call_count = 0
+
+    async def side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("entity extraction failed")
+        mock_ep = MagicMock()
+        mock_ep.episode = MagicMock(uuid=f"uuid-{call_count}")
+        return mock_ep
+
+    mock_instance.add_episode = AsyncMock(side_effect=side_effect)
+    mock_graphiti_modules["Graphiti"].return_value = mock_instance
+
+    from lens.core.errors import AdapterError
+
+    adapter = GraphitiAdapter()
+    adapter.reset("scope_01")
+    adapter.ingest("ep01", "scope_01", "2024-01-01T00:00:00Z", "text 1")
+    adapter.ingest("ep02", "scope_01", "2024-01-02T00:00:00Z", "text 2")
+    adapter.ingest("ep03", "scope_01", "2024-01-03T00:00:00Z", "text 3")
+
+    with pytest.raises(AdapterError, match="1 episode"):
+        adapter.prepare("scope_01", checkpoint=5)
+
+    # Buffer should still be cleared
+    assert adapter._pending_episodes == []
+    # Successful episodes should still be tracked
+    assert len(adapter._ep_uuid_to_id) == 2
+
+
+def test_prepare_parallel_all_succeed(mock_graphiti_modules):
+    """All episodes processed concurrently with correct UUID tracking."""
+    ep_uuids = ["uuid-a", "uuid-b", "uuid-c"]
+    call_idx = 0
+
+    async def side_effect(**kwargs):
+        nonlocal call_idx
+        idx = call_idx
+        call_idx += 1
+        mock_ep = MagicMock()
+        mock_ep.episode = MagicMock(uuid=ep_uuids[idx])
+        return mock_ep
+
+    mock_instance = _make_mock_graphiti()
+    mock_instance.add_episode = AsyncMock(side_effect=side_effect)
+    mock_graphiti_modules["Graphiti"].return_value = mock_instance
+
+    adapter = GraphitiAdapter()
+    adapter.reset("scope_01")
+    adapter.ingest("ep01", "scope_01", "2024-01-01T00:00:00Z", "text 1")
+    adapter.ingest("ep02", "scope_01", "2024-01-02T00:00:00Z", "text 2")
+    adapter.ingest("ep03", "scope_01", "2024-01-03T00:00:00Z", "text 3")
+
+    adapter.prepare("scope_01", checkpoint=5)
+
+    assert mock_instance.add_episode.call_count == 3
+    assert len(adapter._ep_uuid_to_id) == 3
+
+
 # ---------------------------------------------------------------------------
 # search()
 # ---------------------------------------------------------------------------

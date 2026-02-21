@@ -112,10 +112,14 @@ ADAPTER_ENV: dict[str, dict[str, str]] = {
     },
 }
 
-# H200 throughput settings — higher than A100 defaults
-DEFAULT_PARALLEL_Q = 6       # questions per run (was 4 for A100)
-DEFAULT_PARALLEL_JUDGE = 48  # judge calls (was 32 for A100)
+# AWQ + V1 engine throughput settings — vLLM max-num-seqs=16 supports this
+DEFAULT_PARALLEL_Q = 16      # questions per run (AWQ frees KV cache for concurrency)
+DEFAULT_PARALLEL_JUDGE = 16  # judge calls (matches max-num-seqs)
 DEFAULT_MAX_ADAPTERS = 8     # concurrent adapter tracks
+
+# Hard timeouts — if any adapter exceeds these, it's broken
+RUN_TIMEOUT = 300            # 5 minutes per run
+SCORE_TIMEOUT = 120          # 2 minutes per score
 
 
 def config_filename(adapter: str, scope: str, budget: str) -> str:
@@ -164,7 +168,7 @@ def mark_failed(state: dict, adapter: str, scope: str, budget: str, error: str) 
 # ---------------------------------------------------------------------------
 
 
-def build_env(adapter: str) -> dict[str, str]:
+def build_env(adapter: str, embed_url: str | None = None) -> dict[str, str]:
     """Build env vars for a run subprocess."""
     env = dict(os.environ)
 
@@ -173,19 +177,28 @@ def build_env(adapter: str) -> dict[str, str]:
         log.error("VLLM_URL not set!")
         sys.exit(1)
 
+    embed_base = embed_url or os.environ.get("EMBED_URL", "http://localhost:11434/v1")
+
     # Common env vars for the agent harness
     env["LENS_LLM_API_KEY"] = "dummy"
     env["LENS_LLM_API_BASE"] = vllm_url
     env["LENS_LLM_MODEL"] = "Qwen/Qwen3-32B"
 
-    # Embedding via local Ollama
+    # Embedding
     env["LENS_EMBED_API_KEY"] = "dummy"
-    env["LENS_EMBED_BASE_URL"] = "http://localhost:11434/v1"
+    env["LENS_EMBED_BASE_URL"] = embed_base
     env["LENS_EMBED_MODEL"] = "nomic-embed-text"
 
     # Per-adapter overrides
     extra = ADAPTER_ENV.get(adapter, {})
     env.update(extra)
+
+    # Override embed URLs for adapters that have their own env vars
+    for key in list(env.keys()):
+        if key.endswith("_EMBED_BASE_URL") or key.endswith("_EMBED_ENDPOINT"):
+            if key.startswith("LENS_"):
+                continue
+            env[key] = embed_base
 
     # Inject dynamic vLLM URL for adapters that need it
     if adapter == "mem0-raw":
@@ -221,6 +234,7 @@ def execute_run(
     budget: str,
     parallel_q: int = 4,
     use_cache: bool = False,
+    embed_url: str | None = None,
 ) -> str | None:
     """Execute a single benchmark run. Returns run_id or None on failure."""
     fname = config_filename(adapter, scope, budget)
@@ -239,7 +253,7 @@ def execute_run(
     if use_cache:
         cmd.extend(["--cache-dir", str(CACHE_DIR)])
 
-    env = build_env(adapter)
+    env = build_env(adapter, embed_url=embed_url)
 
     log.info("START  %s/%s/%s — %s", adapter, scope, budget, fname)
     t0 = time.time()
@@ -250,7 +264,7 @@ def execute_run(
             capture_output=True,
             text=True,
             env=env,
-            timeout=1800,  # 30 min max per run
+            timeout=RUN_TIMEOUT,
         )
         elapsed = time.time() - t0
 
@@ -268,7 +282,10 @@ def execute_run(
         return run_id
 
     except subprocess.TimeoutExpired:
-        log.error("TIMEOUT %s/%s/%s after 30min", adapter, scope, budget)
+        log.error(
+            "TIMEOUT EXCEEDED: %s/%s/%s at %ds — adapter is broken, fix it",
+            adapter, scope, budget, RUN_TIMEOUT,
+        )
         return None
     except Exception as e:
         log.error("ERROR  %s/%s/%s: %s", adapter, scope, budget, e)
@@ -286,6 +303,7 @@ def run_adapter_track(
     scopes: list[str],
     budgets: list[str],
     parallel_q: int,
+    embed_url: str | None = None,
 ) -> list[str]:
     """Run all scope × budget configs for one adapter. Returns list of run_ids."""
     run_ids = []
@@ -304,7 +322,10 @@ def run_adapter_track(
             # First budget (standard) = fresh run with cache save
             # Subsequent budgets (4k, 2k) = try cached state
             use_cache = True  # Always enable cache dir
-            rid = execute_run(adapter, scope, budget, parallel_q, use_cache=use_cache)
+            rid = execute_run(
+                adapter, scope, budget, parallel_q,
+                use_cache=use_cache, embed_url=embed_url,
+            )
 
             if rid:
                 mark_completed(state, adapter, scope, budget, rid)
@@ -344,19 +365,27 @@ def find_unscored_runs() -> list[str]:
     return unscored
 
 
-def score_run(run_dir: str, parallel_judge: int = 32) -> bool:
-    """Score a single run. Returns True on success."""
-    vllm_url = os.environ.get("VLLM_URL", "")
+def score_run(
+    run_dir: str,
+    parallel_judge: int = 16,
+    judge_model: str = "Qwen/Qwen3-32B",
+    judge_base_url: str | None = None,
+) -> bool:
+    """Score a single run with NBA baseline. Returns True on success."""
+    vllm_url = judge_base_url or os.environ.get("VLLM_URL", "")
     env = dict(os.environ)
     env["OPENAI_API_KEY"] = "dummy"
     env["OPENAI_BASE_URL"] = vllm_url
+    # Baseline generation needs the LLM endpoint
+    env["LENS_LLM_API_KEY"] = "dummy"
+    env["LENS_LLM_API_BASE"] = vllm_url
+    env["LENS_LLM_MODEL"] = judge_model
 
     cmd = [
         "uv", "run", "lens", "score",
         "--run", run_dir,
-        "--judge-model", "Qwen/Qwen3-32B",
+        "--judge-model", judge_model,
         "--parallel-judge", str(parallel_judge),
-        "--no-baseline",
         "-v",
     ]
 
@@ -369,7 +398,7 @@ def score_run(run_dir: str, parallel_judge: int = 32) -> bool:
             capture_output=True,
             text=True,
             env=env,
-            timeout=600,  # 10 min max per score
+            timeout=SCORE_TIMEOUT,
         )
         elapsed = time.time() - t0
 
@@ -385,14 +414,18 @@ def score_run(run_dir: str, parallel_judge: int = 32) -> bool:
         return True
 
     except subprocess.TimeoutExpired:
-        log.error("SCORE TIMEOUT %s", run_dir)
+        log.error("SCORE TIMEOUT %s after %ds", run_dir, SCORE_TIMEOUT)
         return False
     except Exception as e:
         log.error("SCORE ERROR %s: %s", run_dir, e)
         return False
 
 
-def batch_score(parallel_judge: int = 32) -> None:
+def batch_score(
+    parallel_judge: int = 16,
+    judge_model: str = "Qwen/Qwen3-32B",
+    judge_base_url: str | None = None,
+) -> None:
     """Score all unscored runs."""
     unscored = find_unscored_runs()
     if not unscored:
@@ -403,7 +436,7 @@ def batch_score(parallel_judge: int = 32) -> None:
     succeeded = 0
     failed = 0
     for run_dir in unscored:
-        if score_run(run_dir, parallel_judge):
+        if score_run(run_dir, parallel_judge, judge_model, judge_base_url):
             succeeded += 1
         else:
             failed += 1
@@ -428,6 +461,9 @@ def main():
     parser.add_argument("--parallel-q", type=int, default=None, help="Per-run question parallelism")
     parser.add_argument("--scopes", nargs="+", default=None, help="Only these scopes (e.g., 01 02)")
     parser.add_argument("--budgets", nargs="+", default=None, help="Only these budgets (e.g., standard 4k)")
+    parser.add_argument("--embed-url", default=None, help="Embedding server URL (default: EMBED_URL env or localhost:11434)")
+    parser.add_argument("--judge-model", default="Qwen/Qwen3-32B", help="Model for scoring judge")
+    parser.add_argument("--judge-base-url", default=None, help="Base URL for scoring judge (default: VLLM_URL)")
     args = parser.parse_args()
 
     max_adapters = args.max_adapters or int(os.environ.get("MAX_ADAPTERS", str(DEFAULT_MAX_ADAPTERS)))
@@ -462,11 +498,13 @@ def main():
         parallel = [a for a in adapters if a not in SERIAL_ADAPTERS]
 
         # Run parallel adapters concurrently
+        embed_url = args.embed_url
+
         if parallel:
             log.info("Running %d parallel adapter tracks (max_workers=%d)", len(parallel), max_adapters)
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_adapters) as pool:
                 futures = {
-                    pool.submit(run_adapter_track, a, state, scopes, budgets, parallel_q): a
+                    pool.submit(run_adapter_track, a, state, scopes, budgets, parallel_q, embed_url): a
                     for a in parallel
                 }
 
@@ -476,7 +514,7 @@ def main():
                 if serial:
                     def run_serial_adapters():
                         for a in serial:
-                            run_adapter_track(a, state, scopes, budgets, parallel_q)
+                            run_adapter_track(a, state, scopes, budgets, parallel_q, embed_url)
                     serial_future = pool.submit(run_serial_adapters)
                     futures[serial_future] = "serial-group"
 
@@ -490,11 +528,15 @@ def main():
         elif serial:
             # Only serial adapters
             for a in serial:
-                run_adapter_track(a, state, scopes, budgets, parallel_q)
+                run_adapter_track(a, state, scopes, budgets, parallel_q, embed_url)
 
     # Phase 2: Score all unscored runs
     log.info("=== SCORING PHASE ===")
-    batch_score(parallel_judge=parallel_judge)
+    batch_score(
+        parallel_judge=parallel_judge,
+        judge_model=args.judge_model,
+        judge_base_url=args.judge_base_url,
+    )
 
     # Summary
     state = load_state()
