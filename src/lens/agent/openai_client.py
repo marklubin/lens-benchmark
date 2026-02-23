@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import time
@@ -39,6 +40,7 @@ class OpenAIClient(BaseLLMClient):
         temperature: float = 0.0,
         seed: int | None = None,
         max_tokens: int = 4096,
+        cache_dir: str | None = None,
     ) -> None:
         try:
             import openai
@@ -52,6 +54,16 @@ class OpenAIClient(BaseLLMClient):
         if base_url:
             kwargs["base_url"] = base_url
         self._client = openai.OpenAI(**kwargs)
+
+        # Wrap with disk cache if cache_dir is set
+        if cache_dir:
+            from lens.agent.llm_cache import CachingOpenAIClient
+            self._cache = CachingOpenAIClient(self._client, cache_dir)
+            self._client = self._cache
+            log.info("LLM response caching enabled: %s", cache_dir)
+        else:
+            self._cache = None
+
         self._model = model
         self._temperature = temperature
         self._seed = seed
@@ -145,16 +157,41 @@ class OpenAIClient(BaseLLMClient):
                 # Append the assistant message to conversation
                 messages.append(message.model_dump())
 
-                # Execute each tool call and collect results
+                # Execute tool calls — parallelize when multiple calls in a single turn
                 tool_results: list[ToolResult] = []
-                for tc_def, parsed_call in zip(tool_calls_in_msg, parsed_calls, strict=True):
-                    result = tool_executor(parsed_call)
-                    tool_results.append(result)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_def.id,
-                        "content": result.content,
-                    })
+                if len(parsed_calls) > 1:
+                    log.debug(
+                        "Executing %d tool calls in parallel", len(parsed_calls)
+                    )
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=len(parsed_calls)
+                    ) as tool_pool:
+                        future_to_idx = {
+                            tool_pool.submit(tool_executor, pc): i
+                            for i, pc in enumerate(parsed_calls)
+                        }
+                        indexed_results: list[tuple[int, ToolResult]] = []
+                        for future in concurrent.futures.as_completed(future_to_idx):
+                            idx = future_to_idx[future]
+                            indexed_results.append((idx, future.result()))
+                        # Preserve original order for correct tool_call_id pairing
+                        indexed_results.sort(key=lambda x: x[0])
+                        for i, tr in indexed_results:
+                            tool_results.append(tr)
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_calls_in_msg[i].id,
+                                "content": tr.content,
+                            })
+                else:
+                    for tc_def, parsed_call in zip(tool_calls_in_msg, parsed_calls, strict=True):
+                        result = tool_executor(parsed_call)
+                        tool_results.append(result)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_def.id,
+                            "content": result.content,
+                        })
 
                 turns.append(AgentTurn(
                     role="tool",

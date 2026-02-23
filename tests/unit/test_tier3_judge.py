@@ -95,7 +95,7 @@ class TestJudgeFactScore:
         assert score == 0.5
 
     def test_no_facts(self):
-        """No facts → score 1.0."""
+        """No facts → score 0.5 (uninformative)."""
         score = _judge_fact_score(
             answer_text="answer",
             canonical_answer="other",
@@ -103,7 +103,7 @@ class TestJudgeFactScore:
             question_prompt="What?",
             judge_fn=lambda p: "A",
         )
-        assert score == 1.0
+        assert score == 0.5
 
 
 class TestLongitudinalAdvantageWithJudge:

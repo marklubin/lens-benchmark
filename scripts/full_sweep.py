@@ -421,25 +421,51 @@ def score_run(
         return False
 
 
+DEFAULT_PARALLEL_SCORE = 8  # concurrent scoring processes
+
 def batch_score(
     parallel_judge: int = 16,
     judge_model: str = "Qwen/Qwen3-32B",
     judge_base_url: str | None = None,
+    parallel_score: int = DEFAULT_PARALLEL_SCORE,
 ) -> None:
-    """Score all unscored runs."""
+    """Score all unscored runs concurrently."""
     unscored = find_unscored_runs()
     if not unscored:
         log.info("No unscored runs found.")
         return
 
-    log.info("Scoring %d runs with parallel_judge=%d", len(unscored), parallel_judge)
+    max_workers = min(parallel_score, len(unscored))
+    log.info(
+        "Scoring %d runs concurrently (max_workers=%d, parallel_judge=%d)",
+        len(unscored), max_workers, parallel_judge,
+    )
+
     succeeded = 0
     failed = 0
-    for run_dir in unscored:
-        if score_run(run_dir, parallel_judge, judge_model, judge_base_url):
-            succeeded += 1
-        else:
-            failed += 1
+
+    if max_workers > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(score_run, run_dir, parallel_judge, judge_model, judge_base_url): run_dir
+                for run_dir in unscored
+            }
+            for future in concurrent.futures.as_completed(futures):
+                run_dir = futures[future]
+                try:
+                    if future.result():
+                        succeeded += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    log.error("Scoring raised exception for %s: %s", run_dir, e)
+                    failed += 1
+    else:
+        for run_dir in unscored:
+            if score_run(run_dir, parallel_judge, judge_model, judge_base_url):
+                succeeded += 1
+            else:
+                failed += 1
 
     log.info("Scoring complete: %d succeeded, %d failed", succeeded, failed)
 
@@ -464,11 +490,13 @@ def main():
     parser.add_argument("--embed-url", default=None, help="Embedding server URL (default: EMBED_URL env or localhost:11434)")
     parser.add_argument("--judge-model", default="Qwen/Qwen3-32B", help="Model for scoring judge")
     parser.add_argument("--judge-base-url", default=None, help="Base URL for scoring judge (default: VLLM_URL)")
+    parser.add_argument("--parallel-score", type=int, default=None, help="Concurrent scoring runs (default: 8)")
     args = parser.parse_args()
 
     max_adapters = args.max_adapters or int(os.environ.get("MAX_ADAPTERS", str(DEFAULT_MAX_ADAPTERS)))
     parallel_judge = args.parallel_judge or int(os.environ.get("PARALLEL_JUDGE", str(DEFAULT_PARALLEL_JUDGE)))
     parallel_q = args.parallel_q or int(os.environ.get("PARALLEL_Q", str(DEFAULT_PARALLEL_Q)))
+    parallel_score = args.parallel_score or int(os.environ.get("PARALLEL_SCORE", str(DEFAULT_PARALLEL_SCORE)))
 
     # Determine what to run
     adapters = args.filter if args.filter else list(ADAPTERS)
@@ -536,6 +564,7 @@ def main():
         parallel_judge=parallel_judge,
         judge_model=args.judge_model,
         judge_base_url=args.judge_base_url,
+        parallel_score=parallel_score,
     )
 
     # Summary

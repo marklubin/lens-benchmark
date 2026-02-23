@@ -71,7 +71,7 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
                 self.send_error(404, f"Unknown path: {self.path}")
 
     def _handle_embeddings(self, raw_body: bytes):
-        """Route embeddings to local Ollama."""
+        """Route embeddings to local Ollama, fall back to Together AI."""
         body = json.loads(raw_body)
         body["model"] = TARGET_EMBED_MODEL
 
@@ -82,9 +82,14 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
             "User-Agent": "lens-letta-proxy/2.0",
         }
 
-        # If Ollama fails, fall back to Together AI
-        status, resp_body = _forward(target_url, payload, headers, timeout=30)
-        if status >= 500 and TOGETHER_API_KEY:
+        # Try Ollama first; catch connection errors (URLError/OSError) and HTTP 4xx/5xx
+        try:
+            status, resp_body = _forward(target_url, payload, headers, timeout=30)
+        except Exception as exc:
+            log.warning("Ollama embed unreachable: %s", exc)
+            status, resp_body = 503, b'{"error": "ollama unreachable"}'
+
+        if status >= 400 and TOGETHER_API_KEY:
             log.warning("Ollama embed failed (%d), falling back to Together AI", status)
             body["model"] = TOGETHER_EMBED_MODEL
             payload = json.dumps(body).encode()
@@ -99,22 +104,30 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
         self.wfile.write(resp_body)
 
     def _handle_chat(self, raw_body: bytes):
-        """Route chat completions to RunPod vLLM."""
-        if not VLLM_URL:
-            self.send_error(503, "VLLM_URL not configured")
+        """Route chat completions to RunPod vLLM or Together AI."""
+        body = json.loads(raw_body)
+
+        if VLLM_URL:
+            body["model"] = VLLM_MODEL
+            target_url = f"{VLLM_URL}/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "lens-letta-proxy/2.0",
+            }
+        elif TOGETHER_API_KEY:
+            # No vLLM — route chat to Together AI directly
+            target_url = f"{TOGETHER_BASE_URL}/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "lens-letta-proxy/2.0",
+                "Authorization": f"Bearer {TOGETHER_API_KEY}",
+            }
+            log.info("Routing chat to Together AI (no VLLM_URL)")
+        else:
+            self.send_error(503, "No chat backend configured (set VLLM_URL or TOGETHER_API_KEY)")
             return
 
-        body = json.loads(raw_body)
-        # Rewrite model to the one running on vLLM
-        body["model"] = VLLM_MODEL
         payload = json.dumps(body).encode()
-
-        target_url = f"{VLLM_URL}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "lens-letta-proxy/2.0",
-        }
-
         status, resp_body = _forward(target_url, payload, headers, timeout=120)
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -157,6 +170,13 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
 if __name__ == "__main__":
     log.info("Letta proxy on port %d", PORT)
     log.info("  Embeddings → %s (model: %s)", OLLAMA_EMBED_URL, TARGET_EMBED_MODEL)
-    log.info("  Chat       → %s (model: %s)", VLLM_URL or "NOT SET", VLLM_MODEL)
+    if TOGETHER_API_KEY:
+        log.info("  Embed fallback → Together AI (%s)", TOGETHER_EMBED_MODEL)
+    if VLLM_URL:
+        log.info("  Chat       → %s (model: %s)", VLLM_URL, VLLM_MODEL)
+    elif TOGETHER_API_KEY:
+        log.info("  Chat       → Together AI (model passthrough)")
+    else:
+        log.warning("  Chat       → NO BACKEND (set VLLM_URL or TOGETHER_API_KEY)")
     server = http.server.HTTPServer(("0.0.0.0", PORT), LettaProxy)
     server.serve_forever()

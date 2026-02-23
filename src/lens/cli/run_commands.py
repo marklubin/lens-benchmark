@@ -85,8 +85,8 @@ def run(
     # Resolve env vars into LLM config
     config.llm = config.llm.resolve_env()
 
-    # Create LLM client from config
-    llm_client = create_llm_client(config.llm)
+    # Create LLM client from config (with optional LLM response cache)
+    llm_client = create_llm_client(config.llm, cache_dir=config.cache_dir)
 
     # Load dataset
     logger.info(f"Loading dataset from {dataset}")

@@ -5,11 +5,16 @@ from lens.core.config import LLMConfig
 from lens.core.errors import ConfigError
 
 
-def create_llm_client(config: LLMConfig) -> BaseLLMClient:
+def create_llm_client(
+    config: LLMConfig,
+    cache_dir: str | None = None,
+) -> BaseLLMClient:
     """Create an LLM client from configuration.
 
     Args:
         config: LLM configuration with provider, model, api_key, etc.
+        cache_dir: Optional directory for LLM response caching.
+            Also reads from LENS_LLM_CACHE_DIR env var.
 
     Returns:
         A BaseLLMClient instance.
@@ -17,7 +22,10 @@ def create_llm_client(config: LLMConfig) -> BaseLLMClient:
     Raises:
         ConfigError: If the provider is unknown or required config is missing.
     """
+    import os
+
     config = config.resolve_env()
+    cache_dir = cache_dir or os.environ.get("LENS_LLM_CACHE_DIR")
 
     if config.provider == "mock":
         return MockLLMClient()
@@ -37,6 +45,7 @@ def create_llm_client(config: LLMConfig) -> BaseLLMClient:
             temperature=config.temperature,
             seed=config.seed,
             max_tokens=4096,
+            cache_dir=cache_dir,
         )
 
     raise ConfigError(

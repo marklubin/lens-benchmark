@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def _fact_recall_score(answer_text: str, key_facts: list[str]) -> float:
     """Compute fact recall for a single question."""
     if not key_facts:
-        return 1.0
+        return 0.5
     answer_lower = answer_text.lower()
     found = sum(1 for f in key_facts if f.lower() in answer_lower)
     return found / len(key_facts)
@@ -317,7 +317,12 @@ class NaiveBaselineAdvantage(BaseMetric):
         if not qrs:
             return MetricResult(name=self.name, tier=self.tier, value=0.0)
 
-        # Pre-generate baselines (may involve LLM calls, not parallelized here)
+        # Pre-generate all baselines in parallel via generate_all()
+        questions_needing_baseline = [
+            qr.question for qr in qrs if qr.question.ground_truth.key_facts
+        ]
+        baseline_answers = self._baseline_generator.generate_all(questions_needing_baseline)
+
         qrs_with_baselines = []
         no_fact_scores: list[float] = []
         for qr in qrs:
@@ -325,7 +330,10 @@ class NaiveBaselineAdvantage(BaseMetric):
             if not key_facts:
                 no_fact_scores.append(0.5)
                 continue
-            naive_answer = self._baseline_generator.get_answer(qr.question)
+            naive_answer = baseline_answers.get(
+                qr.question.question_id,
+                self._baseline_generator.get_answer(qr.question),
+            )
             qrs_with_baselines.append((qr, key_facts, naive_answer))
 
         def _score_one(args):

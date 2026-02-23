@@ -106,12 +106,56 @@ class RunEngine:
                     )
 
             scope_results: list[ScopeResult] = []
+            parallel_scopes = self.config.parallel_scopes
 
-            for scope_id, episodes in scopes.items():
-                self.logger.info(f"Scope [bold]{scope_id}[/bold]: {len(episodes)} episodes")
-                scope_questions = q_index.get(scope_id, {})
-                result = self._run_scope(adapter, scope_id, episodes, scope_questions)
-                scope_results.append(result)
+            if parallel_scopes > 1 and len(scopes) > 1:
+                # Concurrent scopes: each scope gets its own adapter instance
+                workers = min(parallel_scopes, len(scopes))
+                self.logger.info(
+                    f"Running {len(scopes)} scopes concurrently (workers={workers})"
+                )
+
+                def _run_scope_with_fresh_adapter(
+                    scope_id: str,
+                    episodes: list[Episode],
+                    scope_questions: dict[int, list[Question]],
+                ) -> ScopeResult:
+                    fresh_adapter = adapter_cls()
+                    self.logger.info(
+                        f"Scope [bold]{scope_id}[/bold]: {len(episodes)} episodes "
+                        f"(parallel, fresh adapter)"
+                    )
+                    return self._run_scope(
+                        fresh_adapter, scope_id, episodes, scope_questions
+                    )
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                    future_to_scope: dict[concurrent.futures.Future, str] = {}
+                    for scope_id, episodes in scopes.items():
+                        scope_questions = q_index.get(scope_id, {})
+                        f = pool.submit(
+                            _run_scope_with_fresh_adapter,
+                            scope_id, episodes, scope_questions,
+                        )
+                        future_to_scope[f] = scope_id
+
+                    # Collect results preserving original scope order
+                    scope_result_map: dict[str, ScopeResult] = {}
+                    for future in concurrent.futures.as_completed(future_to_scope):
+                        sid = future_to_scope[future]
+                        try:
+                            scope_result_map[sid] = future.result()
+                        except Exception as e:
+                            log.error("Scope %s failed: %s", sid, e)
+                            raise
+
+                    scope_results = [scope_result_map[sid] for sid in scopes]
+            else:
+                for scope_id, episodes in scopes.items():
+                    self.logger.info(f"Scope [bold]{scope_id}[/bold]: {len(episodes)} episodes")
+                    scope_questions = q_index.get(scope_id, {})
+                    result = self._run_scope(adapter, scope_id, episodes, scope_questions)
+                    scope_results.append(result)
 
             run_result = RunResult(
                 run_id=self.run_id,
@@ -184,9 +228,10 @@ class RunEngine:
         # Normal path: reset + ingest + prepare
         adapter.reset(scope_id)
         checkpoints_done: list[CheckpointResult] = []
+        parallel_ingest = self.config.parallel_ingest
 
-        for idx, episode in enumerate(episodes, start=1):
-            self.logger.start_step("ingest")
+        def _ingest_one(episode: Episode) -> tuple[str, float]:
+            """Ingest a single episode, return (episode_id, elapsed_ms)."""
             t0 = time.monotonic()
             adapter.ingest(
                 episode_id=episode.episode_id,
@@ -195,21 +240,62 @@ class RunEngine:
                 text=episode.text,
                 meta=episode.meta,
             )
-            elapsed_ms = (time.monotonic() - t0) * 1000
-            self.logger.end_step(
-                message=f"episode {episode.episode_id}",
-                scope_id=scope_id,
-                elapsed=elapsed_ms,
-            )
+            return episode.episode_id, (time.monotonic() - t0) * 1000
 
-            if elapsed_ms > self.config.agent_budget.ingest_max_latency_ms:
-                self.logger.warn(
-                    f"Ingest latency {elapsed_ms:.0f}ms exceeds "
-                    f"{self.config.agent_budget.ingest_max_latency_ms}ms cap"
+        def _ingest_batch(batch: list[Episode]) -> None:
+            """Ingest a batch of episodes, optionally in parallel."""
+            if not batch:
+                return
+            workers = min(parallel_ingest, len(batch))
+            if workers > 1 and len(batch) > 1:
+                self.logger.info(
+                    f"  Ingesting {len(batch)} episodes in parallel (workers={workers})"
                 )
+                t0_batch = time.monotonic()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {pool.submit(_ingest_one, ep): ep for ep in batch}
+                    for future in concurrent.futures.as_completed(futures):
+                        ep_id, elapsed_ms = future.result()
+                        if elapsed_ms > self.config.agent_budget.ingest_max_latency_ms:
+                            self.logger.warn(
+                                f"Ingest latency {elapsed_ms:.0f}ms exceeds "
+                                f"{self.config.agent_budget.ingest_max_latency_ms}ms cap "
+                                f"for episode {ep_id}"
+                            )
+                batch_ms = (time.monotonic() - t0_batch) * 1000
+                self.logger.end_step(
+                    message=f"batch of {len(batch)} episodes",
+                    scope_id=scope_id,
+                    elapsed=batch_ms,
+                )
+            else:
+                for ep in batch:
+                    self.logger.start_step("ingest")
+                    ep_id, elapsed_ms = _ingest_one(ep)
+                    self.logger.end_step(
+                        message=f"episode {ep_id}",
+                        scope_id=scope_id,
+                        elapsed=elapsed_ms,
+                    )
+                    if elapsed_ms > self.config.agent_budget.ingest_max_latency_ms:
+                        self.logger.warn(
+                            f"Ingest latency {elapsed_ms:.0f}ms exceeds "
+                            f"{self.config.agent_budget.ingest_max_latency_ms}ms cap"
+                        )
 
-            # Check if this is a checkpoint
-            if idx in self.config.checkpoints:
+        # Pre-compute segments: groups of episodes between checkpoints
+        # Each segment ends at a checkpoint (or the final episode)
+        checkpoint_set = set(self.config.checkpoints)
+        current_batch: list[Episode] = []
+
+        for idx, episode in enumerate(episodes, start=1):
+            current_batch.append(episode)
+
+            if idx in checkpoint_set:
+                # Ingest all episodes in this segment, then run checkpoint
+                _ingest_batch(current_batch)
+                current_batch = []
+
                 checkpoint_result = self._run_checkpoint(
                     adapter, scope_id, idx, questions_by_checkpoint.get(idx, [])
                 )
@@ -218,6 +304,10 @@ class RunEngine:
                     checkpoint_result.adapter_internal_tokens = usage.total_tokens
                     self._metering.reset()
                 checkpoints_done.append(checkpoint_result)
+
+        # Ingest any remaining episodes after the last checkpoint
+        if current_batch:
+            _ingest_batch(current_batch)
 
         # Also run checkpoint at final episode if not already done
         final = len(episodes)

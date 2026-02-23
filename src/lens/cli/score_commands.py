@@ -19,8 +19,12 @@ def _strip_think_tags(text: str) -> str:
     return _THINK_RE.sub("", text).strip()
 
 
-def _make_openai_judge(model: str, api_key: str | None = None):
-    """Create a judge_fn callable that uses OpenAI chat completions."""
+def _make_openai_judge(model: str, api_key: str | None = None, cache_dir: str | None = None):
+    """Create a judge_fn callable that uses OpenAI chat completions.
+
+    If cache_dir is provided, all judge LLM calls are cached to disk
+    so re-scoring the same run with the same judge model costs zero API calls.
+    """
     import openai
 
     key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LENS_LLM_API_KEY")
@@ -33,6 +37,12 @@ def _make_openai_judge(model: str, api_key: str | None = None):
     if base_url:
         client_kwargs["base_url"] = base_url
     client = openai.OpenAI(**client_kwargs)
+
+    # Wrap with caching layer — judge calls are deterministic (temperature=0)
+    # so identical inputs always produce the same output.
+    if cache_dir:
+        from lens.agent.llm_cache import CachingOpenAIClient
+        client = CachingOpenAIClient(client, cache_dir=cache_dir)
 
     # Detect Qwen3 models that default to thinking mode
     _is_thinking_model = "qwen3" in model.lower()
@@ -49,11 +59,14 @@ def _make_openai_judge(model: str, api_key: str | None = None):
         raw = resp.choices[0].message.content or "TIE"
         return _strip_think_tags(raw) if _is_thinking_model else raw
 
-    return judge_fn
+    return judge_fn, client
 
 
-def _make_baseline_llm_fn(model: str, api_key: str | None = None):
-    """Create a baseline_fn callable for naive baseline generation."""
+def _make_baseline_llm_fn(model: str, api_key: str | None = None, cache_dir: str | None = None):
+    """Create a baseline_fn callable for naive baseline generation.
+
+    If cache_dir is provided, all baseline LLM calls are cached to disk.
+    """
     import openai
 
     key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LENS_LLM_API_KEY")
@@ -66,6 +79,10 @@ def _make_baseline_llm_fn(model: str, api_key: str | None = None):
     if base_url:
         client_kwargs["base_url"] = base_url
     client = openai.OpenAI(**client_kwargs)
+
+    if cache_dir:
+        from lens.agent.llm_cache import CachingOpenAIClient
+        client = CachingOpenAIClient(client, cache_dir=cache_dir)
 
     _is_thinking_model = "qwen3" in model.lower()
 
@@ -131,10 +148,15 @@ def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: 
     logger.info(f"Loading run from {run_dir}")
     result = load_run_result(run_dir)
 
+    # Cache dir for judge LLM calls — re-scoring the same run costs zero API calls
+    judge_cache_dir = str(Path(run_dir) / "scores" / "judge_cache")
+
     judge_fn = None
     if judge_model:
         logger.info(f"Using LLM judge: {judge_model}")
-        judge_fn = _make_openai_judge(judge_model)
+        judge_fn, _judge_client = _make_openai_judge(
+            judge_model, cache_dir=judge_cache_dir
+        )
 
     # Build naive baseline generator if judge is enabled and not skipped
     baseline_generator = None
@@ -161,7 +183,11 @@ def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: 
                     if run_config else 0
                 )
 
-                baseline_llm_fn = _make_baseline_llm_fn(agent_model)
+                # Cache baseline LLM calls too — same content-addressed cache
+                baseline_cache_dir = str(Path(run_dir) / "scores" / "baseline_llm_cache")
+                baseline_llm_fn = _make_baseline_llm_fn(
+                    agent_model, cache_dir=baseline_cache_dir
+                )
                 episodes = _load_episodes_for_baseline(str(ds_path))
                 cache_dir = Path(run_dir) / "scores"
                 baseline_generator = NaiveBaselineGenerator(
@@ -170,6 +196,7 @@ def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: 
                     cache_dir=cache_dir,
                     model_id=agent_model,
                     max_result_tokens=max_result_tokens,
+                    max_workers=parallel_judge,
                 )
             else:
                 logger.info(f"Dataset not found at {ds_path}, skipping naive baseline")

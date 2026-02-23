@@ -72,7 +72,7 @@ class FactRecall(BaseMetric):
         for qr in qrs:
             key_facts = qr.question.ground_truth.key_facts
             if not key_facts:
-                scores.append(1.0)
+                scores.append(0.5)
                 continue
             answer_lower = qr.answer.answer_text.lower()
             found = sum(1 for f in key_facts if f.lower() in answer_lower)

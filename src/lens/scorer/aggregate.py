@@ -2,18 +2,21 @@ from __future__ import annotations
 
 from lens.core.models import MetricResult, ScoreCard
 
-# Default v3.2 composite weights
+# Default v3.3 composite weights
+# fact_recall is zero-weighted: it provides no discrimination (0.167 uniformly
+# across all adapters due to naive substring matching). Kept as a reported
+# metric for transparency but excluded from the composite.
 DEFAULT_WEIGHTS: dict[str, float] = {
     "evidence_grounding": 0.08,
-    "fact_recall": 0.07,
+    "fact_recall": 0.0,
     "evidence_coverage": 0.08,
     "budget_compliance": 0.07,
     "citation_coverage": 0.10,
-    "answer_quality": 0.15,
+    "answer_quality": 0.17,
     "insight_depth": 0.15,
     "reasoning_quality": 0.10,
-    "naive_baseline_advantage": 0.15,
-    "action_quality": 0.05,
+    "naive_baseline_advantage": 0.17,
+    "action_quality": 0.08,
     # longitudinal_advantage kept registered (backward compat) but 0 weight
 }
 

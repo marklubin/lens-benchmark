@@ -48,7 +48,7 @@ def pairwise_fact_judge(
         where candidate wins (1.0) or ties (0.5).
     """
     if not key_facts:
-        return 1.0, []
+        return 0.5, []
 
     # Pre-compute all position assignments deterministically before threading
     rng = random.Random(seed)

@@ -1,13 +1,14 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-20 (session 15)
+**Last Updated**: 2026-02-23 (session 19)
 **Scoring Pipeline**: v3.2 (naive baseline advantage replaces longitudinal_advantage, per-question timing)
-**Agent LLM**: Qwen3-235B-A22B (Together AI) / Qwen3-32B (RunPod vLLM)
-**Judge LLM**: Qwen3-235B-A22B (Together AI) / Qwen3-32B (RunPod vLLM)
-**Token Cap**: 32,768 (standard) / 4,096 (constrained-4k) / 2,048 (constrained-2k)
-**Dataset**: 6 scopes, 144 questions, 720 episodes
-**Unit Tests**: 995 passing (915 unit + 80 conformance)
-**Adapters Tested**: 21 scope-01 systems + 7-adapter × 6-scope sweep (30 runs on Qwen3-32B)
+**Agent LLM**: GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI) / Qwen3-32B (RunPod vLLM)
+**Judge LLM**: Qwen3-235B-A22B (Cerebras)
+**Token Cap**: 32,768 (standard) / 16,384 (constrained-16k) / 8,192 (constrained-8k) / 4,096 (constrained-4k) / 2,048 (constrained-2k)
+**Dataset**: 6 scopes, 144 questions, 720 signal episodes + 540 distractor episodes (120 per scope with distractors)
+**Unit Tests**: 991 passing
+**Adapters Under Evaluation**: 7 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti). ~~hindsight~~ removed — see session 19 notes.
+**Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + **12 Phase 3 runs (with distractors, 120 episodes)**
 
 ---
 
@@ -16,6 +17,14 @@
 LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluating whether AI agent memory systems can synthesize conclusions from evidence scattered across many sequential episodes, rather than finding answers in a single document.
 
 **Current state**: Core infrastructure is feature-complete. We have 6 domain-diverse dataset scopes, a contamination-resistant two-stage data generation pipeline, a three-tier scoring system with pairwise LLM judging, and benchmark results across 5+ real memory systems. The scoring pipeline (v3.2) adds a true naive baseline metric (context-stuffed head-to-head comparison), a compaction baseline adapter, context-limited agent mode (dual-cap degradation curve), and per-question timing in reports.
+
+**Key finding 11 — PHASE 3 (WITH DISTRACTORS): No memory system cracks 50% answer quality on longitudinal synthesis**: Phase 3 added 90 distractor episodes per scope (120 total, ~84K tokens) to create a real signal/noise separation challenge. 12 of 18 runs completed (cognee, graphiti failed on API incompatibilities; hindsight/8k and letta-sleepy/8k failed on infra issues). **Results**: sqlite-chunked-hybrid leads with 0.477 answer quality (8k budget) — simple FTS+embedding retrieval beats every dedicated memory system. Letta-sleepy (0.403), mem0-raw (0.368), letta (0.346), compaction (0.294), hindsight (0.213), null (0.189). **No system achieves >50% of key facts.** Budget enforcement is effectively non-binding — adapters blast through cumulative token limits on the first retrieval call (avg 39K tokens used vs 8K budget). **The honest conclusion: existing memory systems do not meaningfully outperform basic text search at longitudinal synthesis.**
+
+**Key finding 10 — Compaction's Phase 1-2 dominance was an artifact of small corpus size**: Compaction (NBA 0.790) dominated when the corpus was 30 episodes (~14K tokens) — it simply summarized everything in one LLM call before the budget clock started. With 120 episodes (~84K tokens) in Phase 3, compaction collapsed to 0.294 answer quality and 0.404 NBA. **The distractor episodes validated the experimental design**: they created the signal/noise separation challenge the benchmark was designed to test.
+
+**Key finding 9 — CONSTRAINED BUDGET VALIDATION CONFIRMS HYPOTHESIS**: At constrained budgets (4K/2K tokens, where agents see only 25%/13% of episodes), retrieval quality **strongly matters**. 36 Phase 1 runs (3 adapters × 6 scopes × 2 budgets) with Qwen3-235B judge and NBA scoring show: **compaction NBA = 0.73** (CI: 0.68-0.79) at 2K — adapter answers beat context stuffing 73% of the time. Chunked-hybrid NBA = 0.35 (CI: 0.30-0.40). Null baseline NBA = 0.07 (CI: 0.05-0.09). All adapter vs null paired Wilcoxon tests: p < 0.0001. **However, Phase 3 revealed this result was inflated by the small 30-episode corpus.**
+
+**Hindsight removed from evaluation (session 19)**: Hindsight (vectorize.io) is removed from the active adapter list. Across all experiments: 17.3GB container image, NBA statistically indistinguishable from null (0.168 vs 0.150), 0.213 answer quality on its only Phase 3 completion (61 minutes for a single run), batch embedding 413 errors, 20-100s per-episode ingest latency. Evidence_coverage=0.000 across all constrained runs. The product provides zero demonstrated value over doing nothing.
 
 **Key finding 6 — Full 6-scope matrix reveals sqlite-chunked-hybrid as most consistent adapter**: Across all 6 domains, `sqlite-chunked-hybrid` wins 4/6 scopes with cross-scope mean **0.5656** — outperforming both Letta (0.5266) and letta-sleepy V3 (0.4982). The sleep synthesis V3 wins only 2/6 scopes and underperforms letta in 4/6. Key insight: the V3 delta/causal synthesis is conditionally useful — it helps when letta's base retrieval is weak (scopes 01, 03: letta=0.5308, 0.3177), but hurts when letta is already performing well (scopes 04-06: letta=0.5942, 0.5723, 0.6027). The synthesis introduces navigational noise when retrieval is already confident.
 
@@ -36,6 +45,143 @@ LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluat
 ---
 
 ## Latest Benchmark Results
+
+### Phase 3: With Distractors (Session 19, 2026-02-23) — GPT-OSS-120B on Cerebras
+
+**9 adapters × 2 budgets (8k/16k) = 18 planned, 12 completed.** Dataset: 120 episodes per scope (30 signal + 90 distractors, ~84K tokens). Agent LLM: GPT-OSS-120B (Cerebras, 3000 tok/s). Judge: Qwen3-235B (Cerebras). Embeddings: GTE-ModernBERT-base (Together AI).
+
+#### Answer Quality Rankings (absolute — how many key facts each system got right)
+
+| Adapter | 8k AnsQ | 16k AnsQ | 8k NBA | 16k NBA | 8k EvCov | 16k EvCov | Run ID (8k) | Run ID (16k) |
+|---------|---------|----------|--------|---------|----------|-----------|-------------|--------------|
+| **sqlite-chunked-hybrid** | **0.477** | **0.369** | 0.568 | 0.516 | 0.194 | 0.177 | `d2ba166bb282` | `9003aa5a81f8` |
+| letta-sleepy | — | 0.403 | — | 0.474 | — | 0.288 | FAILED | `3bb499654bb0` |
+| mem0-raw | 0.368 | 0.335 | 0.490 | 0.477 | 0.094 | 0.083 | `1754d32e84e2` | `ab801d0bb064` |
+| letta | 0.346 | 0.327 | 0.452 | 0.438 | 0.118 | 0.142 | `1c8ad5581b70` | `7837fa55bfd8` |
+| compaction | 0.294 | 0.241 | 0.404 | 0.370 | 0.021 | 0.021 | `6c55408270eb` | `e80bb2cc6d01` |
+| hindsight | — | 0.213 | — | 0.358 | — | 0.000 | FAILED | `4d77975d04fa` |
+| null | 0.189 | 0.189 | 0.282 | 0.313 | 0.000 | 0.000 | `401350c3b02d` | `12494d9c303f` |
+| cognee | FAILED | FAILED | — | — | — | — | — | — |
+| graphiti | FAILED | FAILED | — | — | — | — | — | — |
+
+#### Failures
+
+| Adapter | Budget | Error | Root Cause |
+|---------|--------|-------|------------|
+| cognee | both | EmbeddingException 422 | Cognee prefixes model with `together_ai/`, Together API rejects compound name |
+| graphiti | both | add_episode failed 10-11 eps | Cerebras API incompatible with graphiti entity extraction |
+| letta-sleepy | 8k | 404 Agent not found | Stale agent ID from previous session |
+| hindsight | 8k | 413 batch embed too large | 120 episodes overflows Together AI batch limit |
+
+#### Budget Enforcement Finding
+
+Budget compliance = 0.000 for all adapters except null. Adapters blow through the cumulative token limit on the first retrieval call:
+- chunked-hybrid/8k: avg 39K tokens/question vs 8K budget (4.8x over)
+- compaction/8k: avg 41K tokens/question (5x over)
+- Budget enforcement replaces subsequent results with "[Context budget exhausted]" but the first oversized result already contains most of the information
+
+#### Key Takeaways
+
+1. **No memory system achieves >50% answer quality** on longitudinal synthesis with distractor noise
+2. **Simple retrieval (FTS+embedding) beats every dedicated memory system** — sqlite-chunked-hybrid at 0.477 outperforms letta-sleepy (0.403), mem0 (0.368), letta (0.346)
+3. **Compaction collapsed**: NBA dropped from 0.790 (30 episodes) to 0.404 (120 episodes) — confirming distractors create the intended challenge
+4. **3 of 6 heavy infrastructure adapters couldn't complete the benchmark** due to API/provider incompatibilities (cognee, graphiti, hindsight/8k)
+5. **Budget constraints are not binding** — needs architectural fix to actually constrain retrieval
+
+---
+
+### Constrained Budget Validation (Session 16, 2026-02-22) — Qwen3-235B
+
+36 runs: 3 adapters × 6 scopes × 2 budgets (4K/2K tokens). Scored with Qwen3-235B judge + NBA (naive baseline advantage). Together AI serverless.
+
+#### NBA Results (aggregate across 6 scopes, N=120 per-question observations each)
+
+| Adapter | 4K NBA (mean) | 4K 95% CI | 2K NBA (mean) | 2K 95% CI |
+|---------|--------------|-----------|---------------|-----------|
+| **compaction** | **0.711** | [0.652, 0.767] | **0.735** | [0.676, 0.791] |
+| chunked-hybrid | 0.301 | [0.250, 0.354] | 0.347 | [0.295, 0.401] |
+| null | 0.071 | [0.053, 0.089] | 0.067 | [0.048, 0.086] |
+
+#### Statistical Tests
+
+| Test | Result |
+|------|--------|
+| Compaction vs null (2K) | p < 0.0001 *** |
+| Chunked-hybrid vs null (2K) | p < 0.0001 *** |
+| Compaction vs null (4K) | p < 0.0001 *** |
+| Chunked-hybrid vs null (4K) | p < 0.0001 *** |
+| Budget degradation (compaction 4K→2K) | delta=-0.023, p=0.284 (not significant) |
+| Budget degradation (chunked-hybrid 4K→2K) | delta=-0.046, p=0.072 (not significant) |
+
+#### Per-Scope Breakdown (NBA)
+
+| Adapter | S01 | S02 | S03 | S04 | S05 | S06 |
+|---------|-----|-----|-----|-----|-----|-----|
+| compaction/4k | 0.787 | 0.621 | 0.740 | 0.675 | 0.563 | 0.672 |
+| compaction/2k | 0.790 | 0.722 | 0.642 | 0.659 | 0.710 | 0.650 |
+| chunked-hybrid/4k | 0.479 | 0.274 | 0.263 | 0.345 | 0.294 | 0.352 |
+| chunked-hybrid/2k | 0.466 | 0.444 | 0.240 | 0.371 | 0.328 | 0.388 |
+| null/4k | 0.168 | 0.161 | 0.166 | 0.096 | 0.128 | 0.136 |
+| null/2k | 0.150 | 0.151 | 0.150 | 0.117 | 0.115 | 0.150 |
+
+**VERDICT: VALIDATE** — Compaction NBA 0.73 at 2K strongly exceeds the 0.45 threshold. Constrained budgets reveal meaningful retrieval advantage. The degradation curve plot is at `results/constrained_degradation_aggregate.png`.
+
+---
+
+### Constrained Budget Phase 2: Heavy Adapters (Sessions 17-18, 2026-02-23) — Qwen3-235B
+
+**12/12 runs complete**: 6 heavy infrastructure adapters × scope 01 × 2 budgets (4K/2K tokens). Scored with Qwen3-235B judge + NBA. Together AI serverless.
+
+#### Full Constrained Rankings (scope 01, all 9 adapters)
+
+| Adapter | 2K NBA | 4K NBA | 2K AnsQ | 4K AnsQ | 2K BudC | 4K BudC | 2K EvCov | 4K EvCov | Type |
+|---------|--------|--------|---------|---------|---------|---------|----------|----------|------|
+| cognee | 0.855† | 0.477 | 0.288 | 0.402 | 0.167 | 0.000 | 0.156 | 0.260 | Phase 2 |
+| **compaction** | **0.790** | **0.787** | 0.974 | 0.990 | 1.000 | 1.000 | 0.000 | 0.000 | Phase 1 |
+| **letta-sleepy** | **0.667** | **0.693** | 0.741 | 0.858 | 0.000 | 0.375 | 0.094 | 0.083 | Phase 2 |
+| chunked-hybrid | 0.466 | 0.479 | 0.495 | 0.534 | 0.167 | 0.000 | 0.097 | 0.122 | Phase 1 |
+| letta | 0.453 | 0.631 | 0.476 | 0.689 | 0.000 | 0.875 | 0.274 | 0.451 | Phase 2 |
+| mem0-raw | 0.406 | 0.386 | 0.387 | 0.386 | 0.375 | 0.000 | 0.108 | 0.240 | Phase 2 |
+| graphiti | 0.270 | 0.517 | 0.248 | 0.559 | 0.208 | 0.708 | 0.135 | 0.278 | Phase 2 |
+| hindsight | 0.168 | 0.168 | 0.178 | 0.171 | 0.750 | 0.667 | 0.000 | 0.000 | Phase 2 |
+| null | 0.150 | 0.168 | 0.171 | 0.171 | 1.000 | 1.000 | 0.000 | 0.000 | Phase 1 |
+
+† Cognee 2K NBA=0.855 is anomalous — budget_compliance=0.167 means only 2/12 questions were answered within budget. The high NBA reflects both cognee and the naive baseline performing poorly at 2K, with cognee's incomplete answers being judged slightly better than the naive baseline's. This is a methodological artifact: NBA is unreliable at very low budget compliance.
+
+**Key**: AnsQ=answer_quality (vs reference), BudC=budget_compliance, EvCov=evidence_coverage. NBA=naive_baseline_advantage (vs context-stuffed LLM).
+
+#### Phase 2 Run IDs
+
+| Adapter | 2K Run | 4K Run |
+|---------|--------|--------|
+| cognee | `72fea05ec21f` | `b75631165f1e` |
+| graphiti | `a9d0640adace` | `b0d179c7058d` |
+| hindsight | `4495d283d7a1` | `3d326c4259d1` |
+| letta | `1fdede6128f9` | `2a8dfe5a5e7a` |
+| letta-sleepy | `9439ffcb91aa` | `3d915a82a90b` |
+| mem0-raw | `1eba2a0ca429` | `29a6efec2bdf` |
+
+#### Key Observations (Phase 2)
+
+1. **Compaction is the adapter to beat**: NBA 0.790/0.787, answer_quality 0.974/0.990, perfect budget_compliance. Zero infrastructure (no containers, no databases, no proxies). A single LLM summarization call. Every heavy adapter must justify its operational complexity against this baseline.
+
+2. **letta-sleepy is the best heavy adapter**: NBA 0.667/0.693 at 2K/4K with answer_quality 0.741/0.858. Sleep consolidation's delta/causal synthesis produces retrieval targets that remain effective even at 13% episode visibility. The gap between letta-sleepy (0.667) and base letta (0.453) at 2K shows consolidation is *more* valuable under extreme budget pressure.
+
+3. **letta degrades sharply at 2K**: 0.631→0.453 (−28%). Without sleep synthesis, semantic search over raw archival passages struggles at 13% visibility. Sleep consolidation provides a navigation document that compensates.
+
+4. **graphiti needs budget to traverse its graph**: 0.517→0.270 (4K→2K). Temporal knowledge graph edges provide useful navigation at 25% visibility but break down at 13%. The graph structure requires minimum retrieval budget to traverse meaningfully.
+
+5. **cognee's entity extraction blows the budget**: 60+ min cognify time with remote LLM, budget_compliance 0.167/0.000. When it works, answer_quality is moderate (0.402 at 4K) and evidence_coverage is decent (0.260). But getting it to work requires 6 monkey-patches, ACL disabling, and 1-hour timeouts.
+
+6. **hindsight ≈ null**: NBA 0.168 at both budgets vs null's 0.150/0.168. Ironically has better budget_compliance than most heavy adapters (0.750/0.667) — but only because the agent barely retrieves anything. Evidence_coverage=0.000 confirms no useful information is being extracted. 17.3GB container provides zero value at constrained budgets.
+
+7. **mem0-raw is stable but unimpressive**: 0.406/0.386. Pure vector search over raw documents provides consistent but mediocre retrieval quality. Budget compliance swings (0.375→0.000) without performance change suggest the budget cap isn't binding.
+
+8. **LLM response caching**: Content-addressed disk cache (`LENS_LLM_CACHE_DIR`) avoids wasting API spend on retries. SHA256 key over `{model, messages, tools, temperature, seed}`.
+
+9. **Full operational assessment**: See `docs/ADAPTER_OPERATIONS_REPORT.md` for per-adapter setup complexity, failure modes, monkey-patches required, and container sprawl analysis.
+
+---
 
 ### 7-Adapter × 6-Scope Sweep (Session 15, 2026-02-20) — Qwen3-32B
 
@@ -545,9 +691,9 @@ Graphiti (temporal knowledge graph with bi-temporal edge invalidation, FalkorDB)
 
 5. **Compaction beating all real memory systems** (with 32B judge): This is likely an artifact of the weak judge — compaction's summarize-everything approach produces more keyword-matched responses that the mechanical fact_recall favors. With 235B judge, real memory systems should differentiate better on answer_quality and insight_depth.
 
-6. **Constrained budget runs (4K/2K) not yet executed**: Configs exist for 10 runs (5 adapters × 2 caps). These will produce the degradation curve — the paper's key figure showing memory search quality matters when you can't see everything.
+6. **Constrained budget Phase 2 nearly complete**: 11/12 heavy adapter runs scored. Cognee 2K still running — may complete or timeout. After scoring, the full constrained matrix (9 adapters × scope 01 × 2 budgets) will be complete.
 
-7. **`naive_baseline_advantage` scored for all 14 scope 01 systems** (v3.2, 235B judge). All NBA scores < 0.5 at standard 32K budget — context stuffing wins most questions. V3 leads (0.2825). **Constrained-4K/2K runs are where NBA should rise above 0.5 for strong adapters.**
+7. **Together AI latency bottleneck**: The 235B model via Together serverless takes 30-128s per LLM call during adapter consolidation phases (cognee entity extraction, hindsight graph construction). This caused cognee 2K timeout at 1800s (retrying at 3600s) and limits practical sweep speed. User exploring RunPod dedicated hosting for Qwen3-235B-A22B (MoE, 22B active params, needs ~120GB VRAM = 2× H100-80GB).
 
 8. **citation_coverage equals evidence_coverage**. Agents aren't producing `[ref_id]` inline citations consistently.
 
@@ -645,6 +791,11 @@ This gradient is the benchmark's core value proposition. A memory system that li
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-23 | Phase 5 multi-scope infrastructure (session 20) | Fixed cognee adapter (removed `together_ai/` embedding model prefix that caused 422 errors). Verified graphiti adapter already has correct Together AI routing for entity extraction (prior Phase 3 failure was from `/tmp/run_phase3.sh` override, not adapter code). Generated 90 Phase 3d configs for scopes 02-06 (8 adapters × 5 scopes × 2 budgets). Added Phase 5 to orchestrator: `--phase 5 --cerebras-key` runs all scopes with distractors using Cerebras agent LLM. Removed hindsight from adapter list. Updated `config_filename()` with fallback for mixed naming conventions. Implemented benchmark methodology comparison (`docs/BENCHMARK_METHODOLOGY_COMPARISON.md`) and 5 parallelism optimizations (parallel scoring, ingest, scopes, baseline gen, tool calls). 991 tests passing. Total Phase 5 ready: 96 configs (8 adapters × 6 scopes × 2 budgets). |
+| 2026-02-23 | Phase 3 with distractors (session 19) | **12/18 runs completed** with 120 episodes (30 signal + 90 distractors). Added `--include-distractors` to dataset compiler, `constrained-8k`/`constrained-16k` budget presets, remapped checkpoints for interleaved episodes. Switched to Cerebras (GPT-OSS-120B at 3000 tok/s, $0.35/M). A/B test confirmed GPT-OSS comparable quality to Qwen3-235B at 5x speed. **Key result: no memory system >50% answer quality.** sqlite-chunked-hybrid (0.477) beats all dedicated memory systems. Compaction collapsed from NBA 0.790 to 0.404 with distractors — experimental design validated. Cognee/graphiti failed (API compat). **Hindsight removed from evaluation** (NBA≈null, 17.3GB image, zero value demonstrated). Budget enforcement found non-binding — adapters use 4-5x budgeted tokens on first call. |
+| 2026-02-23 | Phase 2 complete + ops report (session 18) | **12/12 Phase 2 runs** scored. Cognee 2K completed (run `72fea05ec21f`, NBA=0.855 anomalous — budget_compliance=0.167). Wrote `docs/ADAPTER_OPERATIONS_REPORT.md` — per-adapter operational assessment. Updated STATUS_REPORT with full 9-adapter ranking table including answer_quality, budget_compliance, evidence_coverage. |
+| 2026-02-23 | Constrained Phase 2 heavy adapters (session 17) | **11/12 Phase 2 runs** scored: 6 heavy adapters × scope 01 × 2 budgets. letta-sleepy leads (NBA 0.667/0.693), hindsight≈null (0.168). Added LLM response caching. Fixed letta embed proxy for Together-only operation. Increased cognee timeout to 3600s. |
+| 2026-02-22 | Constrained budget validation (session 16) | **36 runs** (3 adapters × 6 scopes × 2 budgets) validating that constrained token budgets (4K/2K) make retrieval quality matter. **Hypothesis validated**: compaction NBA=0.73 at 2K (CI: 0.68-0.79), chunked-hybrid NBA=0.35, null=0.07. All adapter-vs-null Wilcoxon p<0.0001. No significant 4K→2K degradation. Built phased orchestrator (`scripts/run_constrained_validation.py`) with concurrent execution, state tracking, resume support. Built analysis script (`scripts/analyze_constrained.py`) with bootstrap CIs, Wilcoxon tests, degradation curves. Generated null adapter configs for all 6 scopes. Cognee failed (SQLite schema error); other heavy infra adapters need service containers. 991 tests passing. |
 | 2026-02-19 | Benchmark throughput optimization (session 13) | **3-strategy throughput optimization**: (1) Parallel question answering via ThreadPoolExecutor (`--parallel-questions 4`), verified 5x speedup on question phase. (2) Fast adapter-internal model — switched graphiti/cognee/mem0 entity extraction from Qwen3-235B (~7s/call) to Llama-3.3-70B-Instruct-Turbo (~1-2s/call); agent answering model stays 235B. (3) Adapter state caching — deterministic SHA256 cache keys, JSON manifests at `--cache-dir`, `get_cache_state()`/`restore_cache_state()` protocol on MemoryAdapter base class; implemented for graphiti, cognee, compaction. **Live verification**: graphiti scope01 fresh run 28 min (previously DNF with 235B), cached re-run **1m 36s** (~17x speedup). 995 tests passing (+26: 8 parallel questions, 18 caching). |
 | 2026-02-19 | Paper-ready evaluation overhaul (session 12) | **Scoring v3.2**: Replaced `longitudinal_advantage` with `naive_baseline_advantage` (true head-to-head vs context stuffing). Added per-question timing to BudgetCompliance + markdown/HTML reports. **Compaction adapter**: summarize-then-answer baseline with scope isolation, batch_retrieve, cited episode retrieval — passes all conformance tests. **Context-limited mode**: `constrained-4k`/`constrained-2k` presets with `max_cumulative_result_tokens` cap in budget enforcer + harness. 22 new config files (6 compaction scopes, 10 constrained scope01 runs, 6 compaction matrix entries). **969 tests passing** (+122: 16 naive baseline, 26 compaction, rest conformance expansion). |
 | 2026-02-20 | Cognee ACL fix + successful benchmark | **Cognee**: scored **0.5638** on scope 01 — **2nd overall** (only V3 0.5776 is higher). evidence_coverage **0.6319** is best of any system. Fixed critical bug: cognee 0.5.2 ACL mode wraps search results in dict with `"search_result"` key; `getattr()` doesn't work for dicts. Also fixed Kuzu lock conflicts by setting `ENABLE_BACKEND_ACCESS_CONTROL=false`. Previous runs (v10-v16) all scored 0.0000 or crashed. Added retry with exponential backoff to OpenAI client for Together AI 503 errors. Created cognee configs for scopes 02-06. 847 unit tests. |

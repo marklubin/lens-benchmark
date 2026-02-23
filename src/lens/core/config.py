@@ -84,6 +84,34 @@ class AgentBudgetConfig:
         )
 
     @classmethod
+    def constrained_16k(cls) -> AgentBudgetConfig:
+        """Constrained budget — 16K token cap on cumulative tool results."""
+        return cls(
+            preset="constrained-16k",
+            max_turns=10,
+            max_tool_calls=20,
+            max_payload_bytes=131072,
+            max_latency_per_call_ms=10000,
+            max_agent_tokens=32768,
+            ingest_max_latency_ms=200,
+            max_cumulative_result_tokens=16384,
+        )
+
+    @classmethod
+    def constrained_8k(cls) -> AgentBudgetConfig:
+        """Constrained budget — 8K token cap on cumulative tool results."""
+        return cls(
+            preset="constrained-8k",
+            max_turns=8,
+            max_tool_calls=16,
+            max_payload_bytes=65536,
+            max_latency_per_call_ms=5000,
+            max_agent_tokens=16384,
+            ingest_max_latency_ms=200,
+            max_cumulative_result_tokens=8192,
+        )
+
+    @classmethod
     def constrained_4k(cls) -> AgentBudgetConfig:
         """Constrained budget — 4K token cap on cumulative tool results."""
         return cls(
@@ -117,6 +145,8 @@ class AgentBudgetConfig:
             "fast": cls.fast,
             "standard": cls.standard,
             "extended": cls.extended,
+            "constrained-16k": cls.constrained_16k,
+            "constrained-8k": cls.constrained_8k,
             "constrained-4k": cls.constrained_4k,
             "constrained-2k": cls.constrained_2k,
         }
@@ -151,6 +181,8 @@ class RunConfig:
     checkpoints: list[int] = field(default_factory=lambda: [10, 20, 40, 80])
     seed: int = 42
     parallel_questions: int = 1  # Number of questions to answer concurrently
+    parallel_ingest: int = 1  # Number of episodes to ingest concurrently between checkpoints
+    parallel_scopes: int = 1  # Number of scopes to run concurrently (each gets its own adapter)
     cache_dir: str | None = None  # Directory for adapter state caching
 
     @classmethod
@@ -170,6 +202,8 @@ class RunConfig:
             checkpoints=d.get("checkpoints", [10, 20, 40, 80]),
             seed=d.get("seed", 42),
             parallel_questions=d.get("parallel_questions", 1),
+            parallel_ingest=d.get("parallel_ingest", 1),
+            parallel_scopes=d.get("parallel_scopes", 1),
             cache_dir=d.get("cache_dir"),
         )
 
@@ -200,6 +234,10 @@ class RunConfig:
         }
         if self.parallel_questions > 1:
             d["parallel_questions"] = self.parallel_questions
+        if self.parallel_ingest > 1:
+            d["parallel_ingest"] = self.parallel_ingest
+        if self.parallel_scopes > 1:
+            d["parallel_scopes"] = self.parallel_scopes
         if self.cache_dir is not None:
             d["cache_dir"] = self.cache_dir
         return d

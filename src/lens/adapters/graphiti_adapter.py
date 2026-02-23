@@ -95,6 +95,11 @@ class GraphitiAdapter(MemoryAdapter):
     requires_metering: bool = False
 
     def __init__(self) -> None:
+        # Entity extraction LLM — used by graphiti_core for graph construction.
+        # Defaults to Llama-3.3-70B on Together AI (fast, cheap, compatible).
+        # Separated from the agent LLM because graphiti's entity extraction
+        # requires structured output patterns that some providers (e.g. Cerebras)
+        # don't support.
         self._llm_api_key = os.environ.get("GRAPHITI_LLM_API_KEY", "")
         self._llm_model = os.environ.get(
             "GRAPHITI_LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"

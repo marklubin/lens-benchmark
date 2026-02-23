@@ -104,7 +104,7 @@ class TestPairwiseFactJudgeDeterminism:
             judge_fn=judge,
             max_workers=4,
         )
-        assert rate == 1.0
+        assert rate == 0.5
         assert details == []
         judge.assert_not_called()
 

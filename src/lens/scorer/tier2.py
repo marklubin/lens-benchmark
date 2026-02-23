@@ -98,7 +98,7 @@ class AnswerQuality(BaseMetric):
         else:
             per_question_results = [_score_question(args) for args in scoreable]
 
-        scores: list[float] = [1.0] * no_fact_count
+        scores: list[float] = [0.5] * no_fact_count
         per_question: list[dict] = []
         for pq in per_question_results:
             if pq is not None:

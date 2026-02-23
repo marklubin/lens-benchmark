@@ -265,13 +265,13 @@ class TestAnswerQuality:
         mr = metric.compute(result)
         assert mr.value == 0.5  # tie on 1 fact
 
-    def test_no_key_facts_scores_one(self):
-        """Questions with no key facts score 1.0."""
+    def test_no_key_facts_scores_half(self):
+        """Questions with no key facts score 0.5 (uninformative)."""
         qr = _make_qr(answer_text="answer", key_facts=[])
         result = _make_run([qr])
         metric = AnswerQuality(judge_fn=lambda p: "A")
         mr = metric.compute(result)
-        assert mr.value == 1.0
+        assert mr.value == 0.5
 
 
 class TestInsightDepth:
@@ -600,7 +600,7 @@ class TestTier1Gate:
     def test_gate_metric_not_present(self):
         """Gate metric not in results — gate does not trigger."""
         metrics = [
-            MetricResult(name="fact_recall", tier=1, value=0.5),
+            MetricResult(name="budget_compliance", tier=1, value=0.5),
         ]
         score = compute_composite(metrics)
         assert score > 0.0
@@ -679,7 +679,7 @@ class TestPairwiseFactJudge:
         assert "B" in candidate_positions
 
     def test_empty_facts(self):
-        """No facts → win_rate 1.0, empty details."""
+        """No facts → win_rate 0.5 (uninformative), empty details."""
         win_rate, details = pairwise_fact_judge(
             candidate_answer="answer",
             reference_answer="other",
@@ -687,7 +687,7 @@ class TestPairwiseFactJudge:
             question="What?",
             judge_fn=lambda p: "A",
         )
-        assert win_rate == 1.0
+        assert win_rate == 0.5
         assert details == []
 
     def test_details_structure(self):

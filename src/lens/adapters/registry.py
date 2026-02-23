@@ -107,3 +107,7 @@ def _ensure_builtins() -> None:
         import lens.adapters.compaction  # noqa: F401
     except ImportError:
         pass  # openai not installed
+    try:
+        import lens.adapters.triad_v1  # noqa: F401
+    except ImportError:
+        pass  # openai not installed

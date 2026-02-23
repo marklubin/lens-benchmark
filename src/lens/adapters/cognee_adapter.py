@@ -131,15 +131,17 @@ class CogneeAdapter(MemoryAdapter):
 
     def _apply_env_config(self) -> None:
         """Propagate COGNEE_* env vars to the names cognee's pydantic settings read."""
+        # Disable ACL to avoid race condition in cognee's user lookup
+        os.environ.setdefault("ENABLE_BACKEND_ACCESS_CONTROL", "false")
         if self._embed_api_key:
             os.environ.setdefault("EMBEDDING_API_KEY", self._embed_api_key)
         if self._embed_model:
-            # cognee uses litellm for embeddings; model must have provider prefix.
-            # Use "together_ai/" prefix so litellm routes via Together AI native provider.
-            embed_model = self._embed_model
-            if not embed_model.startswith(("openai/", "together_ai/", "bedrock/")):
-                embed_model = f"together_ai/{embed_model}"
-            os.environ.setdefault("EMBEDDING_MODEL", embed_model)
+            # Pass the embedding model name as-is. Together AI models like
+            # "Alibaba-NLP/gte-modernbert-base" must NOT be prefixed with
+            # "together_ai/" — that compound name causes 422 errors.
+            # The EMBEDDING_PROVIDER=openai setting (below) tells litellm to
+            # route via OpenAI-compatible endpoint at EMBEDDING_ENDPOINT.
+            os.environ.setdefault("EMBEDDING_MODEL", self._embed_model)
         # Set EMBEDDING_DIMENSIONS so LanceDB schema uses the correct vector size.
         # Together AI rejects the 'dimensions' API param — _get_cognee() patches embed_text
         # to suppress it at call time while keeping self.dimensions intact for schema use.

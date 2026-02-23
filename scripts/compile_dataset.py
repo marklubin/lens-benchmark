@@ -43,7 +43,7 @@ def _load_layer3_questions(layer3_dir: Path) -> list[dict]:
     return questions
 
 
-def compile_dataset(scopes_dir: Path, output: Path) -> dict:
+def compile_dataset(scopes_dir: Path, output: Path, *, include_distractors: bool = False) -> dict:
     """Compile all scope artifacts into a unified dataset."""
     scope_dirs = sorted(scopes_dir.glob("*/generated"))
     if not scope_dirs:
@@ -66,6 +66,22 @@ def compile_dataset(scopes_dir: Path, output: Path) -> dict:
         if not episodes:
             print(f"WARNING: skipping {scope_name} — episodes.json is empty", file=sys.stderr)
             continue
+
+        # Merge distractor episodes if requested
+        if include_distractors:
+            distractors_path = gen_dir / "distractors.json"
+            if distractors_path.exists():
+                distractors = json.loads(distractors_path.read_text())
+                if isinstance(distractors, list):
+                    n_signal = len(episodes)
+                    episodes = episodes + distractors
+                    # Sort by timestamp for interleaved chronological ordering
+                    episodes.sort(key=lambda ep: ep.get("timestamp", ""))
+                    print(f"  {scope_name}: merged {n_signal} signal + {len(distractors)} distractor episodes")
+                else:
+                    print(f"  WARNING: {scope_name} distractors.json is not a list, skipping", file=sys.stderr)
+            else:
+                print(f"  WARNING: {scope_name} has no distractors.json", file=sys.stderr)
 
         # Derive scope_id from the first episode
         scope_id = episodes[0]["scope_id"]
@@ -115,8 +131,12 @@ def main() -> None:
         "--output", type=Path, default=Path("datasets/benchmark_dataset.json"),
         help="Output path (default: datasets/benchmark_dataset.json)",
     )
+    parser.add_argument(
+        "--include-distractors", action="store_true",
+        help="Merge distractor episodes into each scope (3x more episodes, interleaved by timestamp)",
+    )
     args = parser.parse_args()
-    compile_dataset(args.scopes_dir, args.output)
+    compile_dataset(args.scopes_dir, args.output, include_distractors=args.include_distractors)
 
 
 if __name__ == "__main__":
