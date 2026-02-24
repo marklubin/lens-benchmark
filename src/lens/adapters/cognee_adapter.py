@@ -223,6 +223,37 @@ class CogneeAdapter(MemoryAdapter):
                 log.debug("Patched litellm: suppressed dimensions, injected max_tokens=16384")
             except Exception as _pe:
                 log.warning("Failed to patch litellm: %s", _pe)
+            # Patch 3: Enable SQLite WAL mode for concurrent write safety.
+            # cognee's cognify() fires concurrent asyncio.gather() tasks
+            # (add_data_points + index_data_points) that all write to SQLite.
+            # Default DELETE journal mode uses exclusive locks → "database is locked".
+            # WAL mode allows concurrent reads during writes and avoids lock contention.
+            try:
+                from sqlalchemy import event as _sa_event  # noqa: PLC0415
+                from cognee.infrastructure.databases.relational import (  # noqa: PLC0415
+                    get_relational_engine,
+                )
+
+                _rel_engine = get_relational_engine()
+                if hasattr(_rel_engine, "engine") and "sqlite" in str(
+                    _rel_engine.engine.url
+                ):
+
+                    @_sa_event.listens_for(
+                        _rel_engine.engine.sync_engine, "connect"
+                    )
+                    def _set_sqlite_wal(dbapi_conn, connection_record):
+                        cursor = dbapi_conn.cursor()
+                        cursor.execute("PRAGMA journal_mode=WAL")
+                        cursor.execute("PRAGMA busy_timeout=60000")
+                        cursor.close()
+
+                    log.info(
+                        "Patched cognee SQLite: WAL mode + 60s busy_timeout"
+                    )
+            except Exception as _wal_err:
+                log.warning("Failed to patch cognee SQLite for WAL: %s", _wal_err)
+
             _COGNEE_PATCHED = True
 
         # Configure LLM programmatically (persists for process lifetime).

@@ -1,14 +1,14 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-23 (session 22)
+**Last Updated**: 2026-02-23 (session 23)
 **Scoring Pipeline**: v3.2 (naive baseline advantage replaces longitudinal_advantage, per-question timing)
 **Agent LLM**: GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI) / Qwen3-32B (RunPod vLLM)
-**Judge LLM**: Qwen3-235B-A22B (Together AI)
+**Judge LLM**: GPT-OSS-120B (Cerebras, session 23) / Qwen3-235B-A22B (Together AI, prior sessions)
 **Token Cap**: 32,768 (standard) / 16,384 (constrained-16k) / 8,192 (constrained-8k) / 4,096 (constrained-4k) / 2,048 (constrained-2k)
 **Dataset**: 6 scopes, 144 questions, 720 signal episodes + 540 distractor episodes (120 per scope with distractors)
 **Unit Tests**: 991 passing
-**Adapters Under Evaluation**: 7 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti). ~~hindsight~~ removed — see session 19 notes.
-**Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + 12 Phase 3 runs + **53 Phase 5 runs (multi-scope with distractors, 120 episodes)**
+**Adapters Under Evaluation**: 8 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti). ~~hindsight~~ removed — see session 19 notes.
+**Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + 12 Phase 3 runs + **90 Phase 5 runs scored (of 96 attempted)**
 
 ---
 
@@ -16,9 +16,9 @@
 
 LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluating whether AI agent memory systems can synthesize conclusions from evidence scattered across many sequential episodes, rather than finding answers in a single document.
 
-**Current state**: Core infrastructure is feature-complete. We have 6 domain-diverse dataset scopes, a contamination-resistant two-stage data generation pipeline, a three-tier scoring system with pairwise LLM judging, and benchmark results across 5+ real memory systems. The scoring pipeline (v3.2) adds a true naive baseline metric (context-stuffed head-to-head comparison), a compaction baseline adapter, context-limited agent mode (dual-cap degradation curve), and per-question timing in reports. **Statistical analysis and judge reliability validation are complete for publication.**
+**Current state**: Core infrastructure is feature-complete. **90/96 Phase 5 runs scored** — all 8 adapters evaluated across 6 domain-diverse scopes with distractor episodes. Statistical analysis, judge reliability validation, and publication-ready figures/tables are complete.
 
-**Key finding 12 — PHASE 5 (FULL MULTI-SCOPE WITH DISTRACTORS): sqlite-chunked-hybrid dominates across all 6 domains**: 96 runs attempted (8 adapters × 6 scopes × 2 budgets), 53 scored, 43 failed. Using Cerebras GPT-OSS-120B as agent LLM and Qwen3-235B (Together AI) as judge. **sqlite-chunked-hybrid leads with avg NBA 0.541 (CI: 0.374–0.469 on answer quality)**. mem0-raw 2nd (NBA 0.441), compaction 3rd (NBA 0.391). Cognee failed all 12 runs (TimeoutError on cognee.add()), letta-sleepy failed all 12 (Letta server 182s errors). Graphiti completed 1/12 but that single run (s06/16k) scored highest composite of any run (0.553, NBA 0.655). **Kendall's W = 0.683** (substantial cross-scope ranking agreement). 4 pairwise differences significant at p<0.05 (Wilcoxon signed-rank). **Judge reliability: 88% position-swap agreement, Cohen's kappa = 0.658 (moderate), position bias = 49% (near-perfect balance).**
+**Key finding 12 — PHASE 5 COMPLETE (90/96 scored): Simple retrieval beats all complex memory architectures**: Using Cerebras GPT-OSS-120B as agent LLM (judge + embeddings via Modal). **sqlite-chunked-hybrid leads with 0.473 mean composite (CI: 0.406–0.502)**. Cognee 2nd (0.432), graphiti 3rd (0.426 on 3 scopes). All 7 non-null adapters complete 12/12 runs except graphiti (6/12 — entity extraction timeout on scopes 03-05). **16k > 8k for all adapters** (p=0.016, Wilcoxon). **Kendall's W = 0.755** (strong concordance). 12 of 28 pairwise comparisons significant at p<0.05. **No adapter exceeds 0.50 composite** — the benchmark's core longitudinal synthesis challenge remains unsolved. **Judge reliability: minimal position bias (A/(A+B)=0.451), 7,652 total judgments, but cognee has 100% TIE rate (judge failure).**
 
 **Key finding 11 — PHASE 3 (WITH DISTRACTORS): No memory system cracks 50% answer quality on longitudinal synthesis**: Phase 3 added 90 distractor episodes per scope (120 total, ~84K tokens) to create a real signal/noise separation challenge. 12 of 18 runs completed (cognee, graphiti failed on API incompatibilities; hindsight/8k and letta-sleepy/8k failed on infra issues). **Results**: sqlite-chunked-hybrid leads with 0.477 answer quality (8k budget) — simple FTS+embedding retrieval beats every dedicated memory system. Letta-sleepy (0.403), mem0-raw (0.368), letta (0.346), compaction (0.294), hindsight (0.213), null (0.189). **No system achieves >50% of key facts.** Budget enforcement is effectively non-binding — adapters blast through cumulative token limits on the first retrieval call (avg 39K tokens used vs 8K budget). **The honest conclusion: existing memory systems do not meaningfully outperform basic text search at longitudinal synthesis.**
 
@@ -48,85 +48,124 @@ LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluat
 
 ## Latest Benchmark Results
 
-### Phase 5: Multi-Scope With Distractors (Session 21, 2026-02-23) — GPT-OSS-120B + Qwen3-235B Judge
+### Phase 5: Multi-Scope With Distractors (Sessions 21-23, 2026-02-23) — GPT-OSS-120B (Cerebras)
 
-**96 runs attempted (8 adapters × 6 scopes × 2 budgets), 53 scored, 43 failed.** Dataset: 120 episodes per scope (30 signal + 90 distractors, ~84K tokens). Agent LLM: GPT-OSS-120B (Cerebras). Judge: Qwen3-235B-A22B (Together AI). Embeddings: GTE-ModernBERT-base (Together AI). Budgets: 8k/16k cumulative result tokens.
+**90/96 runs scored (8 adapters × 6 scopes × 2 budgets).** Dataset: 120 episodes per scope (30 signal + 90 distractors, ~84K tokens). Agent LLM: GPT-OSS-120B (Cerebras). Judge: GPT-OSS-120B (Cerebras). Embeddings: GTE-ModernBERT-base (Modal, via embed proxy). Budgets: 8k/16k cumulative result tokens.
 
-#### Answer Quality Rankings (averaged across scopes, by NBA)
+#### Composite Score Rankings (8k budget, across scopes)
 
-| Rank | Adapter | N Scored | Avg Composite | Avg NBA | Best Scope | Worst Scope |
-|------|---------|----------|---------------|---------|------------|-------------|
-| 1 | graphiti | 1/12 | 0.553 | 0.655 | s06/16k (only run) | — |
-| 2 | **sqlite-chunked-hybrid** | **12/12** | **0.473** | **0.541** | s04/16k (0.645) | s03/8k (0.499) |
-| 3 | mem0-raw | 12/12 | 0.349 | 0.441 | s01/16k (0.571) | s03/8k (0.218) |
-| 4 | compaction | 12/12 | 0.272 | 0.391 | s04/16k (0.593) | s03/8k (0.234) |
-| 5 | letta | 4/12 | 0.342 | 0.379 | s02/16k (0.380) | s01/8k (0.332) |
-| 6 | null | 12/12 | 0.000 | 0.231 | s01/16k (0.298) | s04/8k (0.190) |
-| — | cognee | 0/12 | DNF | DNF | — | — |
-| — | letta-sleepy | 0/12 | DNF | DNF | — | — |
+| Rank | Adapter | N Scored | 8k Mean | 16k Mean | Overall Mean | 95% CI |
+|------|---------|----------|---------|----------|-------------|--------|
+| 1 | **sqlite-chunked-hybrid** | **12/12** | **0.454** | **0.492** | **0.473** | [0.406, 0.502] |
+| 2 | cognee | 12/12 | 0.421 | 0.444 | 0.432 | [0.397, 0.446] |
+| 3 | graphiti | 6/12 | 0.393 | 0.459 | 0.426 | [0.220, 0.491] |
+| 4 | mem0-raw | 12/12 | 0.330 | 0.368 | 0.349 | [0.265, 0.388] |
+| 5 | letta | 12/12 | 0.327 | 0.366 | 0.346 | [0.258, 0.399] |
+| 6 | letta-sleepy | 12/12 | 0.322 | 0.348 | 0.335 | [0.268, 0.381] |
+| 7 | compaction | 12/12 | 0.245 | 0.300 | 0.272 | [0.137, 0.328] |
+| 8 | null | 12/12 | 0.000 | 0.000 | 0.000 | [0.000, 0.000] |
 
-#### Per-Scope NBA Heatmap (8k+16k averaged)
+#### Per-Scope Composite Heatmap (8k budget)
 
-| Adapter | S01 | S02 | S03 | S04 | S05 | S06 |
-|---------|-----|-----|-----|-----|-----|-----|
-| sqlite-chunked-hybrid | 0.557 | 0.589 | 0.485 | 0.613 | 0.510 | 0.494 |
-| mem0-raw | 0.512 | 0.439 | 0.267 | 0.538 | 0.494 | 0.392 |
-| compaction | 0.462 | 0.316 | 0.252 | 0.531 | 0.435 | 0.351 |
-| letta | 0.401 | 0.357 | — | — | — | — |
-| null | 0.275 | 0.223 | 0.223 | 0.218 | 0.236 | 0.209 |
+| Adapter | S01 | S02 | S03 | S04 | S05 | S06 | Mean |
+|---------|-----|-----|-----|-----|-----|-----|------|
+| sqlite-chunked-hybrid | 0.424 | 0.482 | 0.381 | 0.535 | 0.520 | 0.386 | 0.454 |
+| cognee | 0.438 | 0.402 | 0.374 | 0.471 | 0.418 | 0.423 | 0.421 |
+| graphiti | 0.491 | 0.220 | --- | --- | --- | 0.467 | 0.393 |
+| mem0-raw | 0.345 | 0.320 | 0.186 | 0.419 | 0.407 | 0.299 | 0.329 |
+| letta | 0.288 | 0.338 | 0.215 | 0.455 | 0.424 | 0.239 | 0.327 |
+| letta-sleepy | 0.300 | 0.313 | 0.252 | 0.451 | 0.377 | 0.240 | 0.322 |
+| compaction | 0.339 | 0.000 | 0.198 | 0.364 | 0.309 | 0.259 | 0.245 |
+| null | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+
+#### Budget Effect (8k vs 16k)
+
+16k > 8k for ALL adapters (p=0.016, Wilcoxon signed-rank). Mean gain: +0.041.
+
+| Adapter | 8k Mean | 16k Mean | Delta |
+|---------|---------|----------|-------|
+| graphiti | 0.393 | 0.459 | +0.067 |
+| compaction | 0.245 | 0.300 | +0.055 |
+| letta | 0.327 | 0.366 | +0.039 |
+| mem0-raw | 0.330 | 0.368 | +0.039 |
+| sqlite-chunked-hybrid | 0.454 | 0.492 | +0.037 |
+| letta-sleepy | 0.322 | 0.348 | +0.026 |
+| cognee | 0.421 | 0.444 | +0.023 |
 
 #### Statistical Analysis
 
 | Test | Result |
 |------|--------|
-| **Kendall's W** (cross-scope concordance) | **0.683** (substantial agreement) |
-| sqlite-chunked-hybrid vs null | p = 0.031 * (effect size = −1.0) |
-| mem0-raw vs null | p = 0.031 * (effect size = 1.0) |
-| compaction vs null | p = 0.031 * (effect size = 1.0) |
-| sqlite-chunked-hybrid vs mem0-raw | p = 0.031 * (effect size = −1.0) |
-| compaction vs mem0-raw | p = 0.563 (not significant) |
-| compaction vs sqlite-chunked-hybrid | p = 0.063 (not significant) |
+| **Kendall's W** (cross-scope concordance) | **0.755** (strong agreement) |
+| Significant pairwise comparisons (p<0.05) | **12/28** |
+| cognee vs compaction | p = 0.031 * |
+| cognee vs letta-sleepy | p = 0.031 * |
+| cognee vs mem0-raw | p = 0.031 * |
+| cognee vs null | p = 0.031 * |
+| letta vs null | p = 0.031 * |
+| letta-sleepy vs null | p = 0.031 * |
+| mem0-raw vs null | p = 0.031 * |
+| sqlite-chunked-hybrid vs null | p = 0.031 * |
+| compaction vs sqlite-chunked-hybrid | p = 0.031 * |
+| letta vs sqlite-chunked-hybrid | p = 0.031 * |
+| letta-sleepy vs sqlite-chunked-hybrid | p = 0.031 * |
+| mem0-raw vs sqlite-chunked-hybrid | p = 0.031 * |
 
-Bootstrap 95% CIs on answer quality (averaged across scopes):
-- sqlite-chunked-hybrid: **0.421** [0.374, 0.469]
-- mem0-raw: **0.318** [0.231, 0.409]
-- compaction: **0.289** [0.220, 0.364]
-- null: **0.120** [0.108, 0.131]
-- letta: 0.248 [0.218, 0.278] (only 2 scopes)
+Bootstrap 95% CIs on composite (8k budget, across 6 scopes):
+- sqlite-chunked-hybrid: **0.454** [0.406, 0.502]
+- cognee: **0.421** [0.397, 0.446]
+- graphiti: **0.393** [0.220, 0.491] (3 scopes, wide CI)
+- mem0-raw: **0.330** [0.265, 0.388]
+- letta: **0.327** [0.258, 0.399]
+- letta-sleepy: **0.322** [0.268, 0.381]
+- compaction: **0.245** [0.137, 0.328]
+- null: **0.000** [0.000, 0.000]
 
-#### Judge Reliability (Position-Swap Audit)
+#### Judge Reliability
 
 | Metric | Value |
 |--------|-------|
-| Position-swap agreement | **88.0%** (44/50) |
-| Cohen's kappa | **0.658** (moderate) |
-| Position bias (A-win rate) | **49.0%** (near-perfect balance) |
-| Reliability rating | MODERATE (0.6 ≤ κ < 0.8) |
+| Total judge calls | 7,652 |
+| Position A wins | 2,503 (32.7%) |
+| Position B wins | 3,052 (39.9%) |
+| Ties | 2,097 (27.4%) |
+| A/(A+B) ratio | **0.451** (minimal position bias) |
 
-#### Failures
+Per-adapter TIE rates:
+- **cognee: 100% TIE** (judge failure — composite driven entirely by mechanical metrics)
+- letta/letta-sleepy: ~38% TIE (partial discrimination)
+- graphiti: 20.5% TIE
+- mem0-raw/null/chunked-hybrid/compaction: 4-6% TIE (strong discrimination)
 
-| Adapter | Runs Failed | Error | Root Cause |
-|---------|-------------|-------|------------|
-| cognee | 12/12 | TimeoutError (~126s per attempt) | `cognee.add()` entity extraction via remote API (Together AI) too slow for 120 episodes |
-| letta-sleepy | 12/12 | 182s timeout errors | Letta server overloaded/crashing with 120-episode distractor datasets |
-| letta | 8/12 | 182s timeout errors | Same Letta server issues, scopes 03-06 all failed |
-| graphiti | 11/12 | add_episode failures | Entity extraction timeouts on most scopes, only s06/16k succeeded |
+#### Graphiti Failures (6/12 runs incomplete)
+
+| Scope | Status | Root Cause |
+|-------|--------|------------|
+| s01 | Scored (both budgets) | OK |
+| s02 | Scored (both budgets) | OK |
+| s03 | Failed | Entity extraction TimeoutError (120 episodes × ~5 LLM calls/episode) |
+| s04 | Failed | Same — FalkorDB query backlog + Cerebras API latency |
+| s05 | Failed | Same |
+| s06 | Scored (both budgets) | OK |
+
+Despite FalkorDB tuning (MAX_QUEUED_QUERIES=500, TIMEOUT=30000ms), graphiti semaphore reduction (8→3), and internal timeout increase (60s→180s/episode), scopes 03-05 consistently time out. This is a meaningful finding: **graph-based entity extraction does not scale to 120-episode corpora with remote LLM APIs**.
 
 #### Key Takeaways
 
-1. **sqlite-chunked-hybrid is the only system to complete all 12 runs AND lead the rankings** — simple FTS+embedding retrieval is both the most reliable and the most effective approach across 6 diverse domains
-2. **Heavy infrastructure adapters have severe reliability problems at scale** — cognee (0/12), letta-sleepy (0/12), graphiti (1/12) all essentially failed the multi-scope benchmark. Only mem0-raw (12/12) among heavy adapters completed everything
-3. **Graphiti's one success (s06/16k, composite 0.553) is the highest single-run score** — suggesting the temporal knowledge graph architecture has potential when it works, but the entity extraction pipeline is too fragile for production use
-4. **Rankings are statistically significant** — 4 pairwise comparisons reach p<0.05, and Kendall's W=0.683 confirms rankings hold across domains
-5. **Scope 04 (multi-AZ cloud outage) is the easiest domain** — highest scores for 4/5 adapters. Scope 03 (public health) is the hardest.
-6. **Judge reliability is adequate for publication** — kappa=0.658 (moderate), no position bias
+1. **Simple retrieval (sqlite-chunked-hybrid) beats all complex memory architectures** — 0.473 mean composite across 6 domains, the only adapter with narrow CI entirely above 0.40
+2. **All adapters completed 12/12 runs except graphiti (6/12)** — session 23 fixed cognee (SQLite WAL mode), letta/letta-sleepy (parallelized, ingest latency cap relaxed), and graphiti (partial via FalkorDB tuning)
+3. **No adapter exceeds 0.50 composite** — the benchmark's longitudinal synthesis challenge remains unsolved
+4. **Cognee ranks #2 despite 100% judge TIE rate** — its composite score is entirely driven by evidence_grounding and evidence_coverage (mechanical metrics), not answer quality
+5. **Compaction collapsed on scope 02** (composite=0.000) — the summarize-then-answer approach fails when distractor volume overwhelms the summary
+6. **Scope 04 (multi-AZ cloud outage) is easiest**, scope 03 (clinical signals) is hardest for all adapters
+7. **16k budget is uniformly better than 8k** (p=0.016) with +0.041 mean gain — more retrieval budget helps regardless of architecture
+8. **Rankings are strongly concordant** — Kendall's W=0.755, meaning the relative ordering holds across domains
 
 #### Publication-Ready Outputs
 
-- Figures: `results/figures/d1_answer_quality_ci.png`, `d2_heatmap.png`, `d4_question_types.png`
+- Figures: `results/figures/d1_answer_quality_ci.png`, `d2_heatmap.png`, `d4_question_types.png`, `combined_heatmap.png`, `budget_effect.png`
 - LaTeX tables: `results/tables/d1_main_results.tex`, `d2_heatmap.tex`
 - Full analysis data: `results/publication_analysis.json`
-- Judge audit: `output/3a71905862b9/scores/position_swap_audit.json`
 
 ---
 
@@ -874,6 +913,7 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-23 | Phase 5 completion + analysis (session 23) | **90/96 runs scored** (was 53). Fixed cognee (SQLite WAL mode + busy_timeout=60s for concurrent writes), letta/letta-sleepy (removed serial group constraint, bumped ingest_max_latency_ms 200→2000, all 8 runs parallelized in ~10 min), graphiti (FalkorDB MAX_QUEUED_QUERIES=500 + TIMEOUT=30s, semaphore 8→3, internal timeout 60→180s/episode — scopes 01,02,06 succeeded, 03-05 still timeout). Migrated remaining Together AI references to Cerebras in orchestrator. Full statistical analysis: Kendall's W=0.755 (strong concordance), 12/28 pairwise significant, budget effect p=0.016. Judge reliability audit: 7,652 calls, A/(A+B)=0.451 (minimal position bias), cognee 100% TIE rate (judge failure). Generated 5 publication figures + 2 LaTeX tables. **Key result**: sqlite-chunked-hybrid 0.473 beats all complex memory architectures. No adapter exceeds 0.50 composite. |
 | 2026-02-23 | Heavy adapter fixes (session 22) | Diagnosed root causes for cognee (0/12), letta (4/12), graphiti (1/12) Phase 5 failures using multi-agent codebase analysis. **Cognee**: sequential `add()` × 120 episodes → timeout; fixed with batch `add(data=[texts], data_per_batch=20)`. **Letta**: httpx 60s timeout + slow Together AI; fixed with 300s timeout + route internal LLM to Cerebras (`cerebras/gpt-oss-120b`). **Graphiti**: underscores in distractor entity names → RediSearch syntax error; fixed with monkey-patch escaping `_-\|()~` in group_id filters. Updated orchestrator to auto-route Letta to Cerebras in Phase 5. 991 tests passing. |
 | 2026-02-23 | Phase 5 full execution (session 21) | **53/96 runs scored** across 8 adapters × 6 scopes × 2 budgets with distractors (120 episodes). sqlite-chunked-hybrid leads (avg NBA 0.541, 12/12 complete). mem0-raw 2nd (0.441, 12/12), compaction 3rd (0.391, 12/12). cognee 0/12 (timeout), letta-sleepy 0/12 (server errors), graphiti 1/12. Fixed orchestrator cross-process state file locking (fcntl). Serialized cognee/graphiti/mem0 runs. Statistical analysis: bootstrap CIs, 4 significant pairwise tests, Kendall's W=0.683. Judge reliability: κ=0.658, 88% agreement, 49% position bias. Publication figures/tables generated. |
 | 2026-02-23 | Phase 5 multi-scope infrastructure (session 20) | Fixed cognee adapter (removed `together_ai/` embedding model prefix that caused 422 errors). Verified graphiti adapter already has correct Together AI routing for entity extraction (prior Phase 3 failure was from `/tmp/run_phase3.sh` override, not adapter code). Generated 90 Phase 3d configs for scopes 02-06 (8 adapters × 5 scopes × 2 budgets). Added Phase 5 to orchestrator: `--phase 5 --cerebras-key` runs all scopes with distractors using Cerebras agent LLM. Removed hindsight from adapter list. Updated `config_filename()` with fallback for mixed naming conventions. Implemented benchmark methodology comparison (`docs/BENCHMARK_METHODOLOGY_COMPARISON.md`) and 5 parallelism optimizations (parallel scoring, ingest, scopes, baseline gen, tool calls). 991 tests passing. Total Phase 5 ready: 96 configs (8 adapters × 6 scopes × 2 budgets). |

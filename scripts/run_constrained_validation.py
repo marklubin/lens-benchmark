@@ -34,7 +34,7 @@ Usage:
     python3 scripts/run_constrained_validation.py --status
 
 Environment:
-    TOGETHER_API_KEY  - Required. Read from .env if not set.
+    CEREBRAS_API_KEY  - Required. Read from .env if not set.
 """
 from __future__ import annotations
 
@@ -120,6 +120,7 @@ HEAVY_ADAPTERS = {
         },
         "serial_group": "graphiti",  # shared FalkorDB instance — must serialize
         "health_check": ("http://localhost:6379", "FalkorDB"),
+        "timeout": 3600,  # 60 min — entity extraction + graph queries slow on large scopes
     },
     "mem0-raw": {
         "extra_env": {
@@ -143,7 +144,6 @@ HEAVY_ADAPTERS = {
             "LETTA_LLM_MODEL": "letta/letta-free",
             "LETTA_EMBED_MODEL": "embed-proxy/text-embedding-3-small",
         },
-        "serial_group": "letta",  # letta & letta-sleepy share server
         "health_check": ("http://localhost:8283/v1/health", "Letta"),
     },
     "letta-sleepy": {
@@ -153,7 +153,6 @@ HEAVY_ADAPTERS = {
             "LETTA_LLM_MODEL": "letta/letta-free",
             "LETTA_EMBED_MODEL": "embed-proxy/text-embedding-3-small",
         },
-        "serial_group": "letta",
         "health_check": ("http://localhost:8283/v1/health", "Letta"),
     },
 }
@@ -422,7 +421,7 @@ def run_and_score(
         elapsed = time.time() - t0
         log.error("FAILED %-35s after %.0fs: %s", label, elapsed, e)
         with lock:
-            state[label] = {"status": "failed", "run_id": run_id, "error": str(e)[:2000]}
+            state[label] = {"status": "failed", "run_id": run_id, "error": str(e)[:8000]}
             save_state(state)
 
 
@@ -485,10 +484,9 @@ def build_phase_runs(
                     extra_env["LENS_LLM_MODEL"] = "gpt-oss-120b"
                     extra_env["OPENAI_API_KEY"] = cerebras_key
                     extra_env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
-                    # Route Letta's internal LLM to Cerebras too — Together AI
-                    # takes 120-180s on large contexts, exceeding httpx timeouts.
-                    # NOTE: Letta server only supports together/letta providers,
-                    # NOT cerebras. Keep Letta on Together AI's Qwen3-235B.
+                    # Letta uses letta/letta-free for its internal LLM (built-in,
+                    # no external provider needed) and embed-proxy for embeddings
+                    # (routes through local proxy to Modal endpoint).
                 runs.append((label, f"configs/{fname}", adapter, extra_env))
 
     return runs
@@ -497,7 +495,7 @@ def build_phase_runs(
 def get_serial_group(adapter: str) -> str | None:
     """Get serial group for an adapter (adapters in same group run sequentially)."""
     if adapter in HEAVY_ADAPTERS:
-        return HEAVY_ADAPTERS[adapter]["serial_group"]
+        return HEAVY_ADAPTERS[adapter].get("serial_group")
     return None
 
 
@@ -558,20 +556,20 @@ def preflight_checks(api_key: str, runs: list[tuple]) -> bool:
                     # Don't hard-fail — let individual runs fail and get retried
                 checked_services.add(name)
 
-    # Test Together API
+    # Test Cerebras API
     try:
         import urllib.request
         req = urllib.request.Request(
-            "https://api.together.xyz/v1/models",
-            headers={"Authorization": f"Bearer {api_key}"},
+            "https://api.cerebras.ai/v1/models",
+            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "lens-benchmark/1.0"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
-                log.info("Together API: OK")
+                log.info("Cerebras API: OK")
             else:
-                log.warning("Together API returned status %d", resp.status)
+                log.warning("Cerebras API returned status %d", resp.status)
     except Exception as e:
-        log.warning("Together API check failed: %s", e)
+        log.warning("Cerebras API check failed: %s", e)
 
     return ok
 

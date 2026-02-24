@@ -373,7 +373,7 @@ class GraphitiAdapter(MemoryAdapter):
         pending = list(self._pending_episodes)
 
         async def _add_batch():
-            sem = asyncio.Semaphore(8)  # 8 concurrent episodes
+            sem = asyncio.Semaphore(3)  # 3 concurrent — FalkorDB queries slow on large graphs
 
             async def _add_one(item):
                 async with sem:
@@ -390,7 +390,7 @@ class GraphitiAdapter(MemoryAdapter):
                 *[_add_one(i) for i in pending], return_exceptions=True
             )
 
-        timeout = 60.0 * len(pending)
+        timeout = 180.0 * len(pending)  # 3 min/episode — entity extraction is slow
         results = _get_runner().run(_add_batch(), timeout=timeout)
 
         errors = []

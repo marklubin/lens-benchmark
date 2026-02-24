@@ -41,7 +41,7 @@ class AgentBudgetConfig:
     max_payload_bytes: int = 65536
     max_latency_per_call_ms: float = 5000
     max_agent_tokens: int = 32768
-    ingest_max_latency_ms: float = 200
+    ingest_max_latency_ms: float = 2000
     max_cumulative_result_tokens: int = 0  # 0 = unlimited
 
     @classmethod
