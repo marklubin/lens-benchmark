@@ -418,9 +418,16 @@ class GraphitiAdapter(MemoryAdapter):
 
         if errors:
             failed_ids = [eid for eid, _ in errors]
-            raise AdapterError(
-                f"Graphiti add_episode failed for {len(errors)} episode(s) "
-                f"at checkpoint {checkpoint}: {failed_ids}"
+            fail_ratio = len(errors) / len(pending) if pending else 1.0
+            if fail_ratio > 0.5:
+                raise AdapterError(
+                    f"Graphiti add_episode failed for {len(errors)}/{len(pending)} "
+                    f"episode(s) at checkpoint {checkpoint}: {failed_ids}"
+                )
+            log.warning(
+                "Graphiti: %d/%d add_episode calls failed at checkpoint %d "
+                "(below 50%% threshold, continuing): %s",
+                len(errors), len(pending), checkpoint, failed_ids,
             )
 
     def search(
