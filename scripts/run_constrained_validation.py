@@ -139,7 +139,7 @@ HEAVY_ADAPTERS = {
         "extra_env": {
             "LETTA_BASE_URL": "http://localhost:8283",
             "LETTA_LLM_MODEL": "together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
-            "LETTA_EMBED_MODEL": "letta/letta-free",
+            "LETTA_EMBED_MODEL": "embed-proxy/text-embedding-3-small",
         },
         "serial_group": "letta",  # letta & letta-sleepy share server
         "health_check": ("http://localhost:8283/v1/health", "Letta"),
@@ -149,7 +149,7 @@ HEAVY_ADAPTERS = {
             "LETTA_BASE_URL": "http://localhost:8283",
             "LETTA_SLEEP_VARIANT": "3",
             "LETTA_LLM_MODEL": "together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
-            "LETTA_EMBED_MODEL": "letta/letta-free",
+            "LETTA_EMBED_MODEL": "embed-proxy/text-embedding-3-small",
         },
         "serial_group": "letta",
         "health_check": ("http://localhost:8283/v1/health", "Letta"),
