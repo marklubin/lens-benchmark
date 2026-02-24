@@ -43,21 +43,29 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Monkey-patch: escape underscores in RediSearch group_id field filters.
-# FalkorDB's RediSearch treats '_' as a token delimiter, so group_ids
-# containing underscores (common in LENS distractor episode entity names)
-# cause syntax errors like (@group_id:"my_group").  The fix: escape '_'
-# as '\_' inside the quoted group_id values.
-# Two locations in graphiti-core need patching:
-#   1. FalkorDriver.build_fulltext_query (falkordb_driver.py)
-#   2. _build_falkor_fulltext_query (search_ops.py)
+# Monkey-patch: fix underscore handling in FalkorDB RediSearch queries.
+# FalkorDB's RediSearch treats '_' as a token delimiter, causing syntax
+# errors when entity names contain underscores (common in LENS distractor
+# episodes like "cascading_failure_01_dx_010").
+#
+# Two fixes needed:
+#   1. Add '_' to the _SEPARATOR_MAP so underscores in query TEXT are
+#      replaced with spaces (like other special chars).
+#   2. Escape '_' in group_id FIELD FILTERS where literal matching is
+#      needed.
+#
+# Locations patched:
+#   - search_ops._SEPARATOR_MAP (add '_': ' ')
+#   - search_ops._build_falkor_fulltext_query (group_id escaping)
+#   - FalkorDriver.build_fulltext_query (group_id escaping)
+#   - FalkorDriver.sanitize (add '_' to separator map)
 # ---------------------------------------------------------------------------
 
 _GRAPHITI_PATCHED = False
 
 
 def _patch_graphiti_redisearch() -> None:
-    """Patch graphiti-core RediSearch query builders to escape underscores."""
+    """Patch graphiti-core RediSearch to handle underscores safely."""
     global _GRAPHITI_PATCHED
     if _GRAPHITI_PATCHED:
         return
@@ -70,9 +78,13 @@ def _patch_graphiti_redisearch() -> None:
             """Escape RediSearch special chars in group_id for literal matching."""
             return _re.sub(r'([_\-|()~])', r'\\\1', gid)
 
-        # Patch 1: search_ops module-level function
+        # Patch search_ops module
         from graphiti_core.driver.falkordb.operations import search_ops  # noqa: PLC0415
 
+        # Fix 1a: Add underscore to the query text separator map
+        search_ops._SEPARATOR_MAP[ord('_')] = ' '
+
+        # Fix 1b: Escape underscores in group_id field filters
         _orig_build = search_ops._build_falkor_fulltext_query
 
         def _patched_build(query, group_ids=None, max_query_length=128):
@@ -82,9 +94,19 @@ def _patch_graphiti_redisearch() -> None:
 
         search_ops._build_falkor_fulltext_query = _patched_build
 
-        # Patch 2: FalkorDriver instance method
+        # Patch FalkorDriver class
         from graphiti_core.driver.falkordb_driver import FalkorDriver  # noqa: PLC0415
 
+        # Fix 2a: Add underscore to the driver's sanitize separator map
+        _orig_sanitize = FalkorDriver.sanitize
+
+        def _patched_sanitize(self, query: str) -> str:
+            # Replace underscores with spaces before normal sanitization
+            return _orig_sanitize(self, query.replace('_', ' '))
+
+        FalkorDriver.sanitize = _patched_sanitize
+
+        # Fix 2b: Escape underscores in group_id field filters
         _orig_method = FalkorDriver.build_fulltext_query
 
         def _patched_method(self, query, group_ids=None, max_query_length=128):
@@ -94,7 +116,7 @@ def _patch_graphiti_redisearch() -> None:
 
         FalkorDriver.build_fulltext_query = _patched_method
 
-        log.info("Patched graphiti-core RediSearch query builders for underscore escaping")
+        log.info("Patched graphiti-core RediSearch: underscore sanitization + group_id escaping")
     except ImportError:
         log.debug("graphiti-core not installed, skipping RediSearch patch")
     except Exception as e:
