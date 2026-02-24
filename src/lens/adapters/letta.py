@@ -84,7 +84,12 @@ class LettaAdapter(MemoryAdapter):
                 raise AdapterError(
                     "letta-client not installed. Run: pip install letta-client"
                 ) from e
-            self._client = Letta(base_url=self._base_url, api_key="dummy")
+            # Default httpx timeout is 60s which is too short for slow LLM
+            # providers (Together AI ~120-180s on large contexts). Increase
+            # to 300s to handle worst-case latency.
+            self._client = Letta(
+                base_url=self._base_url, api_key="dummy", timeout=300.0
+            )
         return self._client
 
     def reset(self, scope_id: str) -> None:

@@ -214,7 +214,7 @@ def test_ingest_does_not_call_cognee_add(mock_cognee):
 # ---------------------------------------------------------------------------
 
 
-def test_prepare_calls_add_for_each_episode(mock_cognee):
+def test_prepare_calls_add_with_batched_episodes(mock_cognee):
     adapter = CogneeAdapter()
     adapter.reset("scope_01")
     adapter.ingest("ep01", "scope_01", "2024-01-01T00:00:00Z", "text 1")
@@ -222,7 +222,12 @@ def test_prepare_calls_add_for_each_episode(mock_cognee):
 
     adapter.prepare("scope_01", checkpoint=5)
 
-    assert mock_cognee.add.call_count == 2
+    # Single batched call with list of all episode texts
+    assert mock_cognee.add.call_count == 1
+    call_kwargs = mock_cognee.add.call_args
+    data_arg = call_kwargs.kwargs.get("data") or call_kwargs[1].get("data")
+    assert isinstance(data_arg, list)
+    assert len(data_arg) == 2
 
 
 def test_prepare_calls_cognify(mock_cognee):

@@ -475,6 +475,12 @@ def build_phase_runs(
                     extra_env["LENS_LLM_MODEL"] = "gpt-oss-120b"
                     extra_env["OPENAI_API_KEY"] = cerebras_key
                     extra_env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
+                    # Route Letta's internal LLM to Cerebras too — Together AI
+                    # takes 120-180s on large contexts, exceeding httpx timeouts.
+                    # Cerebras at 3000 tok/s returns in ~2s.
+                    # NOTE: Letta server must be started with -e CEREBRAS_API_KEY=<key>
+                    if adapter in ("letta", "letta-sleepy"):
+                        extra_env["LETTA_LLM_MODEL"] = "cerebras/gpt-oss-120b"
                 runs.append((label, f"configs/{fname}", adapter, extra_env))
 
     return runs

@@ -339,21 +339,24 @@ class CogneeAdapter(MemoryAdapter):
 
         cognee = self._get_cognee()
 
-        # Add each episode as raw text to cognee
-        for item in self._pending_episodes:
-            try:
-                _get_runner().run(
-                    cognee.add(
-                        data=item["content"],
-                        dataset_name=self._dataset_id,
-                    ),
-                    timeout=120.0,
-                )
-            except Exception as e:
-                raise AdapterError(
-                    f"cognee.add() failed for episode '{item['episode_id']}' "
-                    f"at checkpoint {checkpoint}: {e}"
-                ) from e
+        # Batch-add all episodes to cognee in one call.
+        # cognee.add() accepts list[str] with data_per_batch for chunked processing.
+        # Sequential per-episode add() hits timeout at 120 episodes (distractor scopes).
+        all_texts = [item["content"] for item in self._pending_episodes]
+        try:
+            _get_runner().run(
+                cognee.add(
+                    data=all_texts,
+                    dataset_name=self._dataset_id,
+                    data_per_batch=20,
+                ),
+                timeout=300.0,
+            )
+        except Exception as e:
+            raise AdapterError(
+                f"cognee.add() failed for {len(all_texts)} episodes "
+                f"at checkpoint {checkpoint}: {e}"
+            ) from e
 
         # Build knowledge graph from added episodes.
         # cognify() does LLM entity extraction → graph + embeddings.

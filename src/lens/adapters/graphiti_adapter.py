@@ -43,6 +43,65 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Monkey-patch: escape underscores in RediSearch group_id field filters.
+# FalkorDB's RediSearch treats '_' as a token delimiter, so group_ids
+# containing underscores (common in LENS distractor episode entity names)
+# cause syntax errors like (@group_id:"my_group").  The fix: escape '_'
+# as '\_' inside the quoted group_id values.
+# Two locations in graphiti-core need patching:
+#   1. FalkorDriver.build_fulltext_query (falkordb_driver.py)
+#   2. _build_falkor_fulltext_query (search_ops.py)
+# ---------------------------------------------------------------------------
+
+_GRAPHITI_PATCHED = False
+
+
+def _patch_graphiti_redisearch() -> None:
+    """Patch graphiti-core RediSearch query builders to escape underscores."""
+    global _GRAPHITI_PATCHED
+    if _GRAPHITI_PATCHED:
+        return
+    _GRAPHITI_PATCHED = True
+
+    try:
+        import re as _re
+
+        def _escape_group_id(gid: str) -> str:
+            """Escape RediSearch special chars in group_id for literal matching."""
+            return _re.sub(r'([_\-|()~])', r'\\\1', gid)
+
+        # Patch 1: search_ops module-level function
+        from graphiti_core.driver.falkordb.operations import search_ops  # noqa: PLC0415
+
+        _orig_build = search_ops._build_falkor_fulltext_query
+
+        def _patched_build(query, group_ids=None, max_query_length=128):
+            if group_ids:
+                group_ids = [_escape_group_id(gid) for gid in group_ids]
+            return _orig_build(query, group_ids=group_ids, max_query_length=max_query_length)
+
+        search_ops._build_falkor_fulltext_query = _patched_build
+
+        # Patch 2: FalkorDriver instance method
+        from graphiti_core.driver.falkordb_driver import FalkorDriver  # noqa: PLC0415
+
+        _orig_method = FalkorDriver.build_fulltext_query
+
+        def _patched_method(self, query, group_ids=None, max_query_length=128):
+            if group_ids:
+                group_ids = [_escape_group_id(gid) for gid in group_ids]
+            return _orig_method(self, query, group_ids=group_ids, max_query_length=max_query_length)
+
+        FalkorDriver.build_fulltext_query = _patched_method
+
+        log.info("Patched graphiti-core RediSearch query builders for underscore escaping")
+    except ImportError:
+        log.debug("graphiti-core not installed, skipping RediSearch patch")
+    except Exception as e:
+        log.warning("Failed to patch graphiti-core RediSearch escaping: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Thread-hosted event loop — avoids asyncio.run() cross-loop issues
 # ---------------------------------------------------------------------------
 
@@ -95,6 +154,8 @@ class GraphitiAdapter(MemoryAdapter):
     requires_metering: bool = False
 
     def __init__(self) -> None:
+        _patch_graphiti_redisearch()
+
         # Entity extraction LLM — used by graphiti_core for graph construction.
         # Defaults to Llama-3.3-70B on Together AI (fast, cheap, compatible).
         # Separated from the agent LLM because graphiti's entity extraction
