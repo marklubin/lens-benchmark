@@ -27,12 +27,23 @@ def _make_openai_judge(model: str, api_key: str | None = None, cache_dir: str | 
     """
     import openai
 
-    key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LENS_LLM_API_KEY")
+    # LENS_JUDGE_* vars take priority — allows judge to use a different provider
+    # than the agent LLM (e.g., judge on Together AI while agent on Cerebras).
+    key = (
+        api_key
+        or os.environ.get("LENS_JUDGE_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("LENS_LLM_API_KEY")
+    )
     if not key:
         raise click.ClickException(
-            "Judge requires an API key. Set OPENAI_API_KEY or LENS_LLM_API_KEY."
+            "Judge requires an API key. Set LENS_JUDGE_API_KEY, OPENAI_API_KEY, or LENS_LLM_API_KEY."
         )
-    base_url = os.environ.get("LENS_LLM_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+    base_url = (
+        os.environ.get("LENS_JUDGE_API_BASE")
+        or os.environ.get("LENS_LLM_API_BASE")
+        or os.environ.get("OPENAI_BASE_URL")
+    )
     client_kwargs: dict = {"api_key": key}
     if base_url:
         client_kwargs["base_url"] = base_url
@@ -134,8 +145,10 @@ def _load_episodes_for_baseline(dataset_path: str):
 @click.option("--no-gate", is_flag=True, help="Disable tier-1 hard gates (budget/grounding)")
 @click.option("--no-baseline", is_flag=True, help="Skip naive baseline generation (faster re-score)")
 @click.option("--parallel-judge", type=int, default=1, help="Concurrent judge calls (use >1 with self-hosted vLLM)")
+@click.option("--position-swap-audit", "swap_audit_n", type=int, default=0,
+              help="Run position-swap reliability audit on N random judgments")
 @click.option("-v", "--verbose", count=True)
-def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: str | None, no_gate: bool, no_baseline: bool, parallel_judge: int, verbose: int) -> None:
+def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: str | None, no_gate: bool, no_baseline: bool, parallel_judge: int, swap_audit_n: int, verbose: int) -> None:
     """Score a benchmark run."""
     from lens.artifacts.bundle import load_run_result
     from lens.core.errors import atomic_write
@@ -246,3 +259,38 @@ def score(run_dir: str, output_path: str | None, tier: int | None, judge_model: 
             f"loss:{nba_metric.details.get('loss_rate', 0):.0%} "
             f"tie:{nba_metric.details.get('tie_rate', 0):.0%})"
         )
+
+    # Position-swap reliability audit
+    if swap_audit_n > 0 and judge_fn:
+        from lens.scorer.judge import position_swap_audit
+
+        console.print(f"\n[bold]Running position-swap audit ({swap_audit_n} samples)...[/bold]")
+        audit = position_swap_audit(
+            scored_run_dir=run_dir,
+            judge_fn=judge_fn,
+            n_samples=swap_audit_n,
+            max_workers=parallel_judge,
+        )
+        if "error" in audit:
+            console.print(f"[red]Audit error: {audit['error']}[/red]")
+        else:
+            console.print(
+                f"Position-swap agreement: {audit['agreement_pct']:.1%} "
+                f"({audit['agree']}/{audit['total']})"
+            )
+            console.print(f"Cohen's kappa: [bold]{audit['cohens_kappa']:.4f}[/bold]")
+            console.print(f"Position bias (A-win rate): {audit['position_bias']:.1%}")
+            if audit["cohens_kappa"] >= 0.8:
+                console.print("[green]Reliability: GOOD (kappa >= 0.8)[/green]")
+            elif audit["cohens_kappa"] >= 0.6:
+                console.print("[yellow]Reliability: MODERATE (0.6 <= kappa < 0.8)[/yellow]")
+            else:
+                console.print("[red]Reliability: POOR (kappa < 0.6)[/red]")
+
+            # Save audit results
+            audit_path = Path(run_dir) / "scores" / "position_swap_audit.json"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            # Don't save full details to keep file manageable
+            audit_summary = {k: v for k, v in audit.items() if k != "details"}
+            audit_path.write_text(json.dumps(audit_summary, indent=2))
+            console.print(f"Audit saved to {audit_path}")

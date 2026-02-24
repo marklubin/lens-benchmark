@@ -107,6 +107,179 @@ def pairwise_fact_judge(
     return win_rate, results
 
 
+def position_swap_audit(
+    scored_run_dir: str,
+    judge_fn,
+    n_samples: int = 100,
+    max_workers: int = 4,
+) -> dict:
+    """Re-run a random sample of judge calls with A↔B positions swapped.
+
+    Measures inter-rater reliability of the pairwise judge by comparing
+    verdicts when the same content is presented in swapped positions.
+
+    Args:
+        scored_run_dir: Path to a scored run directory containing results.json
+                        and scores/scorecard.json.
+        judge_fn: Callable(prompt: str) -> str that returns "A", "B", or "TIE".
+        n_samples: Number of judgment calls to re-run (randomly selected).
+        max_workers: Number of concurrent judge calls.
+
+    Returns:
+        Dict with agreement stats: total, agree, disagree, agreement_pct,
+        cohens_kappa, position_bias (fraction of A wins).
+    """
+    import json
+    from pathlib import Path
+
+    run_path = Path(scored_run_dir)
+
+    # Load run results — try results.json first, then traverse checkpoint dirs
+    judgeable: list[tuple[str, str, str, str]] = []
+
+    results_file = run_path / "results.json"
+    if results_file.exists():
+        results = json.loads(results_file.read_text())
+        for scope in results.get("scopes", []):
+            for cp in scope.get("checkpoints", []):
+                for qr in cp.get("question_results", []):
+                    q = qr["question"]
+                    key_facts = q.get("ground_truth", {}).get("key_facts", [])
+                    canonical = q.get("ground_truth", {}).get("canonical_answer", "")
+                    answer_text = qr.get("answer", {}).get("answer_text", "")
+                    question_text = q.get("prompt", "")
+                    if not key_facts or not answer_text or not canonical:
+                        continue
+                    for fact in key_facts:
+                        judgeable.append((question_text, answer_text, canonical, fact))
+    else:
+        # Traverse scopes/*/checkpoint_*/question_results.json
+        scopes_dir = run_path / "scopes"
+        if not scopes_dir.exists():
+            raise FileNotFoundError(
+                f"No results.json or scopes/ directory in {scored_run_dir}"
+            )
+        for scope_dir in sorted(scopes_dir.iterdir()):
+            if not scope_dir.is_dir():
+                continue
+            for cp_dir in sorted(scope_dir.iterdir()):
+                if not cp_dir.is_dir() or not cp_dir.name.startswith("checkpoint_"):
+                    continue
+                qr_file = cp_dir / "question_results.json"
+                if not qr_file.exists():
+                    continue
+                question_results = json.loads(qr_file.read_text())
+                if not isinstance(question_results, list):
+                    question_results = [question_results]
+                for qr in question_results:
+                    q = qr.get("question", {})
+                    key_facts = q.get("ground_truth", {}).get("key_facts", [])
+                    canonical = q.get("ground_truth", {}).get("canonical_answer", "")
+                    answer_text = qr.get("answer", {}).get("answer_text", "")
+                    question_text = q.get("prompt", "")
+                    if not key_facts or not answer_text or not canonical:
+                        continue
+                    for fact in key_facts:
+                        judgeable.append((question_text, answer_text, canonical, fact))
+
+    if not judgeable:
+        return {"error": "No judgeable items found", "total": 0}
+
+    # Sample
+    rng = random.Random(42)
+    sample = rng.sample(judgeable, min(n_samples, len(judgeable)))
+
+    def _judge_pair(item: tuple[str, str, str, str]) -> dict:
+        question_text, candidate, reference, fact = item
+
+        # Original order: candidate as A
+        prompt_ab = _build_pairwise_prompt(question_text, fact, candidate, reference)
+        try:
+            verdict_ab = judge_fn(prompt_ab).strip().upper()
+        except Exception:
+            logger.warning("Judge call failed (A=candidate), defaulting to TIE", exc_info=True)
+            verdict_ab = "TIE"
+
+        # Swapped order: candidate as B
+        prompt_ba = _build_pairwise_prompt(question_text, fact, reference, candidate)
+        try:
+            verdict_ba = judge_fn(prompt_ba).strip().upper()
+        except Exception:
+            logger.warning("Judge call failed (B=candidate), defaulting to TIE", exc_info=True)
+            verdict_ba = "TIE"
+
+        # Map to semantic winners
+        def _map_winner(verdict: str, candidate_is_a: bool) -> str:
+            if verdict.startswith("A"):
+                return "candidate" if candidate_is_a else "reference"
+            elif verdict.startswith("B"):
+                return "reference" if candidate_is_a else "candidate"
+            return "tie"
+
+        winner_original = _map_winner(verdict_ab, candidate_is_a=True)
+        winner_swapped = _map_winner(verdict_ba, candidate_is_a=False)
+
+        return {
+            "fact": fact,
+            "verdict_ab": verdict_ab,
+            "verdict_ba": verdict_ba,
+            "winner_original": winner_original,
+            "winner_swapped": winner_swapped,
+            "agree": winner_original == winner_swapped,
+        }
+
+    if max_workers > 1 and len(sample) > 1:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(max_workers, len(sample))
+        ) as pool:
+            audit_results = list(pool.map(_judge_pair, sample))
+    else:
+        audit_results = [_judge_pair(s) for s in sample]
+
+    total = len(audit_results)
+    agree = sum(1 for r in audit_results if r["agree"])
+    disagree = total - agree
+    agreement_pct = agree / total if total > 0 else 0.0
+
+    # Position bias: fraction of time A wins across all calls
+    a_wins = sum(
+        1 for r in audit_results
+        for v in [r["verdict_ab"], r["verdict_ba"]]
+        if v.startswith("A")
+    )
+    total_verdicts = total * 2
+    position_bias = a_wins / total_verdicts if total_verdicts > 0 else 0.5
+
+    # Cohen's kappa
+    # Map to categories for kappa: candidate, reference, tie
+    cats = ["candidate", "reference", "tie"]
+    cat_idx = {c: i for i, c in enumerate(cats)}
+    confusion = [[0] * 3 for _ in range(3)]
+    for r in audit_results:
+        i = cat_idx.get(r["winner_original"], 2)
+        j = cat_idx.get(r["winner_swapped"], 2)
+        confusion[i][j] += 1
+
+    observed_agreement = agreement_pct
+    # Expected agreement by chance
+    expected = 0.0
+    for k in range(3):
+        row_sum = sum(confusion[k]) / total if total > 0 else 0
+        col_sum = sum(confusion[i][k] for i in range(3)) / total if total > 0 else 0
+        expected += row_sum * col_sum
+    kappa = (observed_agreement - expected) / (1 - expected) if expected < 1.0 else 1.0
+
+    return {
+        "total": total,
+        "agree": agree,
+        "disagree": disagree,
+        "agreement_pct": round(agreement_pct, 4),
+        "cohens_kappa": round(kappa, 4),
+        "position_bias": round(position_bias, 4),
+        "details": audit_results,
+    }
+
+
 def _build_pairwise_prompt(
     question: str,
     fact: str,

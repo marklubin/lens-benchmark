@@ -102,7 +102,7 @@ HEAVY_ADAPTERS = {
             "COGNEE_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
             "COGNEE_EMBED_DIMS": "768",
         },
-        "serial_group": None,  # can run concurrent
+        "serial_group": "cognee",  # cognee uses shared SQLite — must serialize
         "health_check": None,
         "timeout": 3600,  # 60 min — cognify entity extraction via remote API is very slow
     },
@@ -116,7 +116,7 @@ HEAVY_ADAPTERS = {
             "GRAPHITI_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
             "GRAPHITI_EMBED_DIM": "768",
         },
-        "serial_group": None,
+        "serial_group": "graphiti",  # shared FalkorDB instance — must serialize
         "health_check": ("http://localhost:6379", "FalkorDB"),
     },
     "mem0-raw": {
@@ -130,7 +130,7 @@ HEAVY_ADAPTERS = {
             "MEM0_EMBED_DIMS": "768",
             "MEM0_EMBED_NO_DIMS": "1",
         },
-        "serial_group": None,
+        "serial_group": "mem0",  # shared Qdrant collection — must serialize
         "health_check": ("http://localhost:6333", "Qdrant"),
     },
     # hindsight removed from evaluation — 18GB image, 413 batch embed errors,
@@ -215,6 +215,9 @@ def build_env(api_key: str, extra: dict[str, str] | None = None) -> dict[str, st
     env["LENS_EMBED_MODEL"] = "Alibaba-NLP/gte-modernbert-base"
     env["OPENAI_API_KEY"] = api_key
     env["OPENAI_BASE_URL"] = "https://api.together.xyz/v1"
+    # Judge always uses Together AI — even when agent LLM is on a different provider
+    env["LENS_JUDGE_API_KEY"] = api_key
+    env["LENS_JUDGE_API_BASE"] = "https://api.together.xyz/v1"
     # Enable LLM response caching — replays cached responses on retries
     env["LENS_LLM_CACHE_DIR"] = str(RESULTS_DIR / "llm_cache")
     if extra:
@@ -237,10 +240,43 @@ def load_state() -> dict:
     return {}
 
 
+# Cross-process file lock for safe concurrent orchestrator instances
+_file_lock = None
+
+
+def _get_file_lock():
+    """Lazy-create a file lock for cross-process state file safety."""
+    global _file_lock
+    if _file_lock is None:
+        import fcntl
+        lock_path = STATE_FILE.with_suffix(".lock")
+        _file_lock = open(lock_path, "w")
+    return _file_lock
+
+
 def save_state(state: dict) -> None:
-    tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2) + "\n")
-    tmp.rename(STATE_FILE)
+    """Atomically merge in-memory state into on-disk state file.
+
+    Uses file locking to prevent concurrent orchestrator instances from
+    clobbering each other's results.
+    """
+    import fcntl
+    lock_fd = _get_file_lock()
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # Re-read disk state and merge our updates on top
+        disk_state = {}
+        if STATE_FILE.exists():
+            try:
+                disk_state = json.loads(STATE_FILE.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        disk_state.update(state)
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(disk_state, indent=2) + "\n")
+        tmp.rename(STATE_FILE)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +472,7 @@ def build_phase_runs(
                 if distractors and cerebras_key:
                     extra_env["LENS_LLM_API_KEY"] = cerebras_key
                     extra_env["LENS_LLM_API_BASE"] = CEREBRAS_API_BASE
+                    extra_env["LENS_LLM_MODEL"] = "gpt-oss-120b"
                     extra_env["OPENAI_API_KEY"] = cerebras_key
                     extra_env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
                 runs.append((label, f"configs/{fname}", adapter, extra_env))
