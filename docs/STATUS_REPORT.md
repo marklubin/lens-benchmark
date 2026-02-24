@@ -1,6 +1,6 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-23 (session 21)
+**Last Updated**: 2026-02-23 (session 22)
 **Scoring Pipeline**: v3.2 (naive baseline advantage replaces longitudinal_advantage, per-question timing)
 **Agent LLM**: GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI) / Qwen3-32B (RunPod vLLM)
 **Judge LLM**: Qwen3-235B-A22B (Together AI)
@@ -765,11 +765,14 @@ Graphiti (temporal knowledge graph with bi-temporal edge invalidation, FalkorDB)
 
 ### What Needs Attention
 
-1. **Heavy adapter reliability at scale**: cognee (0/12), letta-sleepy (0/12), graphiti (1/12), letta (4/12) all had major failure rates in Phase 5. The multi-scope benchmark with 120-episode datasets exposes infrastructure fragility. cognee's entity extraction and letta's server both timeout with large corpora. **For the paper, document these failure rates as a key finding — operational reliability is itself a benchmark dimension.**
+1. **Heavy adapter fixes implemented, pending re-run (session 22)**: Root causes identified and fixed for all three failing adapters:
+   - **cognee** (was 0/12): Sequential `cognee.add()` × 120 episodes exceeded timeout. Fixed: batch all episodes in single `cognee.add(data=[texts], data_per_batch=20)` call with 300s timeout.
+   - **letta/letta-sleepy** (was 4/12 and 0/12): httpx 60s default timeout too short for Together AI on 84K contexts. Fixed: increased client timeout to 300s + route Letta's internal LLM to Cerebras (`cerebras/gpt-oss-120b`) for ~2s responses instead of 120-180s.
+   - **graphiti** (was 1/12): Underscore chars in distractor entity names caused FalkorDB RediSearch syntax errors. Fixed: monkey-patch `build_fulltext_query()` to escape `_-|()~` in group_id field filters.
 
-2. **Graphiti's single-run outlier**: graphiti s06/16k scored 0.553 composite (highest of any Phase 5 run), but 11/12 runs failed. Can't draw reliable conclusions from N=1. If graphiti's entity extraction timeout can be resolved (local GPU, longer timeouts), it could be competitive.
+   **None of these are fundamental architectural failures** — all were configuration/timeout/escaping issues exposed by scaling from 30 to 120 episodes. Re-running should fill in the N=0 cells.
 
-3. **Letta server instability with 120 episodes**: letta completed scopes 01-02 but failed scopes 03-06 with 182s timeouts. letta-sleepy failed all 12. The Letta container may need resource tuning (memory limits, worker count) for large episode corpora.
+2. **Graphiti's single-run outlier**: graphiti s06/16k scored 0.553 composite (highest of any Phase 5 run), but 11/12 runs failed. With the RediSearch fix, more runs should complete and reveal whether graphiti is genuinely competitive or this was a fluke.
 
 4. **Session 15 sweep scores superseded**: The 30 runs scored with Qwen3-32B (session 15) are now largely superseded by Phase 5 (53 runs, 235B judge, distractor datasets). The 32B results remain useful for confirming relative ranking consistency across judge models.
 
@@ -809,7 +812,7 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 1. **Write the paper** — All experimental data is in hand: 53 scored Phase 5 runs, bootstrap CIs, Wilcoxon tests, Kendall's W, judge reliability audit, publication-ready figures and LaTeX tables. Phase F of the publication plan.
 
-2. **Fix cognee/graphiti/letta reliability** — For completeness: debug cognee entity extraction timeout (120 episodes), letta server stability at scale, graphiti add_episode failures. These would fill in the N=0 cells in the multi-scope matrix. May require local GPU for entity extraction or longer server timeouts.
+2. **Re-run fixed cognee/graphiti/letta** — All three root causes identified and fixed (session 22): cognee batching, letta Cerebras routing + timeout, graphiti RediSearch escaping. Re-run 43 failed Phase 5 runs to fill in N=0 cells.
 
 3. **Constrained budget runs with distractors** — Phase 5 used 8k/16k budgets. The Phase 1-2 constrained runs (4k/2k) used 30 episodes without distractors. Running 4k/2k with 120-episode distractor datasets would complete the budget degradation curve under realistic conditions.
 
@@ -828,6 +831,7 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 - **✅ Phase 5 multi-scope with distractors** (session 21): 53/96 runs scored across 8 adapters × 6 scopes × 2 budgets. sqlite-chunked-hybrid leads (NBA 0.541). Statistical analysis complete: bootstrap CIs, Wilcoxon signed-rank, Kendall's W=0.683.
 - **✅ Judge reliability validation** (session 21): Position-swap audit on 50 samples. Cohen's kappa=0.658 (moderate), 88% agreement, position bias 49%.
 - **✅ Publication statistical analysis** (session 21): `scripts/analyze_publication.py` generates figures, LaTeX tables, JSON export. 4 significant pairwise differences (p<0.05).
+- **✅ Heavy adapter fixes** (session 22): Diagnosed and fixed cognee (batching), letta (Cerebras routing + timeout), graphiti (RediSearch escaping). All 991 tests passing.
 
 ### Target Systems
 
@@ -870,6 +874,7 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-23 | Heavy adapter fixes (session 22) | Diagnosed root causes for cognee (0/12), letta (4/12), graphiti (1/12) Phase 5 failures using multi-agent codebase analysis. **Cognee**: sequential `add()` × 120 episodes → timeout; fixed with batch `add(data=[texts], data_per_batch=20)`. **Letta**: httpx 60s timeout + slow Together AI; fixed with 300s timeout + route internal LLM to Cerebras (`cerebras/gpt-oss-120b`). **Graphiti**: underscores in distractor entity names → RediSearch syntax error; fixed with monkey-patch escaping `_-\|()~` in group_id filters. Updated orchestrator to auto-route Letta to Cerebras in Phase 5. 991 tests passing. |
 | 2026-02-23 | Phase 5 full execution (session 21) | **53/96 runs scored** across 8 adapters × 6 scopes × 2 budgets with distractors (120 episodes). sqlite-chunked-hybrid leads (avg NBA 0.541, 12/12 complete). mem0-raw 2nd (0.441, 12/12), compaction 3rd (0.391, 12/12). cognee 0/12 (timeout), letta-sleepy 0/12 (server errors), graphiti 1/12. Fixed orchestrator cross-process state file locking (fcntl). Serialized cognee/graphiti/mem0 runs. Statistical analysis: bootstrap CIs, 4 significant pairwise tests, Kendall's W=0.683. Judge reliability: κ=0.658, 88% agreement, 49% position bias. Publication figures/tables generated. |
 | 2026-02-23 | Phase 5 multi-scope infrastructure (session 20) | Fixed cognee adapter (removed `together_ai/` embedding model prefix that caused 422 errors). Verified graphiti adapter already has correct Together AI routing for entity extraction (prior Phase 3 failure was from `/tmp/run_phase3.sh` override, not adapter code). Generated 90 Phase 3d configs for scopes 02-06 (8 adapters × 5 scopes × 2 budgets). Added Phase 5 to orchestrator: `--phase 5 --cerebras-key` runs all scopes with distractors using Cerebras agent LLM. Removed hindsight from adapter list. Updated `config_filename()` with fallback for mixed naming conventions. Implemented benchmark methodology comparison (`docs/BENCHMARK_METHODOLOGY_COMPARISON.md`) and 5 parallelism optimizations (parallel scoring, ingest, scopes, baseline gen, tool calls). 991 tests passing. Total Phase 5 ready: 96 configs (8 adapters × 6 scopes × 2 budgets). |
 | 2026-02-23 | Phase 3 with distractors (session 19) | **12/18 runs completed** with 120 episodes (30 signal + 90 distractors). Added `--include-distractors` to dataset compiler, `constrained-8k`/`constrained-16k` budget presets, remapped checkpoints for interleaved episodes. Switched to Cerebras (GPT-OSS-120B at 3000 tok/s, $0.35/M). A/B test confirmed GPT-OSS comparable quality to Qwen3-235B at 5x speed. **Key result: no memory system >50% answer quality.** sqlite-chunked-hybrid (0.477) beats all dedicated memory systems. Compaction collapsed from NBA 0.790 to 0.404 with distractors — experimental design validated. Cognee/graphiti failed (API compat). **Hindsight removed from evaluation** (NBA≈null, 17.3GB image, zero value demonstrated). Budget enforcement found non-binding — adapters use 4-5x budgeted tokens on first call. |
