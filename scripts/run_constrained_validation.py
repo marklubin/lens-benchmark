@@ -477,10 +477,8 @@ def build_phase_runs(
                     extra_env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
                     # Route Letta's internal LLM to Cerebras too — Together AI
                     # takes 120-180s on large contexts, exceeding httpx timeouts.
-                    # Cerebras at 3000 tok/s returns in ~2s.
-                    # NOTE: Letta server must be started with -e CEREBRAS_API_KEY=<key>
-                    if adapter in ("letta", "letta-sleepy"):
-                        extra_env["LETTA_LLM_MODEL"] = "cerebras/gpt-oss-120b"
+                    # NOTE: Letta server only supports together/letta providers,
+                    # NOT cerebras. Keep Letta on Together AI's Qwen3-235B.
                 runs.append((label, f"configs/{fname}", adapter, extra_env))
 
     return runs
@@ -500,6 +498,22 @@ def get_serial_group(adapter: str) -> str | None:
 
 def check_service_health(url: str, name: str) -> bool:
     """Check if a service is reachable."""
+    import urllib.parse
+    parsed = urllib.parse.urlparse(url)
+    # FalkorDB uses Redis protocol — can't use HTTP
+    if parsed.port == 6379 or name.lower() == "falkordb":
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect((parsed.hostname or "localhost", parsed.port or 6379))
+            s.send(b"PING\r\n")
+            resp = s.recv(64)
+            s.close()
+            return b"+PONG" in resp
+        except Exception:
+            log.warning("%s not reachable at %s", name, url)
+            return False
     try:
         import urllib.request
         with urllib.request.urlopen(url, timeout=5) as resp:
