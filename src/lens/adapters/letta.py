@@ -43,7 +43,7 @@ _PERSONA = (
     "for longitudinal analysis. I do not editorialize or add context."
 )
 
-_DEFAULT_LLM = "together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+_DEFAULT_LLM = "letta/letta-free"
 _DEFAULT_EMBED = "embed-proxy/text-embedding-3-small"
 
 

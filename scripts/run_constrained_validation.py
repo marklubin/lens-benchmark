@@ -89,16 +89,18 @@ CEREBRAS_API_BASE = "https://api.cerebras.ai/v1"
 LIGHTWEIGHT_ADAPTERS = ["null", "sqlite-chunked-hybrid", "compaction"]
 
 # Group B: external services needed, concurrency constraints
-# Env var values containing {TOGETHER_API_KEY} are resolved at runtime in build_env().
+# Env var values containing {CEREBRAS_API_KEY} are resolved at runtime in build_env().
+# Embedding env vars (COGNEE_EMBED_*, GRAPHITI_EMBED_*, etc.) should be set in
+# the shell or .env when the Modal endpoint is available.
 HEAVY_ADAPTERS = {
     "cognee": {
         "extra_env": {
             "ENABLE_BACKEND_ACCESS_CONTROL": "false",
-            "COGNEE_LLM_API_KEY": "{TOGETHER_API_KEY}",
-            "COGNEE_LLM_ENDPOINT": "https://api.together.xyz/v1",
-            "COGNEE_LLM_MODEL": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            "COGNEE_EMBED_API_KEY": "{TOGETHER_API_KEY}",
-            "COGNEE_EMBED_ENDPOINT": "https://api.together.xyz/v1",
+            "COGNEE_LLM_API_KEY": "{CEREBRAS_API_KEY}",
+            "COGNEE_LLM_ENDPOINT": CEREBRAS_API_BASE,
+            "COGNEE_LLM_MODEL": "gpt-oss-120b",
+            "COGNEE_EMBED_API_KEY": "dummy",
+            "COGNEE_EMBED_ENDPOINT": "http://localhost:7878/v1",
             "COGNEE_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
             "COGNEE_EMBED_DIMS": "768",
         },
@@ -108,11 +110,11 @@ HEAVY_ADAPTERS = {
     },
     "graphiti": {
         "extra_env": {
-            "GRAPHITI_LLM_API_KEY": "{TOGETHER_API_KEY}",
-            "GRAPHITI_LLM_BASE_URL": "https://api.together.xyz/v1",
-            "GRAPHITI_LLM_MODEL": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            "GRAPHITI_EMBED_API_KEY": "{TOGETHER_API_KEY}",
-            "GRAPHITI_EMBED_BASE_URL": "https://api.together.xyz/v1",
+            "GRAPHITI_LLM_API_KEY": "{CEREBRAS_API_KEY}",
+            "GRAPHITI_LLM_BASE_URL": CEREBRAS_API_BASE,
+            "GRAPHITI_LLM_MODEL": "gpt-oss-120b",
+            "GRAPHITI_EMBED_API_KEY": "dummy",
+            "GRAPHITI_EMBED_BASE_URL": "http://localhost:7878/v1",
             "GRAPHITI_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
             "GRAPHITI_EMBED_DIM": "768",
         },
@@ -121,11 +123,11 @@ HEAVY_ADAPTERS = {
     },
     "mem0-raw": {
         "extra_env": {
-            "MEM0_LLM_API_KEY": "{TOGETHER_API_KEY}",
-            "MEM0_LLM_BASE_URL": "https://api.together.xyz/v1",
-            "MEM0_LLM_MODEL": "Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
-            "MEM0_EMBED_API_KEY": "{TOGETHER_API_KEY}",
-            "MEM0_EMBED_BASE_URL": "https://api.together.xyz/v1",
+            "MEM0_LLM_API_KEY": "{CEREBRAS_API_KEY}",
+            "MEM0_LLM_BASE_URL": CEREBRAS_API_BASE,
+            "MEM0_LLM_MODEL": "gpt-oss-120b",
+            "MEM0_EMBED_API_KEY": "dummy",
+            "MEM0_EMBED_BASE_URL": "http://localhost:7878/v1",
             "MEM0_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
             "MEM0_EMBED_DIMS": "768",
             "MEM0_EMBED_NO_DIMS": "1",
@@ -138,7 +140,7 @@ HEAVY_ADAPTERS = {
     "letta": {
         "extra_env": {
             "LETTA_BASE_URL": "http://localhost:8283",
-            "LETTA_LLM_MODEL": "together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
+            "LETTA_LLM_MODEL": "letta/letta-free",
             "LETTA_EMBED_MODEL": "embed-proxy/text-embedding-3-small",
         },
         "serial_group": "letta",  # letta & letta-sleepy share server
@@ -148,7 +150,7 @@ HEAVY_ADAPTERS = {
         "extra_env": {
             "LETTA_BASE_URL": "http://localhost:8283",
             "LETTA_SLEEP_VARIANT": "3",
-            "LETTA_LLM_MODEL": "together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
+            "LETTA_LLM_MODEL": "letta/letta-free",
             "LETTA_EMBED_MODEL": "embed-proxy/text-embedding-3-small",
         },
         "serial_group": "letta",
@@ -188,41 +190,49 @@ def run_label(adapter: str, scope: str, budget: str) -> str:
 
 
 def load_env() -> str:
-    """Load TOGETHER_API_KEY from environment or .env file."""
-    key = os.environ.get("TOGETHER_API_KEY", "")
+    """Load CEREBRAS_API_KEY from environment or .env file."""
+    key = os.environ.get("CEREBRAS_API_KEY", "")
     if not key:
         env_file = PROJECT_DIR / ".env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():
                 line = line.strip()
-                if line.startswith("TOGETHER_API_KEY="):
+                if line.startswith("CEREBRAS_API_KEY="):
                     key = line.split("=", 1)[1].strip("\"'")
                     break
     if not key:
-        log.error("TOGETHER_API_KEY not found in environment or .env")
+        log.error("CEREBRAS_API_KEY not found in environment or .env")
         sys.exit(1)
     return key
 
 
 def build_env(api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:
-    """Build environment for a subprocess."""
+    """Build environment for a subprocess.
+
+    api_key is the Cerebras key (used for all LLM calls).
+    Embedding API key/base are set from LENS_EMBED_* env vars or left
+    for per-adapter overrides.
+    """
     env = dict(os.environ)
+    # --- LLM: all Cerebras ---
     env["LENS_LLM_API_KEY"] = api_key
-    env["LENS_LLM_API_BASE"] = "https://api.together.xyz/v1"
-    env["LENS_LLM_MODEL"] = "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
-    env["LENS_EMBED_API_KEY"] = api_key
-    env["LENS_EMBED_BASE_URL"] = "https://api.together.xyz/v1"
-    env["LENS_EMBED_MODEL"] = "Alibaba-NLP/gte-modernbert-base"
+    env["LENS_LLM_API_BASE"] = CEREBRAS_API_BASE
+    env["LENS_LLM_MODEL"] = "gpt-oss-120b"
     env["OPENAI_API_KEY"] = api_key
-    env["OPENAI_BASE_URL"] = "https://api.together.xyz/v1"
-    # Judge always uses Together AI — even when agent LLM is on a different provider
+    env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
+    # Judge also on Cerebras
     env["LENS_JUDGE_API_KEY"] = api_key
-    env["LENS_JUDGE_API_BASE"] = "https://api.together.xyz/v1"
+    env["LENS_JUDGE_API_BASE"] = CEREBRAS_API_BASE
+    # --- Embeddings: routed through letta_embed_proxy on localhost:7878 ---
+    # The proxy handles format translation (OpenAI ↔ Modal custom format)
+    env["LENS_EMBED_BASE_URL"] = "http://localhost:7878/v1"
+    env["LENS_EMBED_API_KEY"] = "dummy"
+    env["LENS_EMBED_MODEL"] = "Alibaba-NLP/gte-modernbert-base"
     # Enable LLM response caching — replays cached responses on retries
     env["LENS_LLM_CACHE_DIR"] = str(RESULTS_DIR / "llm_cache")
     if extra:
         for k, v in extra.items():
-            env[k] = v.replace("{TOGETHER_API_KEY}", api_key)
+            env[k] = v.replace("{CEREBRAS_API_KEY}", api_key)
     return env
 
 

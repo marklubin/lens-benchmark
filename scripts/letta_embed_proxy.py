@@ -14,21 +14,28 @@ import http.server
 import json
 import logging
 import os
+import socketserver
 import urllib.request
 import urllib.error
 
-# Embedding config — local Ollama
-OLLAMA_EMBED_URL = os.environ.get("OLLAMA_EMBED_URL", "http://localhost:11434/v1")
-TARGET_EMBED_MODEL = os.environ.get("TARGET_EMBED_MODEL", "nomic-embed-text")
+# Embedding config — external endpoint (Modal, Together, Ollama, etc.)
+EMBED_API_BASE = os.environ.get("LENS_EMBED_BASE_URL", os.environ.get("OLLAMA_EMBED_URL", "http://localhost:11434/v1"))
+EMBED_API_KEY = os.environ.get("LENS_EMBED_API_KEY", "")
+EMBED_MODEL = os.environ.get("LENS_EMBED_MODEL", "Alibaba-NLP/gte-modernbert-base")
+# If True, the embed endpoint uses custom format ({"texts": [...]} → {"embeddings": [...]})
+# and needs translation to/from OpenAI format
+EMBED_CUSTOM_FORMAT = os.environ.get("LENS_EMBED_CUSTOM_FORMAT", "").lower() in ("1", "true", "yes")
 
-# LLM config — RunPod vLLM
+# LLM config — Cerebras (primary) or vLLM (fallback)
+CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY", "")
+CEREBRAS_API_BASE = "https://api.cerebras.ai/v1"
+CEREBRAS_MODEL = os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b")
 VLLM_URL = os.environ.get("VLLM_URL", "")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-32B")
 
-# Fallback to Together AI for embeddings if TOGETHER_API_KEY is set
+# Legacy Together AI fallback (deprecated — use CEREBRAS or VLLM)
 TOGETHER_API_KEY = os.environ.get("TOGETHER_API_KEY", "")
 TOGETHER_BASE_URL = "https://api.together.xyz/v1"
-TOGETHER_EMBED_MODEL = "Alibaba-NLP/gte-modernbert-base"
 
 PORT = int(os.environ.get("PROXY_PORT", "7878"))
 
@@ -71,32 +78,66 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
                 self.send_error(404, f"Unknown path: {self.path}")
 
     def _handle_embeddings(self, raw_body: bytes):
-        """Route embeddings to local Ollama, fall back to Together AI."""
+        """Route embeddings to configured endpoint (Modal, Together, Ollama)."""
         body = json.loads(raw_body)
-        body["model"] = TARGET_EMBED_MODEL
 
-        payload = json.dumps(body).encode()
-        target_url = f"{OLLAMA_EMBED_URL}/embeddings"
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "lens-letta-proxy/2.0",
-        }
+        if EMBED_CUSTOM_FORMAT:
+            # Translate OpenAI format → custom format (Modal endpoint)
+            inp = body.get("input", [])
+            if isinstance(inp, str):
+                inp = [inp]
+            custom_payload = json.dumps({"texts": inp}).encode()
+            target_url = EMBED_API_BASE  # Direct endpoint, not /embeddings
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "lens-letta-proxy/2.0",
+            }
+            if EMBED_API_KEY:
+                headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
+            try:
+                status, resp_body = _forward(target_url, custom_payload, headers, timeout=30)
+            except Exception as exc:
+                log.warning("Embed endpoint unreachable (%s): %s", target_url, exc)
+                status, resp_body = 503, b'{"error": "embed endpoint unreachable"}'
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(resp_body)
+                return
 
-        # Try Ollama first; catch connection errors (URLError/OSError) and HTTP 4xx/5xx
-        try:
-            status, resp_body = _forward(target_url, payload, headers, timeout=30)
-        except Exception as exc:
-            log.warning("Ollama embed unreachable: %s", exc)
-            status, resp_body = 503, b'{"error": "ollama unreachable"}'
-
-        if status >= 400 and TOGETHER_API_KEY:
-            log.warning("Ollama embed failed (%d), falling back to Together AI", status)
-            body["model"] = TOGETHER_EMBED_MODEL
+            if status == 200:
+                # Translate custom response → OpenAI format
+                try:
+                    custom_resp = json.loads(resp_body)
+                    embeddings = custom_resp.get("embeddings", [])
+                    openai_resp = {
+                        "object": "list",
+                        "data": [
+                            {"object": "embedding", "index": i, "embedding": emb}
+                            for i, emb in enumerate(embeddings)
+                        ],
+                        "model": body.get("model", EMBED_MODEL),
+                        "usage": {"prompt_tokens": 0, "total_tokens": 0},
+                    }
+                    resp_body = json.dumps(openai_resp).encode()
+                except Exception as exc:
+                    log.warning("Failed to translate embed response: %s", exc)
+        else:
+            # Standard OpenAI-compatible endpoint
+            body["model"] = EMBED_MODEL
             payload = json.dumps(body).encode()
-            headers["Authorization"] = f"Bearer {TOGETHER_API_KEY}"
-            status, resp_body = _forward(
-                f"{TOGETHER_BASE_URL}/embeddings", payload, headers, timeout=30
-            )
+            target_url = f"{EMBED_API_BASE}/embeddings"
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "lens-letta-proxy/2.0",
+            }
+            if EMBED_API_KEY:
+                headers["Authorization"] = f"Bearer {EMBED_API_KEY}"
+            try:
+                status, resp_body = _forward(target_url, payload, headers, timeout=30)
+            except Exception as exc:
+                log.warning("Embed endpoint unreachable (%s): %s", target_url, exc)
+                status, resp_body = 503, b'{"error": "embed endpoint unreachable"}'
 
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -104,10 +145,18 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
         self.wfile.write(resp_body)
 
     def _handle_chat(self, raw_body: bytes):
-        """Route chat completions to RunPod vLLM or Together AI."""
+        """Route chat completions to Cerebras, vLLM, or Together AI (fallback)."""
         body = json.loads(raw_body)
 
-        if VLLM_URL:
+        if CEREBRAS_API_KEY:
+            body["model"] = CEREBRAS_MODEL
+            target_url = f"{CEREBRAS_API_BASE}/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "lens-letta-proxy/2.0",
+                "Authorization": f"Bearer {CEREBRAS_API_KEY}",
+            }
+        elif VLLM_URL:
             body["model"] = VLLM_MODEL
             target_url = f"{VLLM_URL}/chat/completions"
             headers = {
@@ -115,16 +164,15 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
                 "User-Agent": "lens-letta-proxy/2.0",
             }
         elif TOGETHER_API_KEY:
-            # No vLLM — route chat to Together AI directly
             target_url = f"{TOGETHER_BASE_URL}/chat/completions"
             headers = {
                 "Content-Type": "application/json",
                 "User-Agent": "lens-letta-proxy/2.0",
                 "Authorization": f"Bearer {TOGETHER_API_KEY}",
             }
-            log.info("Routing chat to Together AI (no VLLM_URL)")
+            log.info("Routing chat to Together AI (fallback)")
         else:
-            self.send_error(503, "No chat backend configured (set VLLM_URL or TOGETHER_API_KEY)")
+            self.send_error(503, "No chat backend configured (set CEREBRAS_API_KEY, VLLM_URL, or TOGETHER_API_KEY)")
             return
 
         payload = json.dumps(body).encode()
@@ -149,13 +197,14 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.rstrip("/") in ("/v1/models", "/models"):
-            # Combined model list: embed models + vLLM model
+            # Combined model list: embed models + LLM model
+            llm_model = CEREBRAS_MODEL if CEREBRAS_API_KEY else VLLM_MODEL
             models = {
                 "object": "list",
                 "data": [
-                    {"id": "text-embedding-3-small", "object": "model"},
-                    {"id": "text-embedding-ada-002", "object": "model"},
-                    {"id": VLLM_MODEL, "object": "model"},
+                    {"id": "text-embedding-3-small", "object": "model", "type": "embedding"},
+                    {"id": "text-embedding-ada-002", "object": "model", "type": "embedding"},
+                    {"id": llm_model, "object": "model", "type": "chat", "context_length": 131072},
                 ],
             }
             data = json.dumps(models).encode()
@@ -169,14 +218,17 @@ class LettaProxy(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     log.info("Letta proxy on port %d", PORT)
-    log.info("  Embeddings → %s (model: %s)", OLLAMA_EMBED_URL, TARGET_EMBED_MODEL)
-    if TOGETHER_API_KEY:
-        log.info("  Embed fallback → Together AI (%s)", TOGETHER_EMBED_MODEL)
-    if VLLM_URL:
+    log.info("  Embeddings → %s (model: %s)", EMBED_API_BASE, EMBED_MODEL)
+    if CEREBRAS_API_KEY:
+        log.info("  Chat       → Cerebras (model: %s)", CEREBRAS_MODEL)
+    elif VLLM_URL:
         log.info("  Chat       → %s (model: %s)", VLLM_URL, VLLM_MODEL)
     elif TOGETHER_API_KEY:
-        log.info("  Chat       → Together AI (model passthrough)")
+        log.info("  Chat       → Together AI (deprecated fallback)")
     else:
-        log.warning("  Chat       → NO BACKEND (set VLLM_URL or TOGETHER_API_KEY)")
-    server = http.server.HTTPServer(("0.0.0.0", PORT), LettaProxy)
+        log.warning("  Chat       → NO BACKEND (set CEREBRAS_API_KEY, VLLM_URL, or TOGETHER_API_KEY)")
+    class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    server = ThreadedHTTPServer(("0.0.0.0", PORT), LettaProxy)
     server.serve_forever()
