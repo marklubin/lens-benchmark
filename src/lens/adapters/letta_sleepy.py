@@ -24,7 +24,7 @@ Requires:
 Environment variables (same as letta adapter plus):
     LETTA_BASE_URL         Server URL (default: http://localhost:8283)
     LETTA_LLM_MODEL        LLM model handle (default: together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput)
-    LETTA_EMBED_MODEL      Embedding model handle (default: together-oai/text-embedding-3-small)
+    LETTA_EMBED_MODEL      Embedding model handle (default: letta/letta-free)
     LETTA_SLEEP_VARIANT    Prompt variant 0-3 (default: 2)
     LENS_LLM_API_KEY       API key for sleep LLM call (falls back to OPENAI_API_KEY)
     LENS_LLM_API_BASE      Base URL for sleep LLM call (falls back to OPENAI_BASE_URL)
@@ -58,7 +58,7 @@ _PERSONA = (
 )
 
 _DEFAULT_LLM = "together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
-_DEFAULT_EMBED = "together-oai/text-embedding-3-small"
+_DEFAULT_EMBED = "letta/letta-free"
 
 # ---------------------------------------------------------------------------
 # Sleep prompt variants

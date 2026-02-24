@@ -44,7 +44,7 @@ _PERSONA = (
 )
 
 _DEFAULT_LLM = "together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
-_DEFAULT_EMBED = "together-oai/text-embedding-3-small"
+_DEFAULT_EMBED = "letta/letta-free"
 
 
 def _parse_ep_id(content: str) -> str:
