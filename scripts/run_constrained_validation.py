@@ -47,6 +47,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 logging.basicConfig(
@@ -110,11 +112,11 @@ HEAVY_ADAPTERS = {
     },
     "graphiti": {
         "extra_env": {
-            "GRAPHITI_LLM_API_KEY": "{CEREBRAS_API_KEY}",
-            "GRAPHITI_LLM_BASE_URL": CEREBRAS_API_BASE,
-            "GRAPHITI_LLM_MODEL": "gpt-oss-120b",
-            "GRAPHITI_EMBED_API_KEY": "dummy",
-            "GRAPHITI_EMBED_BASE_URL": "http://localhost:7878/v1",
+            "GRAPHITI_LLM_API_KEY": "{TOGETHER_API_KEY}",
+            "GRAPHITI_LLM_BASE_URL": "https://api.together.xyz/v1",
+            "GRAPHITI_LLM_MODEL": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            "GRAPHITI_EMBED_API_KEY": "{TOGETHER_API_KEY}",
+            "GRAPHITI_EMBED_BASE_URL": "https://api.together.xyz/v1",
             "GRAPHITI_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
             "GRAPHITI_EMBED_DIM": "768",
         },
@@ -188,50 +190,112 @@ def run_label(adapter: str, scope: str, budget: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def load_env() -> str:
-    """Load CEREBRAS_API_KEY from environment or .env file."""
-    key = os.environ.get("CEREBRAS_API_KEY", "")
+TOGETHER_API_BASE = "https://api.together.xyz/v1"
+TOGETHER_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+
+
+def _load_together_key() -> str:
+    """Load TOGETHER_API_KEY from environment or .env file."""
+    key = os.environ.get("TOGETHER_API_KEY", "")
     if not key:
+        env_file = PROJECT_DIR / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith("TOGETHER_API_KEY="):
+                    key = line.split("=", 1)[1].strip().strip("'\"")
+                    break
+    return key
+
+
+def load_env() -> str:
+    """Load LLM API key — tries Cerebras first, falls back to Together AI.
+
+    Returns a tagged string: 'cerebras:<key>' or 'together:<key>'.
+    """
+    # Try Cerebras first
+    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
+    if not cerebras_key:
         env_file = PROJECT_DIR / ".env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():
                 line = line.strip()
                 if line.startswith("CEREBRAS_API_KEY="):
-                    key = line.split("=", 1)[1].strip("\"'")
+                    cerebras_key = line.split("=", 1)[1].strip("\"'")
                     break
-    if not key:
-        log.error("CEREBRAS_API_KEY not found in environment or .env")
-        sys.exit(1)
-    return key
+    if cerebras_key:
+        # Validate with actual generation (models endpoint doesn't check quota)
+        try:
+            payload = json.dumps({
+                "model": "gpt-oss-120b",
+                "messages": [{"role": "user", "content": "Say OK"}],
+                "max_tokens": 5,
+            }).encode()
+            req = urllib.request.Request(
+                f"{CEREBRAS_API_BASE}/chat/completions",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {cerebras_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "lens-benchmark/1.0",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    log.info("Using Cerebras API (gpt-oss-120b)")
+                    return f"cerebras:{cerebras_key}"
+        except urllib.error.HTTPError as e:
+            log.warning("Cerebras API returned %d, falling back to Together AI", e.code)
+        except Exception as e:
+            log.warning("Cerebras API check failed (%s), falling back to Together AI", e)
+
+    # Fallback to Together AI
+    together_key = _load_together_key()
+    if together_key:
+        log.info("Using Together AI (%s)", TOGETHER_MODEL)
+        return f"together:{together_key}"
+
+    log.error("No LLM API key found (tried CEREBRAS_API_KEY, TOGETHER_API_KEY)")
+    sys.exit(1)
 
 
-def build_env(api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+def build_env(api_key_tag: str, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Build environment for a subprocess.
 
-    api_key is the Cerebras key (used for all LLM calls).
-    Embedding API key/base are set from LENS_EMBED_* env vars or left
-    for per-adapter overrides.
+    api_key_tag is 'cerebras:<key>' or 'together:<key>'.
+    Routes LLM/judge to the appropriate provider.
     """
     env = dict(os.environ)
-    # --- LLM: all Cerebras ---
-    env["LENS_LLM_API_KEY"] = api_key
-    env["LENS_LLM_API_BASE"] = CEREBRAS_API_BASE
-    env["LENS_LLM_MODEL"] = "gpt-oss-120b"
-    env["OPENAI_API_KEY"] = api_key
-    env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
-    # Judge also on Cerebras
-    env["LENS_JUDGE_API_KEY"] = api_key
-    env["LENS_JUDGE_API_BASE"] = CEREBRAS_API_BASE
-    # --- Embeddings: routed through letta_embed_proxy on localhost:7878 ---
-    # The proxy handles format translation (OpenAI ↔ Modal custom format)
-    env["LENS_EMBED_BASE_URL"] = "http://localhost:7878/v1"
-    env["LENS_EMBED_API_KEY"] = "dummy"
+    provider, api_key = api_key_tag.split(":", 1)
+
+    if provider == "cerebras":
+        env["LENS_LLM_API_KEY"] = api_key
+        env["LENS_LLM_API_BASE"] = CEREBRAS_API_BASE
+        env["LENS_LLM_MODEL"] = "gpt-oss-120b"
+        env["OPENAI_API_KEY"] = api_key
+        env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
+        env["LENS_JUDGE_API_KEY"] = api_key
+        env["LENS_JUDGE_API_BASE"] = CEREBRAS_API_BASE
+    else:  # together
+        env["LENS_LLM_API_KEY"] = api_key
+        env["LENS_LLM_API_BASE"] = TOGETHER_API_BASE
+        env["LENS_LLM_MODEL"] = TOGETHER_MODEL
+        env["OPENAI_API_KEY"] = api_key
+        env["OPENAI_BASE_URL"] = TOGETHER_API_BASE
+        env["LENS_JUDGE_API_KEY"] = api_key
+        env["LENS_JUDGE_API_BASE"] = TOGETHER_API_BASE
+
+    # --- Embeddings: Together AI direct ---
+    together_key = _load_together_key() or api_key
+    env["LENS_EMBED_BASE_URL"] = TOGETHER_API_BASE
+    env["LENS_EMBED_API_KEY"] = together_key
     env["LENS_EMBED_MODEL"] = "Alibaba-NLP/gte-modernbert-base"
-    # Enable LLM response caching — replays cached responses on retries
+    # Enable LLM response caching
     env["LENS_LLM_CACHE_DIR"] = str(RESULTS_DIR / "llm_cache")
     if extra:
         for k, v in extra.items():
-            env[k] = v.replace("{CEREBRAS_API_KEY}", api_key)
+            v = v.replace("{CEREBRAS_API_KEY}", api_key)
+            v = v.replace("{TOGETHER_API_KEY}", together_key)
+            env[k] = v
     return env
 
 
@@ -477,16 +541,13 @@ def build_phase_runs(
                 extra_env = {}
                 if adapter in HEAVY_ADAPTERS:
                     extra_env = dict(HEAVY_ADAPTERS[adapter]["extra_env"])
-                # Phase 5 uses Cerebras for agent LLM, Together for judge/embed
+                # Phase 5 uses Cerebras for agent LLM
                 if distractors and cerebras_key:
                     extra_env["LENS_LLM_API_KEY"] = cerebras_key
                     extra_env["LENS_LLM_API_BASE"] = CEREBRAS_API_BASE
                     extra_env["LENS_LLM_MODEL"] = "gpt-oss-120b"
                     extra_env["OPENAI_API_KEY"] = cerebras_key
                     extra_env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
-                    # Letta uses letta/letta-free for its internal LLM (built-in,
-                    # no external provider needed) and embed-proxy for embeddings
-                    # (routes through local proxy to Modal endpoint).
                 runs.append((label, f"configs/{fname}", adapter, extra_env))
 
     return runs
@@ -914,13 +975,11 @@ Phases:
     log.info("=" * 75)
     log.info("State file: %s", STATE_FILE)
 
-    # Cerebras key for Phase 5
+    # Phase 5 LLM key — load_env() already selected the best provider
     cerebras_key = None
     if args.phase == 5:
         cerebras_key = args.cerebras_key or os.environ.get("CEREBRAS_API_KEY", "")
-        if not cerebras_key:
-            log.error("Phase 5 requires --cerebras-key or CEREBRAS_API_KEY env var")
-            sys.exit(1)
+        # Not required — load_env() falls back to Together AI if Cerebras is unavailable
 
     # Build run list
     runs = build_phase_runs(args.phase, args.adapters, args.scopes, cerebras_key=cerebras_key)

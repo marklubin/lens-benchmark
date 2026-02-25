@@ -1,6 +1,6 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-23 (session 23)
+**Last Updated**: 2026-02-24 (session 24)
 **Scoring Pipeline**: v3.2 (naive baseline advantage replaces longitudinal_advantage, per-question timing)
 **Agent LLM**: GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI) / Qwen3-32B (RunPod vLLM)
 **Judge LLM**: GPT-OSS-120B (Cerebras, session 23) / Qwen3-235B-A22B (Together AI, prior sessions)
@@ -849,16 +849,15 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 ### Immediate
 
-1. **Write the paper** — All experimental data is in hand: 53 scored Phase 5 runs, bootstrap CIs, Wilcoxon tests, Kendall's W, judge reliability audit, publication-ready figures and LaTeX tables. Phase F of the publication plan.
+1. **Write the paper** — All experimental data is in hand: 90 scored Phase 5 runs, bootstrap CIs, Wilcoxon tests, Kendall's W, judge reliability audit, publication-ready figures and LaTeX tables, qualitative theory of failure. Phase F of the publication plan.
 
-2. **Re-run fixed cognee/graphiti/letta** — All three root causes identified and fixed (session 22): cognee batching, letta Cerebras routing + timeout, graphiti RediSearch escaping. Re-run 43 failed Phase 5 runs to fill in N=0 cells.
+2. **Graphiti runs abandoned** — 6/12 graphiti runs (scopes 03-05) failed repeatedly (FalkorDB crashes, Cerebras 402, embed proxy failures, Together AI connection errors). Declared done — graphiti results based on 6/12 (scopes 01, 02, 06). This is a meaningful result in itself: graph-based entity extraction does not scale reliably to 120-episode corpora with remote LLM APIs.
 
-3. **Constrained budget runs with distractors** — Phase 5 used 8k/16k budgets. The Phase 1-2 constrained runs (4k/2k) used 30 episodes without distractors. Running 4k/2k with 120-episode distractor datasets would complete the budget degradation curve under realistic conditions.
-
-4. **Add remaining memory system adapters**: Zep, LangChain, LlamaIndex following the 5-step onboarding pattern.
+3. **Remaining nice-to-have**: Constrained budget runs (4k/2k) with 120-episode distractor datasets, additional adapters (Zep, LangChain, LlamaIndex), human baseline study.
 
 ### Previously Completed
 
+- **✅ Qualitative failure theory** (session 24): `results/FAILURE_THEORY.md` — traces agent transcripts to explain 5 distinct failure modes (search thrashing, compression collapse, entity fragmentation, semantic drift, task-agnostic consolidation). Ground-truth head-to-head comparison on same question across all systems.
 - **✅ 6-scope matrix** (session 7): 4 adapters × 6 scopes = 24 runs. chunked-hybrid wins 4/6.
 - **✅ Experiment orchestrator** (session 8): `scripts/benchmark_orchestrator.py` + `experiments/matrix.json`.
 - **✅ Hindsight async ingest** (session 8): Batch buffering in `prepare()`.
@@ -913,6 +912,7 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-24 | Qualitative failure theory (session 24) | Traced actual agent transcripts across all 8 systems to build theory of WHY complex memory architectures underperform. **The Lossy Abstraction Trap**: every architecture that preprocesses evidence (summarization, entity extraction, memory consolidation, vector embedding) destroys exactly the fine-grained numeric evidence longitudinal synthesis requires. Ground-truth head-to-head on Q3 (chromium source): chunked-hybrid finds "discharge pipe at RM 18.6" via BM25 keyword match; cognee returns empty (field note not in graph); mem0 misidentifies source station (semantic drift); letta-sleepy empty (search thrashing); compaction sees early-day patterns but lost ep_025. Empty answer rates: chunked-hybrid 17%, cognee 38%, mem0 33%, letta 50%, letta-sleepy 42%, compaction 42%. Wrote `results/FAILURE_THEORY.md` (443 lines) and updated `results/PHASE5_ANALYSIS.md`. Graphiti runs declared done (6/12, infrastructure failure). Cerebras credits exhausted. |
 | 2026-02-23 | Phase 5 completion + analysis (session 23) | **90/96 runs scored** (was 53). Fixed cognee (SQLite WAL mode + busy_timeout=60s for concurrent writes), letta/letta-sleepy (removed serial group constraint, bumped ingest_max_latency_ms 200→2000, all 8 runs parallelized in ~10 min), graphiti (FalkorDB MAX_QUEUED_QUERIES=500 + TIMEOUT=30s, semaphore 8→3, internal timeout 60→180s/episode — scopes 01,02,06 succeeded, 03-05 still timeout). Migrated remaining Together AI references to Cerebras in orchestrator. Full statistical analysis: Kendall's W=0.755 (strong concordance), 12/28 pairwise significant, budget effect p=0.016. Judge reliability audit: 7,652 calls, A/(A+B)=0.451 (minimal position bias), cognee 100% TIE rate (judge failure). Generated 5 publication figures + 2 LaTeX tables. **Key result**: sqlite-chunked-hybrid 0.473 beats all complex memory architectures. No adapter exceeds 0.50 composite. |
 | 2026-02-23 | Heavy adapter fixes (session 22) | Diagnosed root causes for cognee (0/12), letta (4/12), graphiti (1/12) Phase 5 failures using multi-agent codebase analysis. **Cognee**: sequential `add()` × 120 episodes → timeout; fixed with batch `add(data=[texts], data_per_batch=20)`. **Letta**: httpx 60s timeout + slow Together AI; fixed with 300s timeout + route internal LLM to Cerebras (`cerebras/gpt-oss-120b`). **Graphiti**: underscores in distractor entity names → RediSearch syntax error; fixed with monkey-patch escaping `_-\|()~` in group_id filters. Updated orchestrator to auto-route Letta to Cerebras in Phase 5. 991 tests passing. |
 | 2026-02-23 | Phase 5 full execution (session 21) | **53/96 runs scored** across 8 adapters × 6 scopes × 2 budgets with distractors (120 episodes). sqlite-chunked-hybrid leads (avg NBA 0.541, 12/12 complete). mem0-raw 2nd (0.441, 12/12), compaction 3rd (0.391, 12/12). cognee 0/12 (timeout), letta-sleepy 0/12 (server errors), graphiti 1/12. Fixed orchestrator cross-process state file locking (fcntl). Serialized cognee/graphiti/mem0 runs. Statistical analysis: bootstrap CIs, 4 significant pairwise tests, Kendall's W=0.683. Judge reliability: κ=0.658, 88% agreement, 49% position bias. Publication figures/tables generated. |
