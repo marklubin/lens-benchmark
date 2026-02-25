@@ -24,6 +24,23 @@
 \usepackage{xcolor}
 \usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black]{hyperref}
 
+% ── Code listings ──
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{black!30},
+  backgroundcolor=\color{black!3},
+  columns=fullflexible,
+  keepspaces=true,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+  xleftmargin=0.5em,
+  xrightmargin=0.5em,
+}
+
 % ── Section formatting ──
 \usepackage{titlesec}
 \titleformat{\section}{\large\bfseries}{\thesection.}{0.5em}{}
@@ -47,7 +64,7 @@
 {\LARGE\bfseries LENS Benchmark: Preliminary Results}\\[0.5em]
 {\large Why Simple Retrieval Beats Complex Memory Architectures\\at Longitudinal Evidence Synthesis}\\[1em]
 {\normalsize Mark Lubin\quad\texttt{mark@synix.dev}}\\[0.3em]
-{\normalsize February 24, 2026}
+{\normalsize February 25, 2026}
 \end{center}
 
 \vspace{1em}
@@ -58,44 +75,397 @@
 \begin{abstract}
 \noindent
 LENS (Longitudinal Evidence-backed Narrative Signals) tests whether LLM agent memory systems can synthesize conclusions from evidence scattered across many sequential episodes.
-We evaluate 8 memory architectures across 6 domains, 2 context budgets, and 120 episodes per run (90 scored runs total).
+We evaluate 7 memory architectures (plus a no-memory control) across 6 domains, 2 context budgets, and 120 episodes per run (90 scored runs total).
 The central finding: \textbf{only simple BM25+embedding retrieval statistically outperforms a naive LLM that reads all evidence in context.}
-Knowledge graphs, agent memory, vector stores with LLM extraction, and progressive summarization all either tie or lose to the naive baseline.
-This report presents the full ranking, scaling behavior, and a canonical scenario trace explaining why complex architectures fail.
+Knowledge graphs, agent memory, vector stores, and progressive summarization all either tie or lose to the naive baseline.
+This report presents the benchmark task in full detail---including verbatim episode text, the agent's tool interface, and exact scoring formulas---followed by per-system architecture descriptions, overall rankings, scaling analysis, and a canonical scenario trace showing how each system handles a specific question.
 \end{abstract}
 
-% ─────────────────────────── 1. Setup ───────────────────────────
-\section{Experimental Setup}
+% ═══════════════════════════════════════════════════════════════
+% SECTION 1: Introduction
+% ═══════════════════════════════════════════════════════════════
+\section{Introduction}
 
-\textbf{Task.}\quad An LLM agent ingests 120 sequential episodes --- 30 signal episodes encoding a domain-specific storyline plus 90 format-matched distractors --- then answers checkpoint questions requiring synthesis across multiple episodes. No single episode answers any question; the benchmark is broken if it does.
+LLM agents need memory to handle tasks that span more data than fits in a single context window.
+The standard approach is to pair an LLM with an external memory system---a vector store, knowledge graph, or agent-managed database---and let the agent search for what it needs at inference time.
+But which memory architecture actually works?
 
-\textbf{Domains (6).}\quad Cascading infrastructure failure, insider threat detection, environmental contamination, biotech clinical trial, IT infrastructure scaling, and financial forensics.
+LENS tests this by requiring synthesis across many episodes. An agent ingests 120 sequential monitoring reports (30 signal, 90 distractors), then answers questions whose answers are only discoverable by connecting facts from multiple reports. No single episode answers any question; if it did, the benchmark would reduce to single-document retrieval.
 
-\textbf{Systems (8).}\quad
-\begin{enumerate}
+We evaluate 7 memory systems across 6 professional domains (infrastructure failure, insider threats, environmental monitoring, clinical trials, IT scaling, and financial forensics). Every component is fully specified: the exact text the agent ingests, the tool interface it uses, the scoring formulas applied to its answers, and the composite weighting that produces final rankings. All code, datasets, and run artifacts are available for reproduction.
+
+% ═══════════════════════════════════════════════════════════════
+% SECTION 2: Benchmark Task
+% ═══════════════════════════════════════════════════════════════
+\section{Benchmark Task}
+
+\subsection{Episodes}
+
+Each domain scope consists of \textbf{30 signal episodes} encoding a domain-specific storyline plus \textbf{90 format-matched distractors} from unrelated monitoring domains. Signal episodes follow a five-phase arc: baseline, early signal, red herring, escalation, and root cause. Distractors share the same structured-data format (section headers, station readings, field notes) but cover orthogonal topics (e.g., air quality monitoring data interleaved with water quality reports).
+
+The following is a verbatim excerpt from the environmental monitoring domain (Scope~04). Episode~1 establishes the baseline:
+
+\begin{lstlisting}[caption={Episode 1 (baseline) --- Scope 04: Environmental Drift},label=lst:ep1]
+## 2024-06-01 Daily Operations Summary
+
+### Station Readings
+#### WQ-01
+- pH: 7.2
+- DO (mg/L): 7.5
+- Turbidity (NTU): 3.0
+- Cr (ug/L): 3
+- Pb (ug/L): 1.2
+
+#### WQ-02
+- Cr (ug/L): 3
+
+#### WQ-03
+- Cr (ug/L): 3
+[... 6 stations, 10 parameters each ...]
+
+### Field Notes
+- Standard summer conditions at all stations
+- Stream clarity good, visible substrate at WQ-01
+
+### Notes
+- Day 1 monitoring. All parameters within seasonal
+  baseline ranges. Routine operations.
+\end{lstlisting}
+
+Twenty-four days later, episode~25 contains the critical finding:
+
+\begin{lstlisting}[caption={Episode 25 (root cause) --- key evidence for Q3},label=lst:ep25]
+## 2024-06-25 Daily Operations Summary
+
+### Station Readings
+#### WQ-01
+- Cr (ug/L): 3
+
+#### WQ-02
+- Cr (ug/L): 5
+
+#### WQ-03
+- Cr (ug/L): 132
+
+#### WQ-04
+- Cr (ug/L): 84.2
+
+#### WQ-05
+- Cr (ug/L): 55.9
+
+#### WQ-06
+- Cr (ug/L): 35.9
+
+### Compliance Flags
+- VIOLATION: Cr at WQ-03 (132 ug/L) exceeds EPA MCL
+  (100 ug/L)
+- WARNING: Cr at WQ-04 (84.2 ug/L) approaching MCL
+  threshold
+- Field inspection: unpermitted discharge pipe
+  identified between WQ-02 and WQ-03 at RM 18.6
+\end{lstlisting}
+
+The critical detail---``unpermitted discharge pipe identified between WQ-02 and WQ-03 at RM~18.6''---is a single sentence in the compliance flags section. It is surrounded by 119 other episodes of structured monitoring data. To answer the question ``What is the source of the chromium contamination?'', an agent must find this sentence, connect it to the spatial concentration gradient across stations, and dismiss the agricultural runoff red herring.
+
+\subsection{Signal Structure}
+
+The 30 signal episodes follow a prescribed arc:
+
+\begin{table}[H]
+\centering
+\caption{Episode arc structure per scope.}
+\label{tab:arc}
+\begin{tabular}{lccl}
+\toprule
+Phase & Episodes & Signal Density & Purpose \\
+\midrule
+Baseline & 1--5 & None & Establish normal parameters \\
+Early signal & 6--15 & Low & Subtle deviations begin \\
+Red herring & 10--18 & Low--Medium & Plausible alternative explanation \\
+Escalation & 16--25 & Medium--High & Signal becomes undeniable \\
+Root cause & 25--30 & High & Key evidence surfaces \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 90 distractors are generated from orthogonal domains (air quality, soil geochemistry, traffic monitoring, etc.) using the same structured-data format. They share section headers and measurement syntax but contain no terms related to the signal storyline.
+
+\subsection{Checkpoints and Questions}
+
+Questions are asked at \textbf{7 checkpoints} positioned after episodes [18, 38, 46, 58, 79, 99, 119], meaning the agent has ingested that many episodes (signal + distractors interleaved) before answering. Three question types test different synthesis capabilities:
+
+\begin{itemize}
     \itemsep0em
-    \item \textbf{sqlite-chunked-hybrid} --- BM25 (FTS5) + cosine embedding, RRF fusion, no preprocessing
-    \item \textbf{cognee} --- Knowledge graph (entity extraction, Kuzu + LanceDB)
-    \item \textbf{graphiti} --- Temporal knowledge graph (FalkorDB)
-    \item \textbf{mem0-raw} --- Vector store (raw episode embeddings)
-    \item \textbf{letta} --- Agent-managed memory (Letta server, tool-based retrieval)
-    \item \textbf{letta-sleepy} --- Letta + sleep-time consolidation
-    \item \textbf{compaction} --- Progressive LLM summarization (rolling summary)
-    \item \textbf{null} --- No memory (control)
-\end{enumerate}
+    \item \textbf{Longitudinal}: Requires connecting observations across multiple episodes. \emph{Example}: ``What is the source of the chromium contamination and how can you determine its location?''
+    \item \textbf{Null hypothesis}: Tests whether the system can retrieve a specific recorded value. \emph{Example}: ``What was the dissolved oxygen reading at WQ-01 on June~8th?''
+    \item \textbf{Action recommendation}: Asks what to do based on the evidence. \emph{Example}: ``What regulatory and remediation actions should the water authority take?''
+\end{itemize}
 
-\textbf{Budgets.}\quad 8K and 16K cumulative result tokens per checkpoint.
+Each question has a \textbf{canonical answer} and a list of \textbf{key facts}---atomic claims that the answer must demonstrate. For example, Q3 (above) requires 4 key facts: (1)~progressive downstream dilution, (2)~discharge source between the second and third gauges, (3)~upstream stations at baseline, and (4)~turbidity explained by nutrients, not chromium.
 
-\textbf{Agent LLM.}\quad Cerebras GPT-OSS-120B.\quad \textbf{Judge LLM.}\quad Qwen3-235B (Together AI, pairwise fact comparison).
+\subsection{Agent Interface}
 
-\textbf{Scoring.}\quad Three-tier composite: tier-1 mechanical metrics (evidence grounding, fact recall, evidence coverage, budget compliance, citation coverage), tier-2 LLM judge (answer quality, insight depth, reasoning quality), tier-3 differential (naive baseline advantage). Hard gate: evidence grounding $\geq 0.5$.
+Every memory system exposes the same tool interface to the agent. The agent receives a system prompt (Listing~\ref{lst:sysprompt}) and three mandatory tools:
 
-% ─────────────────────────── 2. Overall Rankings ───────────────────────────
+\begin{lstlisting}[caption={Agent system prompt (verbatim)},label=lst:sysprompt]
+You are a research assistant with access to a memory
+system. Your task is to answer the user's question by
+searching and retrieving information from memory.
+
+Instructions:
+- Use memory_search to find relevant information for
+  the question.
+- Use memory_retrieve to get full document details
+  when you need specifics.
+- Use memory_capabilities to understand what the
+  memory system offers, including available search
+  modes, filter fields, and any extra tools.
+- If extra tools are available (e.g. batch_retrieve),
+  prefer them for efficiency.
+- Synthesize your findings into a clear, concise
+  answer.
+- IMPORTANT: For each claim in your answer, cite the
+  supporting episode using the format [ref_id]. Every
+  factual statement must have at least one citation.
+- If you cannot find sufficient information, say so
+  clearly.
+- You have a limited number of turns and tool calls.
+  Use them efficiently.
+\end{lstlisting}
+
+\textbf{Mandatory tools:}
+
+\begin{itemize}
+    \itemsep0.2em
+    \item \texttt{memory\_search(query, limit)} $\to$ \texttt{[\{ref\_id, text, score\}]} --- search the memory system using a natural language query. Returns up to \texttt{limit} results ranked by the system's internal scoring.
+    \item \texttt{memory\_retrieve(ref\_id)} $\to$ \texttt{\{ref\_id, text\}} --- retrieve the full text of a specific episode by its reference ID.
+    \item \texttt{memory\_capabilities()} $\to$ \texttt{\{search\_modes, extra\_tools\}} --- discover what the memory system supports (e.g., whether \texttt{batch\_retrieve} is available).
+\end{itemize}
+
+\textbf{Extended tools} (system-dependent): \texttt{batch\_retrieve(ref\_ids)} fetches multiple episodes in a single call. Systems that expose it (chunked-hybrid, letta, compaction) show a 3--12$\times$ reduction in tool call count for the same information.
+
+\subsection{Context Budgets}
+
+Context budgets constrain how much information the agent can read from memory per checkpoint. Two presets are used:
+
+\begin{table}[H]
+\centering
+\caption{Context budget presets. ``Result tokens'' $=$ total \texttt{len(tool\_result.encode("utf-8"))} $\div$ 4 across all tool calls per question.}
+\label{tab:budgets}
+\begin{tabular}{lcccc}
+\toprule
+Preset & Result Token Cap & Max Turns & Max Tool Calls & Max Agent Tokens \\
+\midrule
+8K  & 8{,}192  & 8  & 16 & 16{,}384 \\
+16K & 16{,}384 & 10 & 20 & 32{,}768 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Only tool result content counts toward the result token cap---not the agent's own reasoning tokens. When the cumulative result tokens exceed the cap, the next tool call returns: \texttt{"[Context budget exhausted --- synthesize answer from evidence already retrieved]"}. The question continues (the agent can still produce an answer from what it has), but a budget violation is recorded.
+
+% ═══════════════════════════════════════════════════════════════
+% SECTION 3: Memory Architectures
+% ═══════════════════════════════════════════════════════════════
+\section{Memory Architectures}
+
+Seven memory systems plus a no-memory control are evaluated. Each subsection describes the complete data path from raw episode text to retrieved result.
+
+\subsection{sqlite-chunked-hybrid (BM25 + embedding)}
+
+\textbf{Ingest.} The full episode text is inserted into a SQLite FTS5 full-text index. Simultaneously, the text is split at \texttt{\#\#\#} section boundaries into chunks (${\sim}$150 words each), and each chunk is embedded using a 768-dimensional model (GTE-ModernBERT). Both the full text and chunk embeddings are stored.
+
+\textbf{Storage.} Two SQLite tables: \texttt{episodes} (full text with FTS5 index) and \texttt{chunks} (chunk text + embedding vector, foreign-keyed to episode).
+
+\textbf{Search.} Reciprocal rank fusion (RRF) of two signals:
+\begin{equation}
+\text{score}(d) = \frac{1}{60 + \text{rank}_{\text{BM25}}(d)} + \frac{1}{60 + \text{rank}_{\text{embed}}(d)}
+\label{eq:rrf}
+\end{equation}
+BM25 ranks full episodes by term overlap with the query. Embedding search ranks chunks by cosine similarity to the query embedding. Results are deduplicated by episode (best chunk per episode) and merged via RRF.
+
+\textbf{Retrieve.} Returns the stored full episode text verbatim. No transformation or summarization.
+
+\subsection{cognee (knowledge graph)}
+
+\textbf{Ingest.} Episodes are buffered during the ingest phase. At \texttt{prepare()}, all episodes are batch-submitted to cognee (using \texttt{cognee.add()} with batch size~20) followed by \texttt{cognee.cognify()}, which runs LLM-based entity extraction and relationship resolution.
+
+\textbf{Storage.} Three backends: LanceDB (chunk vectors for semantic search), Kuzu (entity-relationship graph), and SQLite (relational metadata). The entity graph captures nodes (e.g., ``WQ-03'', ``chromium'') and typed edges (e.g., ``measured\_at'', ``exceeds\_threshold'').
+
+\textbf{Search.} Vector similarity over LanceDB chunks. Returns chunk text with a flat relevance score (cognee does not expose ranked scores---all results arrive with score~$\approx 0.5$).
+
+\textbf{Retrieve.} Full episode text is cached at ingest time and returned on retrieve calls. The knowledge graph is only used during search.
+
+\subsection{graphiti (temporal knowledge graph)}
+
+\textbf{Ingest.} Episodes are buffered, then at \texttt{prepare()}, each episode undergoes LLM-based entity extraction via the Graphiti library. This produces ${\sim}600$ LLM calls per 30-episode scope---entity nodes and relationship edges are inserted into a FalkorDB graph with temporal provenance metadata.
+
+\textbf{Storage.} FalkorDB (a Redis-based graph database). Entity nodes carry properties (name, type, description). Relationship edges carry temporal metadata (when the relationship was first/last observed) and episode provenance.
+
+\textbf{Search.} Edge-hybrid search: ranks entity-relationship pairs by relevance to the query combined with episode mention frequency. Results are mapped back to source episodes.
+
+\textbf{Retrieve.} Full episode text cached at ingest time; returned verbatim.
+
+\textbf{Limitation.} Entity extraction is slow---scopes 03--05 timed out during evaluation (each required $>$600 LLM calls for extraction alone). Only 6 of 12 possible scope/budget combinations completed.
+
+\subsection{letta (agent memory)}
+
+\textbf{Ingest.} Each episode is stored as an archival passage via the Letta server API (\texttt{passages.create}). One Letta agent is created per scope.
+
+\textbf{Storage.} Letta's internal vector database. Passages are embedded and indexed automatically by the Letta server.
+
+\textbf{Search.} Vector similarity over passages. The Letta server returns passage text but does not expose explicit relevance scores.
+
+\textbf{Retrieve.} Full episode text cached at ingest; returned verbatim.
+
+\subsection{letta-sleepy (agent memory + sleep-time consolidation)}
+
+Identical to letta, but after the ingest/prepare phase, the Letta server runs a ``sleep-time'' consolidation pass. This is intended to re-organize and summarize archival memory while the agent is not actively answering questions.
+
+In practice, letta-sleepy performed statistically indistinguishably from letta (mean composite 0.322 vs.\ 0.327), suggesting that sleep-time consolidation neither helps nor hurts at this task scale.
+
+\subsection{mem0-raw (vector store)}
+
+\textbf{Ingest.} Each episode is embedded as a single vector via the Mem0 client and stored in a Qdrant collection. The \texttt{infer=False} flag is set, meaning no LLM extraction or summarization is applied---raw episode text is embedded directly.
+
+\textbf{Storage.} Qdrant point collection. Each point contains the full episode embedding and the raw text as payload.
+
+\textbf{Search.} Cosine similarity between the query embedding and stored episode embeddings. Returns full episode text with a similarity score.
+
+\textbf{Retrieve.} Lookup by Qdrant point ID; returns the stored episode text.
+
+\subsection{compaction (progressive summarization)}
+
+\textbf{Ingest.} All episodes are buffered in memory during ingest.
+
+\textbf{Storage.} A single rolling summary document, regenerated from scratch at each checkpoint. Before answering, the LLM reads all buffered episodes and produces a comprehensive summary. Individual episode texts are also cached for retrieve-by-ID.
+
+\textbf{Search.} Always returns the summary document (regardless of query), with score~$= 1.0$. There is no selective retrieval---the agent gets the same summary for every search.
+
+\textbf{Retrieve.} By ref\_id returns the original episode text; by default returns the summary.
+
+\textbf{Failure mode.} The summary compresses 120 episodes (${\sim}$200K tokens of raw text) into ${\sim}$2K tokens. Specific details---exact values, station IDs, river mile markers---are lost in favor of general trends. This is by design: compaction tests whether high-level summaries suffice for longitudinal synthesis.
+
+\subsection{null (no memory, control)}
+
+No episodes are stored. All \texttt{memory\_search} calls return empty results. This establishes a floor: any system scoring below null is actively harmful.
+
+\begin{table}[H]
+\centering
+\caption{Architecture summary.}
+\label{tab:arch}
+\begin{tabularx}{\textwidth}{lXccl}
+\toprule
+System & Storage Backend & Chunking & LLM at Ingest & Search Method \\
+\midrule
+chunked-hybrid & SQLite FTS5 + embeddings & 150-word sections & No & RRF (BM25 + cosine) \\
+cognee & LanceDB + Kuzu graph & Internal (sentence) & Yes & Vector similarity \\
+graphiti & FalkorDB graph & Entity-level & Yes & Edge relevance \\
+letta & Letta vector DB & Full passage & No & Vector similarity \\
+letta-sleepy & Letta vector DB & Full passage & Yes (sleep) & Vector similarity \\
+mem0-raw & Qdrant & Full episode & No & Cosine similarity \\
+compaction & In-memory summary & None (single doc) & Yes & Always returns summary \\
+null & None & N/A & No & Always empty \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ═══════════════════════════════════════════════════════════════
+% SECTION 4: Scoring
+% ═══════════════════════════════════════════════════════════════
+\section{Scoring}
+
+\subsection{Three-Tier Metrics}
+
+Scoring is organized into three tiers of increasing complexity.
+
+\begin{table}[H]
+\centering
+\caption{Scoring metrics. Weight column shows the contribution to the composite score (v3.3).}
+\label{tab:metrics}
+\begin{tabularx}{\textwidth}{llcX}
+\toprule
+Metric & Tier & Weight & What It Measures \\
+\midrule
+evidence\_grounding & 1 (mechanical) & 0.08 & Fraction of cited episodes that are signal (not distractor) \\
+fact\_recall & 1 (mechanical) & 0.00 & Substring match of key facts (disabled---no discrimination) \\
+evidence\_coverage & 1 (mechanical) & 0.08 & Fraction of required evidence episodes actually cited \\
+budget\_compliance & 1 (mechanical) & 0.07 & 1.0 if no budget violations, 0.0 otherwise \\
+citation\_coverage & 1 (mechanical) & 0.10 & Fraction of answer sentences with at least one citation \\
+\midrule
+answer\_quality & 2 (LLM judge) & 0.17 & Pairwise win rate vs.\ canonical answer across key facts \\
+insight\_depth & 2 (LLM judge) & 0.15 & Quality of cross-episode synthesis and inference \\
+reasoning\_quality & 2 (LLM judge) & 0.10 & Logical coherence and evidence-based reasoning \\
+\midrule
+naive\_baseline\_advantage & 3 (differential) & 0.17 & Pairwise win rate vs.\ a naive LLM that reads all evidence \\
+action\_quality & 3 (differential) & 0.08 & Appropriateness of recommended actions \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Hard gate.} If \texttt{evidence\_grounding} $< 0.5$, the composite score is set to $0.0$ regardless of other metrics. This prevents systems that cite only distractors from scoring well on subjective judge metrics.
+
+\subsection{Pairwise LLM Judge}
+
+Tier-2 and tier-3 metrics use a pairwise judge. For each key fact, the judge receives both answers (candidate and reference) in randomized positions and returns which better demonstrates the finding:
+
+\begin{lstlisting}[caption={Judge prompt template (verbatim from \texttt{judge.py})},label=lst:judge]
+You are comparing two analyst responses to determine
+which better demonstrates knowledge of a specific
+finding from a longitudinal dataset.
+
+Question asked: {question}
+
+Finding to evaluate: {fact}
+
+Response A:
+{text_a}
+
+Response B:
+{text_b}
+
+Which response better demonstrates awareness of this
+finding? The response may use different terminology.
+Focus on whether the core insight is present, not
+exact wording.
+
+Respond with ONLY one word: A, B, or TIE
+\end{lstlisting}
+
+\textbf{Position debiasing.} For each fact, the candidate answer is assigned to position~A with probability~0.5 (determined by a seeded PRNG). The judge's positional verdict (A/B/TIE) is mapped back to the semantic winner (candidate/reference/tie). This controls for the known position bias of LLM judges.
+
+\textbf{Scoring.} Per-fact: candidate wins $= 1.0$, tie $= 0.5$, reference wins $= 0.0$. The metric value is the mean across all key facts for all questions in the run.
+
+\textbf{Judge reliability.} Position-swap audit on 100 random judgments: 88\% agreement ($\kappa = 0.658$), 49\% position-A bias. Judge failures (API errors, malformed responses) default to TIE and are logged. Post-hoc audit found 23\% of runs (21/90) had $\geq$1 judge failure, primarily affecting cognee (12/12 failures) and letta variants.
+
+\subsection{Naive Baseline Advantage}
+
+The \texttt{naive\_baseline\_advantage} metric (weight 0.17) measures whether a memory system adds value beyond simply stuffing all evidence into the LLM's context window. The \emph{naive baseline} is generated by concatenating all signal episodes for the scope into a single prompt and asking the same LLM to answer each question directly---no memory system, no tool calls, just raw context. This represents the ceiling of what brute-force context stuffing can achieve.
+
+The metric uses the same pairwise judge: for each key fact, the judge compares the memory system's answer (candidate) against the naive baseline's answer (reference). A score of $0.5$ means the system ties with the naive baseline; above $0.5$ means the system outperforms it. Only chunked-hybrid's 95\% CI is entirely above $0.5$, meaning it reliably adds value over context stuffing.
+
+Naive baseline answers are cached per \texttt{(question\_id, model)} to ensure consistency across scoring runs.
+
+\subsection{Composite Formula}
+
+\begin{equation}
+\text{composite} = \begin{cases}
+0.0 & \text{if } \texttt{evidence\_grounding} < 0.5 \\[0.5em]
+\displaystyle\frac{\sum_{m \in M} w_m \cdot v_m}{\sum_{m \in M} w_m} & \text{otherwise}
+\end{cases}
+\label{eq:composite}
+\end{equation}
+
+where $M$ is the set of metrics present in the run, $w_m$ is the weight from Table~\ref{tab:metrics}, and $v_m$ is the metric value. The denominator normalizes for missing metrics (e.g., if a run has no action\_recommendation questions, that metric is absent and the remaining weights are renormalized).
+
+% ═══════════════════════════════════════════════════════════════
+% SECTION 5: Results
+% ═══════════════════════════════════════════════════════════════
 \section{Overall Rankings}
 
 \begin{table}[H]
 \centering
-\caption{Composite score across 6 scopes, 16k budget (95\% bootstrap CI). ``*'' = significantly different from null ($p < 0.05$, Wilcoxon signed-rank).}
+\caption{Composite score across 6 scopes, 16K budget (95\% bootstrap CI). ``*'' = significantly different from null ($p < 0.05$, Wilcoxon signed-rank).}
 \label{tab:main}
 \begin{tabular}{lcccc}
 \toprule
@@ -119,14 +489,16 @@ null                  & 0.000 & [0.000, 0.000] & 6 &  \\
 
 \textbf{Budget effect.}\quad 16K significantly outperforms 8K ($p = 0.016$, paired Wilcoxon across all adapters).
 
-\textbf{Caveat.}\quad Post-hoc audit found that the LLM judge silently failed on 21/90 runs (23\%), primarily affecting cognee (12/12 judge failures) and letta variants (4/12 each). Failed judgments defaulted to TIE, inflating scores. Cognee's true ranking cannot be determined without re-scoring.
+\textbf{Caveat.}\quad Post-hoc audit found that the LLM judge silently failed on 21/90 runs (23\%), primarily affecting cognee (12/12 judge failures) and letta variants (4/12 each). Failed judgments defaulted to TIE, inflating mechanical-only composites. Cognee's true ranking requires re-scoring with a reliable judge.
 
-% ─────────────────────────── 3. Cross-Domain Heatmap ───────────────────────────
+% ═══════════════════════════════════════════════════════════════
+% SECTION 6: Cross-Domain Consistency
+% ═══════════════════════════════════════════════════════════════
 \section{Cross-Domain Consistency}
 
 \begin{table}[H]
 \centering
-\caption{Composite score: Adapter $\times$ Scope (16k budget). ``---'' = did not finish.}
+\caption{Composite score: Adapter $\times$ Scope (16K budget). ``---'' = did not finish.}
 \label{tab:heatmap}
 \begin{tabular}{lccccccc}
 \toprule
@@ -144,12 +516,14 @@ null           & 0.000 & 0.000 & 0.000 & 0.000 & 0.000 & 0.000 & 0.000 \\
 \end{tabular}
 \end{table}
 
-Chunked-hybrid ranks first or second in 5 of 6 scopes. Graphiti DNF'd on scopes 03--05 due to entity extraction timeouts ($\sim$600 LLM calls per scope). Compaction catastrophically fails on scope 02 (composite = 0.000).
+Chunked-hybrid ranks first or second in 5 of 6 scopes. Graphiti DNF'd on scopes 03--05 due to entity extraction timeouts (${\sim}$600 LLM calls per scope). Compaction catastrophically fails on scope~02 (composite $= 0.000$): its rolling summary discarded the specific details that all questions required.
 
-% ─────────────────────────── 4. Scaling Behavior ───────────────────────────
+% ═══════════════════════════════════════════════════════════════
+% SECTION 7: Scaling Behavior
+% ═══════════════════════════════════════════════════════════════
 \section{Scaling Behavior}
 
-How do systems behave as data grows from episode 1 to 120? We extract per-checkpoint metrics averaged across all scored scopes for each adapter.
+How do systems behave as the corpus grows from episode~1 to~120? We extract per-checkpoint metrics averaged across all scored scopes.
 
 \begin{figure}[H]
 \centering
@@ -178,50 +552,52 @@ How do systems behave as data grows from episode 1 to 120? We extract per-checkp
 \caption{Wall-clock time per question}
 \label{fig:walltime}
 \end{subfigure}
-\caption{Operational scaling. Chunked-hybrid starts at $\sim$4 calls and rises slowly. Other systems converge toward the 10-call turn limit. Compaction's wall time spikes at later checkpoints due to growing summary re-generation.}
+\caption{Operational scaling. Chunked-hybrid starts at ${\sim}$4 calls and rises slowly. Other systems converge toward the 10-call turn limit. Compaction's wall time spikes at later checkpoints due to growing summary regeneration.}
 \end{figure}
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{figures/scaling_ingest_latency.png}
-\caption{Per-episode ingest latency (log scale). Letta and chunked-hybrid process episodes during ingest ($\sim$300--700ms). Graphiti and compaction buffer during ingest and do real work in \texttt{prepare()} --- their near-zero ingest times are misleading without that context.}
+\caption{Per-episode ingest latency (log scale). Letta and chunked-hybrid process episodes during ingest (${\sim}$300--700ms). Graphiti and cognee buffer during ingest and do work in \texttt{prepare()} --- their near-zero ingest times are misleading without that context.}
 \label{fig:ingest}
 \end{figure}
 
 \textbf{Key observation.}\quad Token consumption (Figure~\ref{fig:tokens}) is the real scaling signal. When retrieval fails, agents don't stop --- they reformulate and retry. Each retry consumes tokens for the query, the empty response, and the agent's internal reasoning. This \emph{search thrashing} explains why complex architectures burn 4--8$\times$ more tokens than chunked-hybrid for the same questions.
 
-% ─────────────────────────── 5. Scenario Trace ───────────────────────────
+% ═══════════════════════════════════════════════════════════════
+% SECTION 8: Canonical Scenario Trace
+% ═══════════════════════════════════════════════════════════════
 \section{Canonical Scenario Trace}
 
 To make the failure modes concrete, we trace one question through all systems.
 
 \subsection{The Question}
 
-\textbf{Scope 04} (environmental drift): 6 water quality stations along a river, 30 days of monitoring + 90 distractors.
+\textbf{Scope~04} (environmental drift): 6 water quality stations along a river. 30 signal episodes (daily monitoring reports) interleaved with 90 distractors (air quality, soil, traffic data). At checkpoint~99 (after 99 of 120 episodes):
 
 \textbf{Q3} (longitudinal): \emph{``What is the source of the chromium contamination and how can you determine its location?''}
 
-\textbf{Ground truth}: An unpermitted discharge pipe between stations WQ-02 and WQ-03 at river-mile 18.6. The spatial gradient proves this: WQ-01/02 at baseline, WQ-03 at peak (132~\textmu g/L), downstream stations show dilution. Agricultural runoff explains turbidity but not chromium.
+\textbf{Ground truth}: An unpermitted discharge pipe between stations WQ-02 and WQ-03 at river-mile~18.6. The spatial gradient proves this: WQ-01 and WQ-02 at baseline ($3{-}5$~\textmu g/L), WQ-03 at peak (132~\textmu g/L), downstream stations showing progressive dilution. Agricultural runoff was a red herring---it explains turbidity but not the chromium gradient.
 
-\textbf{Key evidence}: Episode 025 --- a field inspection note recording the pipe discovery.
+\textbf{Key evidence}: Episode~025 (Listing~\ref{lst:ep25})---specifically the compliance flag noting ``unpermitted discharge pipe identified between WQ-02 and WQ-03 at RM~18.6''.
 
-\subsection{Results}
+\subsection{Results Summary}
 
 \begin{table}[H]
 \centering
-\caption{Canonical scenario: Chromium source question (ed04\_q03, checkpoint 99, 16k budget).}
+\caption{Canonical scenario: Chromium source question (ed04\_q03, checkpoint 99, 16K budget).}
 \label{tab:scenario}
 \begin{tabular}{lrrrccc}
 \toprule
-System & Calls & Tokens & Time (ms) & Answer & Pipe? & RM 18.6? \\
+System & Calls & Tokens & Time (s) & Answer & Pipe? & RM 18.6? \\
 \midrule
-\textbf{chunked-hybrid} & \textbf{3} & \textbf{22,308} & \textbf{2,679} & \textbf{1,642 ch} & \cmark & \cmark \\
-compaction     & 4 & 35,774 & 62,337 & 2,607 ch & \xmark & \xmark \\
-null           & 6 & 4,537 & 1,409 & 212 ch & \xmark & \xmark \\
-letta          & 8 & 74,722 & 126,527 & 2,567 ch & \xmark & \xmark \\
-letta-sleepy   & 9 & 88,547 & 69,344 & \emph{empty} & \xmark & \xmark \\
-cognee         & 9 & 157,187 & 19,723 & \emph{empty} & \xmark & \xmark \\
-mem0-raw       & 9 & 180,102 & 7,183 & 2,293 ch & \xmark & \xmark \\
+\textbf{chunked-hybrid} & \textbf{3} & \textbf{22{,}308} & \textbf{2.7} & \textbf{1{,}642 ch} & \cmark & \cmark \\
+compaction     & 4 & 35{,}774 & 62.3 & 2{,}607 ch & \xmark & \xmark \\
+null           & 6 & 4{,}537 & 1.4 & 212 ch & \xmark & \xmark \\
+letta          & 8 & 74{,}722 & 126.5 & 2{,}567 ch & \xmark & \xmark \\
+letta-sleepy   & 9 & 88{,}547 & 69.3 & \emph{empty} & \xmark & \xmark \\
+cognee         & 9 & 157{,}187 & 19.7 & \emph{empty} & \xmark & \xmark \\
+mem0-raw       & 9 & 180{,}102 & 7.2 & 2{,}293 ch & \xmark & \xmark \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -233,24 +609,74 @@ mem0-raw       & 9 & 180,102 & 7,183 & 2,293 ch & \xmark & \xmark \\
 \label{fig:swimlane}
 \end{figure}
 
-\subsection{What Each System Did}
+\subsection{Chunked-hybrid (correct answer, 3 calls)}
 
-\textbf{Chunked-hybrid} (3 calls, correct):
-Two \texttt{memory\_search} queries find episode 025 at rank 5 via BM25 keyword overlap (``source'' + ``chromium'' + ``discharge''). One \texttt{batch\_retrieve} returns the complete episode text. The agent reads ``unpermitted discharge pipe identified between WQ-02 and WQ-03 at RM 18.6'' and synthesizes a grounded answer with the spatial gradient data. Three valid citations.
+The full tool-call sequence:
 
-\textbf{Letta-sleepy} (9 calls, empty):
-Nine progressively longer \texttt{memory\_search} queries --- ``chromium contamination source,'' ``chromium source contamination analysis,'' ``chromium source contamination upstream industrial'' --- each returning nothing actionable. The agent burns 88K tokens (5.5$\times$ the 16K budget) reformulating queries before hitting the 10-turn limit with no answer.
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{cXrc}
+\toprule
+Call & Action & Cum.\ Tok. & Hits \\
+\midrule
+1 & \texttt{memory\_search("chromium contamination source determine location")} & 656 & 10 \\
+2 & \texttt{memory\_search("source of chromium ... chromium leak")} & 4{,}506 & 10 \\
+3 & \texttt{batch\_retrieve([ep\_025, ep\_018, ep\_023])} & 11{,}175 & 3 \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
-\textbf{Cognee} (9 calls, empty):
-Same search-thrashing pattern. The knowledge graph indexed entities and relationships from structured monitoring data but didn't capture the narrative field note containing the answer. The discharge pipe is described in natural language prose, not as a graph node.
+The first search finds episode~025 at rank~5 via BM25 keyword overlap (``source'' + ``chromium'' + ``discharge''). The second search, with expanded terms, confirms episode~025 and identifies supporting episodes. The agent then batch-retrieves 3 episodes and reads the critical sentence: ``unpermitted discharge pipe identified between WQ-02 and WQ-03 at RM~18.6''. The answer cites 3 episodes and names both the pipe and its exact location.
 
-\textbf{Mem0-raw} (9 calls, wrong):
-Vector search retrieves episodes 018 and 026 (escalation data) but misses episode 025. The agent identifies the wrong station and mislocates the source --- semantically similar episodes aren't the right episodes.
+\textbf{Why it works.} BM25 matches the query term ``source'' against the episode text containing ``discharge pipe''. The RRF fusion boosts episode~025 because it scores well on both BM25 (keyword match on ``discharge'' and ``chromium'') and embedding similarity (semantic match on ``contamination source''). Three calls, 11K tokens, correct answer.
 
-\textbf{Compaction} (4 calls, partial):
-Retrieves episodes 001--003 (early baseline). Its rolling summary absorbed episode 025 into a generalized statement. The specific detail --- one sentence about a pipe at a specific river mile --- was compressed away.
+\subsection{Letta-sleepy (empty answer, 9 calls)}
 
-% ─────────────────────────── 6. The Mechanism ───────────────────────────
+\begin{table}[H]
+\centering
+\small
+\caption{Letta-sleepy search queries and cumulative token consumption.}
+\label{tab:letta-sleepy-trace}
+\begin{tabularx}{\textwidth}{cXr}
+\toprule
+Call & Search Query & Cum.\ Tok. \\
+\midrule
+1 & \texttt{"chromium contamination source determine location"} & 587 \\
+2 & \texttt{"source of chromium contamination location determination"} & 3{,}078 \\
+3 & \texttt{"chromium source contamination analysis"} & 7{,}452 \\
+4 & \texttt{"chromium source contamination source location analysis report"} & 13{,}632 \\
+5 & \texttt{"chromium source contamination location determination site"} & 21{,}701 \\
+6 & \texttt{"chromium source contamination source identification"} & 31{,}433 \\
+7 & \texttt{"chromium source contamination upstream"} & 43{,}084 \\
+8 & \texttt{"... analysis report site investigation"} & 56{,}513 \\
+9 & \texttt{"... source identification site"} & 71{,}631 \\
+10 & \texttt{"... source upstream industrial"} & 88{,}547 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Ten searches, zero batch retrieves. Every search returns results from Letta's vector store, but none surface episode~025 with sufficient prominence for the agent to retrieve it. The agent reformulates progressively longer queries---adding ``report'', ``site'', ``investigation'', ``upstream'', ``industrial''---each consuming ${\sim}8{,}000$ tokens in returned results. After 88K tokens (5.4$\times$ the 16K budget) and 10 turns, it hits the turn limit and returns an empty answer.
+
+\textbf{Why it fails.} Vector similarity search embeds the query and finds the nearest episodes in embedding space. But 119 other episodes also discuss water quality, contamination, and station readings. The critical sentence about the discharge pipe at RM~18.6 is embedded as part of a full episode that is semantically similar to dozens of others. There is no keyword signal to break the tie.
+
+\subsection{Compaction (partial answer, 4 calls)}
+
+Compaction retrieves episodes 001--003 (early baseline data). Its rolling summary compressed the 120 episodes into ${\sim}$2K tokens; the specific mention of ``unpermitted discharge pipe'' and ``RM~18.6'' was absorbed into a generic statement about spatial concentration gradients.
+
+The agent's answer correctly identifies a spatial gradient and correctly locates the source ``between WQ-01 and WQ-02'' (actually between WQ-02 and WQ-03), but it cannot name the discharge pipe or river mile---those details were lost in summarization. It scores 1/4 on correctness checks: spatial gradient yes, discharge pipe no, RM~18.6 no, WQ-03 peak no.
+
+\textbf{Why it fails.} Compaction's summary preserves trends but discards specifics. The single sentence identifying the pipe---the most important sentence in 120 episodes---is indistinguishable from routine field notes during summarization.
+
+\subsection{Mem0-raw (wrong answer, 9 calls)}
+
+Mem0-raw's vector search returns episodes 018 and 026 (escalation data showing high chromium at several stations) but never surfaces episode~025. The agent identifies that chromium is elevated but mislocates the source between WQ-01 and WQ-02 (upstream of the actual source). It scores 1/4: spatial gradient yes, everything else wrong.
+
+\textbf{Why it fails.} Full-episode embeddings average over all content in the episode---station readings, weather data, biological indicators, field notes. The critical sentence is a small fraction of episode~025's embedding. Semantically, multiple escalation episodes look nearly identical; the specific detail that distinguishes episode~025 is diluted.
+
+% ═══════════════════════════════════════════════════════════════
+% SECTION 9: Why Complex Systems Fail
+% ═══════════════════════════════════════════════════════════════
 \section{Why Complex Systems Fail}
 
 Three patterns explain the rankings.
@@ -271,23 +697,29 @@ chunked-hybrid & None (raw text indexed) & Nothing \\
 cognee & Entity extraction $\to$ graph & Temporal ordering, narrative details \\
 mem0-raw & Vector embedding & Keyword-level specificity \\
 letta & Agent-managed memory & Search reliability (stochastic retrieval) \\
-letta-sleepy & Agent memory + consolidation & Same as letta + compression noise \\
+letta-sleepy & Agent memory + consolidation & Same as letta + consolidation noise \\
 compaction & Rolling LLM summary & Numeric precision, per-episode detail \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-Longitudinal synthesis requires \emph{all} the details: exact values, temporal ordering, narrative context. When any of these are discarded by an intermediate LLM --- whether summarizing, extracting entities, or re-encoding into embeddings --- the answering agent works from a degraded input.
+Longitudinal synthesis requires \emph{all} the details: exact values, temporal ordering, narrative context. When any of these are discarded by an intermediate LLM---whether summarizing, extracting entities, or re-encoding into embeddings---the answering agent works from a degraded input.
 
 \subsection{Search Thrashing}
 
-When retrieval fails, the agent reformulates and retries. Each retry costs tokens. Systems with unreliable retrieval (letta, letta-sleepy, cognee) burn 4--8$\times$ more tokens than chunked-hybrid on the same questions (Figure~\ref{fig:tokens}). This directly degrades performance: the token budget is exhausted on failed searches rather than answer synthesis.
+When retrieval fails, the agent reformulates and retries. Each retry costs tokens: the query, the returned results (even if irrelevant), and the agent's internal reasoning about what to try next. Systems with unreliable retrieval (letta, letta-sleepy, cognee, mem0-raw) burn 4--8$\times$ more tokens than chunked-hybrid on the same questions (Figure~\ref{fig:tokens}). This directly degrades performance: the token budget is exhausted on failed searches rather than answer synthesis.
+
+The letta-sleepy trace (Table~\ref{tab:letta-sleepy-trace}) is the canonical example: 10 increasingly desperate queries, 88K tokens consumed, zero useful information retrieved, empty answer.
 
 \subsection{The Keyword Advantage}
 
-Episode 025 contains ``unpermitted discharge pipe'' and the question asks about ``the source of chromium contamination.'' BM25 matches these through shared terms. Embedding similarity requires the model to have learned that ``discharge pipe'' is semantically close to ``contamination source'' --- a reasonable inference, but one that competes with 119 other episodes also discussing contamination. For sparse, specific facts, exact keyword match beats semantic similarity.
+Episode~025 contains the exact string ``unpermitted discharge pipe'' and the question asks about ``the source of chromium contamination.'' BM25 matches these through shared and related terms. Embedding similarity requires the model to have learned that ``discharge pipe'' is semantically close to ``contamination source''---a reasonable inference, but one that competes with 119 other episodes also discussing contamination in similar terms.
 
-% ─────────────────────────── 7. Conclusion ───────────────────────────
+For sparse, specific facts buried in structured data, exact keyword match beats semantic similarity. This is not a general statement about retrieval---it is specific to the LENS task structure, where the signal is a few sentences among thousands of similar-looking records.
+
+% ═══════════════════════════════════════════════════════════════
+% SECTION 10: Summary
+% ═══════════════════════════════════════════════════════════════
 \section{Summary}
 
 \begin{enumerate}
@@ -299,6 +731,6 @@ Episode 025 contains ``unpermitted discharge pipe'' and the question asks about 
     \item \textbf{16K significantly outperforms 8K} ($p = 0.016$), confirming that budget constraints are binding.
 \end{enumerate}
 
-These results suggest that current memory architectures are optimized for the wrong problem. They trade fidelity for abstraction, assuming the agent needs pre-digested knowledge. For longitudinal synthesis --- where the signal is sparse, specific, and distributed --- the agent needs raw evidence and reliable retrieval. Everything else is noise.
+These results suggest that current memory architectures are optimized for the wrong problem. They trade fidelity for abstraction, assuming the agent needs pre-digested knowledge. For longitudinal synthesis---where the signal is sparse, specific, and distributed---the agent needs raw evidence and reliable retrieval. Everything else is noise.
 
 \end{document}
