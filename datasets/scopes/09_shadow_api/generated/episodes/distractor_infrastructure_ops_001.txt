@@ -1,0 +1,1240 @@
+================================================================================
+INFRASTRUCTURE OPERATIONS LOG — VANTAGE COMMERCE PLATFORM
+Date: 2025-09-08
+Cluster: prod-us-east-1
+Classification: Internal — Operations Team Only
+================================================================================
+
+--- SECTION 1: KUBERNETES CLUSTER AUTOSCALER STATUS REPORT ---
+
+Timestamp: 2025-09-08T06:15:00Z
+Service: cluster-autoscaler
+Version: v1.28.2
+Namespace: kube-system
+Environment: production
+Cluster: prod-us-east-1
+Report Type: Autoscaler Activity Summary — Past 24 Hours
+
+NODE POOL CONFIGURATION:
+
+  Pool: worker-general-v5
+    Instance Type: m6i.4xlarge
+    vCPU per node: 16
+    Memory per node: 64 GiB
+    Min Nodes: 12
+    Max Nodes: 40
+    Current Nodes: 18
+    Status: ACTIVE
+    Labels:
+      node.kubernetes.io/pool: worker-general-v5
+      topology.kubernetes.io/zone: [us-east-1a, us-east-1b, us-east-1c]
+    Taints: none
+    Scaling Cooldown: 300s
+    Scale-Down Unneeded Time: 600s
+    Scale-Down Utilization Threshold: 0.5
+
+  Pool: worker-memory-v3
+    Instance Type: r6i.2xlarge
+    vCPU per node: 8
+    Memory per node: 64 GiB
+    Min Nodes: 4
+    Max Nodes: 16
+    Current Nodes: 7
+    Status: ACTIVE
+    Labels:
+      node.kubernetes.io/pool: worker-memory-v3
+      workload-type: memory-intensive
+    Taints:
+      - dedicated=memory-workloads:PreferNoSchedule
+    Scaling Cooldown: 300s
+    Scale-Down Unneeded Time: 900s
+
+  Pool: worker-spot-v2
+    Instance Type: m6i.2xlarge
+    vCPU per node: 8
+    Memory per node: 32 GiB
+    Min Nodes: 0
+    Max Nodes: 30
+    Current Nodes: 11
+    Status: ACTIVE
+    Labels:
+      node.kubernetes.io/pool: worker-spot-v2
+      capacity-type: spot
+    Taints:
+      - spot-instance=true:NoSchedule
+    Termination Handler: aws-node-termination-handler v1.22.0
+    Instance Diversification: m6i.2xlarge, m5.2xlarge, m5a.2xlarge
+
+CLUSTER CAPACITY SUMMARY:
+
+  Total vCPU: 312
+  Total Memory: 1.18 TiB
+  Current CPU Utilization: 68%
+  Current Memory Utilization: 54%
+  Allocatable CPU (after system reservation): 296 vCPU
+  Allocatable Memory (after system reservation): 1.12 TiB
+  System Reserved per Node: 500m CPU, 1 GiB memory
+  Kube Reserved per Node: 200m CPU, 512 MiB memory
+  Eviction Hard Threshold: memory.available < 100Mi, nodefs.available < 10%
+
+AUTOSCALER EVENTS (past 12 hours):
+
+  [2025-09-08T05:31:12Z] EVENT: SpotInterruptionNotice
+    Node: ip-10-42-8-141
+    Pool: worker-spot-v2
+    Instance ID: i-0a4f3e7b2c198d6e5
+    Availability Zone: us-east-1c
+    Action: Received 2-minute interruption warning from EC2 Instance Metadata Service
+    Detail: Termination Handler initiated graceful drain
+    Pods Affected: 4 pods
+      1. catalog-search-worker-7a9b3c (cpu: 800m, mem: 2Gi) — rescheduled to ip-10-42-8-205
+      2. catalog-search-worker-4d2e1f (cpu: 800m, mem: 2Gi) — rescheduled to ip-10-42-9-117
+      3. recommendation-engine-8c4a2d (cpu: 1200m, mem: 4Gi) — rescheduled to ip-10-42-8-205
+      4. analytics-collector-2f7b9e (cpu: 500m, mem: 1Gi) — rescheduled to ip-10-42-9-117
+    Pod Rescheduling Duration: 47 seconds
+    Result: All 4 pods rescheduled within SLA
+    Note: Pod anti-affinity rules honored; catalog-search-worker replicas placed in separate AZs
+    Node Deregistered: 2025-09-08T05:33:41Z
+
+  [2025-09-08T05:48:33Z] EVENT: ScaleUp
+    Pool: worker-general-v5
+    Previous Count: 16
+    New Count: 18
+    Trigger: PendingPodBacklog — 14 pods unschedulable
+    Pending Pods Breakdown:
+      - checkout-service: 3 pods (resource request: 2 vCPU, 4Gi each)
+      - inventory-sync: 4 pods (resource request: 1 vCPU, 2Gi each)
+      - notification-service: 2 pods (resource request: 500m, 1Gi each)
+      - order-processor: 3 pods (resource request: 1.5 vCPU, 3Gi each)
+      - analytics-aggregator: 2 pods (resource request: 2 vCPU, 8Gi each)
+    Total Resources Needed: 18.5 vCPU, 47 GiB
+    Decision: Scale up worker-general-v5 by 2 nodes (provides 32 vCPU, 128 GiB headroom)
+    New Node Instance IDs: i-0b8c4d7e3f1a2596, i-0c9d5e8f4a2b3671
+    New Node IPs: ip-10-42-19-87, ip-10-42-19-88
+    Registration Time: 62 seconds (ip-10-42-19-87), 58 seconds (ip-10-42-19-88)
+    All Pending Pods Scheduled Within: 84 seconds of scale-up decision
+
+  [2025-09-08T05:52:10Z] EVENT: CordonAndDrain
+    Node: ip-10-42-17-209
+    Pool: worker-general-v5
+    Reason: ScheduledMaintenance — kernel security patch (CVE-2025-31245)
+    Pods Drained: 11
+    PodDisruptionBudgets Consulted:
+      - checkout-service: maxUnavailable=1 — RESPECTED (1 of 4 replicas drained)
+      - inventory-service: maxUnavailable=1 — RESPECTED (1 of 6 replicas drained)
+      - user-profile-cache: minAvailable=2 — RESPECTED (3 of 4 available after drain)
+      - notification-service: maxUnavailable=1 — RESPECTED
+      - analytics-collector: no PDB — all pods drained immediately
+    Drain Duration: 4 minutes 18 seconds
+    Eviction Order: non-PDB pods first, then PDB-governed pods in dependency order
+    Grace Period: 30 seconds per pod
+    Final Status: Node cordoned and all pods evicted successfully
+
+  [2025-09-08T06:02:44Z] EVENT: NodeJoined
+    Node: ip-10-42-19-88
+    Pool: worker-general-v5
+    Replacement For: ip-10-42-17-209
+    Kubelet Version: v1.29.6
+    Container Runtime: containerd 1.7.18
+    OS Image: Amazon Linux 2023.5.20250901
+    Kernel: 6.1.102-111.182.amzn2023.x86_64
+    Node Conditions: Ready=True, MemoryPressure=False, DiskPressure=False, PIDPressure=False
+    Labels Applied: 14 labels including pool, zone, instance-type, lifecycle
+    Registration to Ready: 38 seconds
+    CNI Plugin: aws-vpc-cni v1.18.3
+    Max Pods: 234 (ENI-based calculation)
+
+CLUSTER HEALTH METRICS (06:15 UTC snapshot):
+
+  Nodes Total: 36
+  Nodes Ready: 36
+  Nodes NotReady: 0
+  Nodes Cordoned: 0
+  Pods Running: 487
+  Pods Pending: 0
+  Pods Failed: 2 (both in batch-jobs namespace, expected — cleanup scheduled)
+  Pods Succeeded (completed jobs): 14
+  DaemonSets:
+    - aws-node: 36/36 desired, 36/36 ready
+    - kube-proxy: 36/36 desired, 36/36 ready
+    - fluent-bit: 36/36 desired, 36/36 ready
+    - node-exporter: 36/36 desired, 36/36 ready
+    - ebs-csi-node: 36/36 desired, 36/36 ready
+  HorizontalPodAutoscalers:
+    - checkout-service: 16/4-24 replicas, CPU target 65%, current 58%
+    - catalog-search: 12/6-20 replicas, CPU target 70%, current 62%
+    - order-processor: 8/4-16 replicas, CPU target 60%, current 54%
+    - notification-service: 6/2-12 replicas, CPU target 70%, current 44%
+
+--- SECTION 2: REDIS CLUSTER ROLLING UPGRADE ---
+
+Timestamp: 2025-09-08T14:30:00Z
+Service: redis-cluster
+Environment: production
+Operation: Rolling Upgrade — Redis 7.2.4 to 7.2.5
+Operator: redis-operator v2.4.1
+Namespace: redis-system
+
+CLUSTER TOPOLOGY:
+
+  Cluster Name: redis-prod-main
+  Architecture: 3 Shards, Each with 1 Primary + 1 Replica
+  Deployment Across: 3 Availability Zones (us-east-1a, us-east-1b, us-east-1c)
+  Total Nodes: 6
+  Cluster Mode: Enabled
+  Hash Slot Distribution: 16384 slots evenly distributed
+
+  Shard-0:
+    Primary: redis-prod-main-0 (us-east-1a)
+      IP: 10.42.5.201
+      Port: 6379
+      Slots: 0-5460
+      Memory Used: 4.7 GB / 14 GB maxmemory
+      Connected Clients: 2,814
+      Ops/sec: 18,400
+      Hit Rate: 94.2%
+      Keyspace: db0=keys=4821402,expires=3182001
+    Replica: redis-prod-main-0-replica (us-east-1b)
+      IP: 10.42.6.118
+      Port: 6379
+      Replication Offset: 489,204,817,332
+      Replication Lag: 0 bytes
+      Status: online, synced
+
+  Shard-1:
+    Primary: redis-prod-main-1 (us-east-1b)
+      IP: 10.42.6.142
+      Port: 6379
+      Slots: 5461-10922
+      Memory Used: 4.9 GB / 14 GB maxmemory
+      Connected Clients: 2,788
+      Ops/sec: 19,100
+      Hit Rate: 93.8%
+      Keyspace: db0=keys=5012847,expires=3410218
+    Replica: redis-prod-main-1-replica (us-east-1c)
+      IP: 10.42.7.89
+      Port: 6379
+      Replication Offset: 489,204,817,112
+      Replication Lag: 0 bytes
+      Status: online, synced
+
+  Shard-2:
+    Primary: redis-prod-main-2 (us-east-1c)
+      IP: 10.42.7.196
+      Port: 6379
+      Slots: 10923-16383
+      Memory Used: 4.5 GB / 14 GB maxmemory
+      Connected Clients: 2,810
+      Ops/sec: 17,800
+      Hit Rate: 94.6%
+      Keyspace: db0=keys=4689201,expires=3018492
+    Replica: redis-prod-main-2-replica (us-east-1a)
+      IP: 10.42.5.77
+      Port: 6379
+      Replication Offset: 489,204,816,998
+      Replication Lag: 0 bytes
+      Status: online, synced
+
+PRE-UPGRADE BACKUP:
+
+  Timestamp: 2025-09-08T14:15:00Z
+  Type: RDB Snapshot
+  Command: BGSAVE triggered on all primaries
+  RDB File Size: 14.2 GB (combined across 3 shards)
+    Shard-0 RDB: 4.8 GB
+    Shard-1 RDB: 5.1 GB
+    Shard-2 RDB: 4.3 GB
+  Upload Destination: s3://vantage-backups/redis/prod/redis-prod-main-2025-09-08T1415.rdb
+  Upload Duration: 3 minutes 12 seconds
+  Upload Transfer Rate: 75.8 MB/s
+  Upload Verification: SHA256 checksum matched
+  S3 Storage Class: STANDARD_IA
+  Retention Policy: 30 days, lifecycle rule s3-redis-backup-lifecycle applied
+  Encryption: AES-256 server-side encryption (SSE-S3)
+
+UPGRADE SEQUENCE:
+
+  Strategy: Rolling — replicas first, then primaries with controlled failover
+  Patch Notes: Redis 7.2.5 — fixes WAITAOF edge case under high-throughput replication
+
+  Step 1 — Replica Upgrades:
+    [14:30:22Z] Upgrading redis-prod-main-2-replica (Shard-2 Replica)
+      Previous Version: 7.2.4
+      Target Version: 7.2.5
+      Image: redis:7.2.5-alpine
+      Pod Restart: Graceful — SAVE completed, client connections drained
+      Downtime: 8 seconds (replica only, no client impact)
+      Post-Restart Sync: Full sync not required — partial resync via replication backlog
+      Replication Caught Up: 14 seconds after restart
+      Health Check: PING/PONG OK, CLUSTER INFO shows handshake complete
+
+    [14:34:11Z] Upgrading redis-prod-main-1-replica (Shard-1 Replica)
+      Previous Version: 7.2.4
+      Target Version: 7.2.5
+      Pod Restart: Graceful — SAVE completed
+      Downtime: 7 seconds (replica only)
+      Replication Caught Up: 12 seconds after restart
+      Health Check: OK
+
+    [14:37:55Z] Upgrading redis-prod-main-0-replica (Shard-0 Replica)
+      Previous Version: 7.2.4
+      Target Version: 7.2.5
+      Pod Restart: Graceful — SAVE completed
+      Downtime: 9 seconds (replica only)
+      Replication Caught Up: 16 seconds after restart
+      Health Check: OK
+
+  Step 2 — Primary Upgrades (with planned failover):
+    [14:42:30Z] Initiating failover for Shard-2
+      CLUSTER FAILOVER TAKEOVER command sent to redis-prod-main-2-replica
+      Failover Duration: 1.4 seconds
+      New Primary: redis-prod-main-2-replica (now promoted)
+      Old Primary: redis-prod-main-2 (now replica, pending upgrade)
+      Client Redirect: MOVED responses sent for 142 in-flight requests
+      Zero CLUSTERDOWN errors observed in sentinel logs
+
+    [14:44:15Z] Upgrading old redis-prod-main-2 (now replica role)
+      Version: 7.2.4 to 7.2.5
+      Restart Duration: 8 seconds
+      Resync: Partial — replication backlog sufficient
+      Status: online, synced within 11 seconds
+
+    [14:48:00Z] Initiating failover for Shard-1
+      Failover Duration: 1.6 seconds
+      Zero CLUSTERDOWN errors
+      MOVED responses: 138
+
+    [14:49:45Z] Upgrading old redis-prod-main-1
+      Version: 7.2.4 to 7.2.5
+      Restart Duration: 7 seconds
+      Status: online, synced within 13 seconds
+
+    [14:53:20Z] Initiating failover for Shard-0
+      Failover Duration: 1.8 seconds
+      Zero CLUSTERDOWN errors
+      MOVED responses: 156
+
+    [14:55:10Z] Upgrading old redis-prod-main-0
+      Version: 7.2.4 to 7.2.5
+      Restart Duration: 9 seconds
+      Status: online, synced within 15 seconds
+
+  Step 3 — Failover Test (post-upgrade validation):
+    [15:02:00Z] Manual failover test on shard-0
+      Command: CLUSTER FAILOVER
+      Promotion Time: 1.8 seconds
+      Client Errors During Failover: 0
+      Verification: 1000 SET/GET operations performed across all slots — 0 errors
+      CLUSTER INFO Output:
+        cluster_state:ok
+        cluster_slots_assigned:16384
+        cluster_slots_ok:16384
+        cluster_slots_pfail:0
+        cluster_slots_fail:0
+        cluster_known_nodes:6
+        cluster_size:3
+        cluster_current_epoch:8
+
+UPGRADE COMPLETION METRICS:
+
+  Total Upgrade Duration: 32 minutes (14:30 to 15:02)
+  Client Connection Count During Upgrade: Peak 8,412 connections
+  CLUSTERDOWN Errors: 0
+  Client Reconnection Errors: 0
+  Slowlog Entries Generated During Upgrade: 4 (all < 15ms, within tolerance)
+  Memory Fragmentation Ratio Post-Upgrade:
+    Shard-0: 1.08
+    Shard-1: 1.07
+    Shard-2: 1.09
+    Average: 1.08 (stable, within acceptable range 1.0-1.5)
+
+--- SLACK TRANSCRIPT: #platform-infra ---
+
+Timestamp Range: 2025-09-08T14:28:00Z — 2025-09-08T15:20:00Z
+Channel: #platform-infra
+
+[14:28:12] @drew.park: redis 7.2.5 rolling out now, patch fixes the WAITAOF edge case we hit in staging last week. ETA 45 min for full cluster.
+[14:28:45] @nina.patel: nice, been waiting on that fix. Staging was throwing intermittent WAITAOF timeouts on the payment session writes
+[14:29:02] @drew.park: yep exactly. The patch makes WAITAOF properly handle partial fsync under concurrent replication. Low risk since we tested it in staging for 3 days already
+[14:29:31] @ravi.shankar: want me to keep an eye on connection metrics during the roll?
+[14:29:48] @drew.park: that'd be great. I'm watching the operator logs. Backup to S3 already done — 14.2 GB RDB, uploaded clean. SHA256 verified
+[14:30:18] @ravi.shankar: dashboard pulled up. connections at 8.2k rn, normal range. error rate 0%
+[14:35:00] @drew.park: first replica upgraded, partial resync worked. No full sync needed. 14 seconds to catch up
+[14:36:22] @nina.patel: any latency blip visible?
+[14:36:48] @ravi.shankar: nope, p99 cmd latency still at 1.2ms. Replicas don't serve reads in our config so no impact expected
+[14:38:20] @drew.park: all three replicas done. Starting primary failovers now. This is the part that matters
+[14:43:00] @ravi.shankar: connections holding steady. Peak at 8.4k right now which is normal for this time of day. No spikes on the error dashboard. Zero CLUSTERDOWN
+[14:44:30] @drew.park: shard-2 failover done, 1.4 seconds. Old primary upgrading now
+[14:48:15] @drew.park: shard-1 failover done, 1.6 seconds. Clean
+[14:53:45] @drew.park: shard-0 failover done, 1.8 seconds. All primaries upgraded. Running validation now
+[14:55:30] @drew.park: validation in progress — running 1000 SET/GET ops across all 16384 slots
+[15:02:45] @drew.park: failover test passed — 1.8s promotion, zero client errors. Redis 7.2.5 is fully rolled out across redis-prod-main. Memory frag ratio at 1.08 across the board
+[15:03:10] @carlos.mendez: thanks drew. I'll update the runbook version reference and the change log
+[15:04:22] @nina.patel: any changes to the client configuration needed?
+[15:04:55] @drew.park: nope, fully backward compatible. Same protocol, same cluster topology. Just the server-side WAITAOF fix
+[15:05:30] @ravi.shankar: should we schedule the same upgrade for redis-prod-sessions cluster?
+[15:06:01] @drew.park: yep, let's do that next maintenance window. Same 7.2.4 to 7.2.5. I'll create the ticket
+[15:06:11] @ravi.shankar: just checked — zero CLUSTERDOWN errors in the entire window. Clean upgrade. Logging the metrics for the postmortem review template
+[15:07:45] @tanya.okonkwo: nice work. I'll add this to the weekly ops summary for the Monday standup
+[15:08:22] @drew.park: thanks everyone. Marking the change record as completed in ServiceNow
+
+--- SECTION 3: GRAFANA ALERT — NODE DISK PRESSURE ---
+
+Timestamp: 2025-09-08T09:22:00Z
+Alert Name: NodeDiskPressure
+Alert UID: grafana-alert-disk-4f8a2c
+Alert Rule Group: node-health-checks
+Environment: production
+Severity: WARNING
+Status: RESOLVED (auto-resolved at 09:41 UTC)
+Duration: 19 minutes
+
+ALERT CONFIGURATION:
+
+  Datasource: Prometheus (prometheus-prod)
+  Expression: |
+    (node_filesystem_avail_bytes{mountpoint="/var/lib/kubelet"} /
+     node_filesystem_size_bytes{mountpoint="/var/lib/kubelet"}) * 100 < 15
+  Evaluation Interval: 30 seconds
+  For Duration: 2 minutes
+  Labels:
+    severity: warning
+    team: platform-infra
+    category: disk
+  Annotations:
+    summary: "Node {{ $labels.instance }} disk usage on /var/lib/kubelet above 85%"
+    runbook_url: "https://runbooks.vantage.internal/disk-pressure"
+    dashboard_url: "https://grafana.vantage.internal/d/node-disk/node-disk-usage"
+
+FIRING INSTANCE:
+
+  Node: ip-10-42-22-56
+  Node Pool: worker-general-v5
+  Instance Type: m6i.4xlarge
+  Instance ID: i-0d7e8f9a1b2c3456
+  Availability Zone: us-east-1b
+  Mountpoint: /var/lib/kubelet
+  Filesystem: /dev/nvme1n1p1
+  Filesystem Type: ext4
+  Total Disk: 200 GiB
+  Used Disk: 174 GiB (87%)
+  Available Disk: 26 GiB (13%)
+  Threshold: 85%
+  Inode Usage: 4.2% (well within limits)
+
+  Alert Fired At: 2025-09-08T09:22:14Z
+  Notification Channels:
+    - Slack #infra-alerts (delivered at 09:22:16Z)
+    - PagerDuty (informational, no page — warning severity)
+    - Opsgenie (tag: disk-pressure, priority: P4)
+    - Email: platform-infra-alerts@vantage.internal
+
+ROOT CAUSE ANALYSIS:
+
+  Finding: Stale container image layers accumulated on node ip-10-42-22-56
+  Detail: 23 previous deployments of inventory-service deposited untagged image layers
+  Accumulation Period: 19 days (since 2025-08-20)
+  Total Stale Image Size: 18.4 GB
+
+  Image Layer Inventory (top consumers on affected node):
+    - inventory-service: 23 versions, 12.1 GB stale layers
+      Most recent stale: v2.14.0 (2025-09-07)
+      Oldest stale: v2.8.3 (2025-08-20)
+    - checkout-service: 11 versions, 3.2 GB stale layers
+    - catalog-search: 8 versions, 1.8 GB stale layers
+    - user-profile-service: 6 versions, 0.9 GB stale layers
+    - notification-service: 4 versions, 0.4 GB stale layers
+    Total stale layers: 18.4 GB across 52 image versions
+
+REMEDIATION:
+
+  Kubelet Image Garbage Collection Configuration:
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 70
+    imageMinimumGCAge: 2m
+    evictionHard:
+      nodefs.available: "10%"
+      imagefs.available: "15%"
+
+  [09:22:30Z] Kubelet triggered image garbage collection
+    Phase 1 — Identify unused images:
+      Total images scanned: 847 image layers
+      Active images (in use by running containers): 435 layers
+      Inactive images (candidates for deletion): 412 layers
+      Total size of inactive images: 18.4 GB
+
+    Phase 2 — Delete unused layers:
+      Deletion started: 09:22:35Z
+      Layers deleted: 412
+      Space freed: 18.4 GB
+      Deletion completed: 09:38:42Z (16 minutes for full cleanup)
+      containerd garbage collection: `ctr -n k8s.io images prune` equivalent
+
+    Phase 3 — Verify remaining images:
+      Active image layers retained: 435 (all referenced by running containers)
+      Remaining disk usage: 138.2 GiB of 200 GiB (69.1%)
+      Filesystem health check: OK, no errors in dmesg
+
+  Disk Usage Timeline:
+    09:22 — 87% (alert fired)
+    09:26 — 84% (initial layers deleted)
+    09:30 — 79% (bulk deletion in progress)
+    09:35 — 74% (approaching target)
+    09:38 — 71% (deletion complete)
+    09:41 — 71% (stable, alert auto-resolved)
+
+  [09:41:02Z] Alert auto-resolved — disk usage below 85% threshold
+  Resolution notification sent to: Slack #infra-alerts, PagerDuty, Opsgenie
+
+POST-INCIDENT ACTIONS:
+
+  Action Item 1: Review imageGCHighThresholdPercent across all node pools
+    Owner: @drew.park
+    Due: 2025-09-12
+    Jira: PLAT-4892
+    Status: Open
+    Notes: Consider lowering to 80% to trigger cleanup earlier. Check if 70% low threshold is appropriate given image sizes.
+
+  Action Item 2: Implement image pruning CronJob as backstop
+    Owner: @tanya.okonkwo
+    Due: 2025-09-15
+    Jira: PLAT-4893
+    Status: Open
+    Notes: Run `crictl rmi --prune` weekly on all nodes via DaemonSet CronJob. Ensure it respects running containers and doesn't interfere with image pulls.
+
+  Action Item 3: Audit deployment frequency for inventory-service
+    Owner: @nina.patel
+    Due: 2025-09-10
+    Jira: PLAT-4894
+    Status: Open
+    Notes: 23 deployments in 19 days is higher than most services (avg is 8-10 per 19 days). Check if CI/CD is deploying on every commit to main instead of using release branches.
+
+--- SECTION 4: INFRASTRUCTURE METRICS SNAPSHOT ---
+
+Timestamp: 2025-09-08T06:00:00Z — 2025-09-08T18:00:00Z
+Source: Prometheus / Grafana Dashboard "Cluster Overview — prod-us-east-1"
+Scrape Interval: 15 seconds
+Retention: 90 days
+
+COMPUTE METRICS (12-hour averages):
+
+  CPU:
+    Cluster Total Capacity: 312 vCPU
+    Cluster Requests: 224.6 vCPU (72.0%)
+    Cluster Limits: 408.2 vCPU (130.8% — overcommitted, normal for burstable workloads)
+    Cluster Actual Usage: 212.2 vCPU (68.0%)
+    Headroom (Capacity - Requests): 87.4 vCPU
+    Per-Node Average Usage: 5.9 vCPU (36.8% of m6i.4xlarge capacity)
+    Top CPU Consumers:
+      1. checkout-service: 34.2 vCPU (16 replicas, 2.1 vCPU avg each)
+      2. catalog-search: 28.8 vCPU (12 replicas, 2.4 vCPU avg each)
+      3. order-processor: 22.1 vCPU (8 replicas, 2.8 vCPU avg each)
+      4. analytics-aggregator: 18.4 vCPU (4 replicas, 4.6 vCPU avg each)
+      5. recommendation-engine: 14.7 vCPU (6 replicas, 2.5 vCPU avg each)
+      6. inventory-sync: 12.3 vCPU (8 replicas, 1.5 vCPU avg each)
+      7. payment-gateway: 10.8 vCPU (6 replicas, 1.8 vCPU avg each)
+      8. user-profile-service: 8.4 vCPU (4 replicas, 2.1 vCPU avg each)
+
+  Memory:
+    Cluster Total Capacity: 1.18 TiB
+    Cluster Requests: 814 GiB (67.3%)
+    Cluster Limits: 1.04 TiB (86.0%)
+    Cluster Actual Usage: 654 GiB (54.1%)
+    Headroom (Capacity - Requests): 396 GiB
+    Top Memory Consumers:
+      1. redis-prod-main: 42.6 GiB (6 pods, 7.1 GiB avg)
+      2. elasticsearch-prod: 38.4 GiB (7 pods, 5.5 GiB avg)
+      3. analytics-aggregator: 32.0 GiB (4 pods, 8 GiB each)
+      4. order-database-proxy: 24.8 GiB (PgBouncer + monitoring sidecars)
+      5. catalog-search: 19.2 GiB (12 pods, 1.6 GiB avg)
+      6. kafka-connect: 16.4 GiB (4 workers, 4.1 GiB avg)
+      7. recommendation-engine: 14.8 GiB (6 pods, 2.5 GiB avg)
+
+NETWORK METRICS (12-hour totals):
+
+  Ingress Traffic: 2.4 TB
+  Egress Traffic: 1.8 TB
+  Inter-Pod Traffic (east-west): 4.2 TB
+  Cross-AZ Data Transfer: 890 GB ($80.10 estimated cost at $0.01/GB)
+  DNS Queries (CoreDNS): 48.2M queries, 99.7% success rate
+  DNS p50 Latency: 1.4ms
+  DNS p99 Latency: 4.8ms
+  DNS NXDOMAIN Rate: 0.8%
+  TCP Retransmission Rate: 0.02%
+
+STORAGE METRICS:
+
+  EBS Volumes Attached: 142
+  Total EBS Capacity: 28.4 TiB
+  EBS IOPS Consumed (avg): 42,000 / 180,000 provisioned (23.3%)
+  EBS Throughput (avg): 2.1 GiB/s
+  EBS Volume Types:
+    gp3: 118 volumes (22.1 TiB)
+    io2: 14 volumes (4.8 TiB, database workloads)
+    st1: 10 volumes (1.5 TiB, log storage)
+  Persistent Volume Claims: 89
+  PV Utilization Distribution:
+    <50%: 12 PVCs (mostly new provisions)
+    50-70%: 38 PVCs
+    70-80%: 23 PVCs
+    80-90%: 14 PVCs (monitored, alert threshold at 85%)
+    >90%: 2 PVCs (action items filed)
+
+--- SECTION 5: DEPLOY MANIFEST — REDIS OPERATOR ---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-operator
+  namespace: redis-system
+  labels:
+    app.kubernetes.io/name: redis-operator
+    app.kubernetes.io/version: "2.4.1"
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/part-of: redis-infrastructure
+    helm.sh/chart: redis-operator-2.4.1
+  annotations:
+    deployment.kubernetes.io/revision: "7"
+    meta.helm.sh/release-name: redis-operator
+    meta.helm.sh/release-namespace: redis-system
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-operator
+        app.kubernetes.io/version: "2.4.1"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+        kubectl.kubernetes.io/restartedAt: "2025-09-02T14:30:00Z"
+    spec:
+      serviceAccountName: redis-operator
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis-operator
+          image: redis-operator/redis-operator:v2.4.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+            - containerPort: 9443
+              name: webhook
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            successThreshold: 1
+          env:
+            - name: WATCH_NAMESPACE
+              value: ""
+            - name: OPERATOR_NAME
+              value: "redis-operator"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: LEADER_ELECT
+              value: "true"
+            - name: METRICS_BIND_ADDRESS
+              value: ":8080"
+            - name: HEALTH_PROBE_BIND_ADDRESS
+              value: ":8081"
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: redis-operator-webhook-certs
+      nodeSelector:
+        node.kubernetes.io/pool: worker-general-v5
+      tolerations:
+        - key: "node.kubernetes.io/unreachable"
+          operator: "Exists"
+          effect: "NoExecute"
+          tolerationSeconds: 60
+      topologySpreadConstraints: []
+      terminationGracePeriodSeconds: 30
+
+--- SECTION 6: HTTP LOG EXCERPTS — INFRASTRUCTURE HEALTH ENDPOINTS ---
+
+Timestamp Range: 2025-09-08T06:00:00Z — 2025-09-08T18:00:00Z
+Source: ALB Access Logs and Internal Service Mesh Traces
+Filter: Infrastructure management endpoints
+
+[06:00:01Z] GET /healthz HTTP/1.1
+  Host: cluster-autoscaler.kube-system.svc.cluster.local:8085
+  User-Agent: kube-probe/1.29
+  X-Request-ID: ca-health-7f8a2b
+  Status: 200 OK
+  Response-Time: 1ms
+  Response-Body: {"status":"healthy","version":"1.28.2","lastActivity":"2025-09-08T05:59:47Z","scaleUpCount":2,"scaleDownCount":1}
+
+[06:00:15Z] GET /metrics HTTP/1.1
+  Host: cluster-autoscaler.kube-system.svc.cluster.local:8085
+  User-Agent: Prometheus/2.51.0
+  X-Request-ID: prom-scrape-ca-01
+  Status: 200 OK
+  Response-Time: 4ms
+  Content-Length: 124891
+  Response-Body: [truncated — 412 metric families exported]
+
+[06:15:33Z] GET /apis/autoscaling/v1/horizontalpodautoscalers HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1
+  User-Agent: cluster-autoscaler/v1.28.2
+  Authorization: Bearer [REDACTED]
+  X-Request-ID: api-list-hpa-9c2d41
+  Status: 200 OK
+  Response-Time: 14ms
+  Content-Length: 48291
+  Response-Body: [truncated — 23 HPA resources listed]
+
+[09:22:15Z] POST /api/v1/alerts HTTP/1.1
+  Host: alertmanager.monitoring.svc.cluster.local:9093
+  Content-Type: application/json
+  User-Agent: Grafana/10.4.1
+  X-Request-ID: alert-disk-4f8a2c
+  Status: 200 OK
+  Response-Time: 3ms
+  Request-Body: {
+    "labels": {
+      "alertname": "NodeDiskPressure",
+      "node": "ip-10-42-22-56",
+      "severity": "warning",
+      "pool": "worker-general-v5",
+      "instance": "ip-10-42-22-56:9100"
+    },
+    "annotations": {
+      "summary": "Disk usage on /var/lib/kubelet reached 87%",
+      "runbook_url": "https://runbooks.vantage.internal/disk-pressure"
+    },
+    "startsAt": "2025-09-08T09:22:00Z"
+  }
+
+[14:30:05Z] GET /api/v1/namespaces/redis-prod/pods?labelSelector=app.kubernetes.io/name=redis-prod-main HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1
+  User-Agent: redis-operator/v2.4.1
+  Authorization: Bearer [REDACTED]
+  Status: 200 OK
+  Response-Time: 8ms
+  Content-Length: 22847
+  Response-Body: [6 pods listed — all phase Running, all containers ready]
+
+[14:30:22Z] DELETE /api/v1/namespaces/redis-prod/pods/redis-prod-main-2-replica HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1
+  User-Agent: redis-operator/v2.4.1
+  X-Request-ID: redis-upgrade-step1
+  Status: 200 OK
+  Response-Time: 12ms
+  Response-Body: {"kind":"Pod","apiVersion":"v1","metadata":{"name":"redis-prod-main-2-replica","namespace":"redis-prod","deletionTimestamp":"2025-09-08T14:30:22Z","deletionGracePeriodSeconds":30}}
+
+[14:42:31Z] POST /api/v1/namespaces/redis-prod/pods/redis-prod-main-2-replica/exec HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1
+  User-Agent: redis-operator/v2.4.1
+  X-Request-ID: redis-failover-shard2
+  Status: 101 Switching Protocols
+  Upgrade: SPDY/3.1
+  Command: redis-cli CLUSTER FAILOVER TAKEOVER
+  Duration: 1.4 seconds
+  Exit Code: 0
+  Stdout: OK
+
+[15:02:00Z] POST /api/v1/namespaces/redis-prod/pods/redis-prod-main-0/exec HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1
+  User-Agent: manual/kubectl-1.29.6
+  X-Request-ID: redis-failover-test
+  Status: 101 Switching Protocols
+  Command: redis-cli CLUSTER FAILOVER
+  Duration: 1.8 seconds
+  Exit Code: 0
+
+--- SECTION 7: RUNBOOK EXCERPT — SPOT INSTANCE MANAGEMENT ---
+
+Runbook ID: SPOT-003
+Title: EC2 Spot Instance Interruption Handling
+Last Updated: 2025-09-08
+Author: drew.park
+Reviewer: tanya.okonkwo
+Service: worker-spot-v2 node pool
+Cluster: prod-us-east-1
+
+PURPOSE:
+  This runbook documents the procedures for handling EC2 spot instance interruptions
+  in the worker-spot-v2 node pool within the prod-us-east-1 cluster. It covers
+  automated handling via aws-node-termination-handler as well as manual intervention
+  procedures when automated handling fails.
+
+PREREQUISITES:
+  - aws-node-termination-handler v1.22.0 deployed as DaemonSet on all spot nodes
+  - PodDisruptionBudgets configured for all critical workloads
+  - Spot instance diversification: at least 3 instance types in launch template
+  - kubectl access to prod-us-east-1 cluster with appropriate RBAC permissions
+  - Access to AWS EC2 console or CLI for spot fleet management
+
+AUTOMATED HANDLING FLOW:
+
+  Step 1: Interruption Notice Received
+    The aws-node-termination-handler detects the interruption via the EC2 Instance
+    Metadata Service (IMDS) endpoint http://169.254.169.254/latest/meta-data/spot/
+    instance-action. Upon detection:
+    a. Node is cordoned (kubectl cordon) to prevent new pod scheduling
+    b. Node is tainted with aws-node-termination-handler/spot-itn:NoSchedule
+    c. All pods receive SIGTERM with 30-second grace period
+    d. Event published to Kubernetes event stream for audit logging
+    Time Budget: 120 seconds from notice to termination
+
+  Step 2: Pod Rescheduling
+    The kube-scheduler places evicted pods on available nodes. Priority order:
+    a. Same-AZ nodes in worker-general-v5 pool (preferred for latency)
+    b. Other-AZ nodes in worker-general-v5 pool
+    c. Other spot nodes in worker-spot-v2 pool (if available and not pending interruption)
+    d. Trigger cluster-autoscaler scale-up if insufficient capacity
+
+  Step 3: Verification
+    Confirm all pods rescheduled successfully:
+    ```
+    kubectl get pods --field-selector=status.phase!=Running,status.phase!=Succeeded -A
+    ```
+    Expected: 0 pending pods within 120 seconds of interruption
+
+  Step 4: Node Cleanup
+    The terminated node is automatically deregistered from the cluster.
+    cluster-autoscaler will provision a replacement spot node if demand requires it.
+    Verify node removal: `kubectl get nodes | grep <node-name>` should return empty
+
+MANUAL INTERVENTION PROCEDURE:
+  If automated handling fails (e.g., termination handler pod is unhealthy):
+  1. Immediately cordon the node: `kubectl cordon <node-name>`
+  2. Drain with PDB respect: `kubectl drain <node-name> --delete-emptydir-data --ignore-daemonsets`
+  3. Monitor pod rescheduling: `kubectl get pods -A -o wide --field-selector=spec.nodeName=<node-name>`
+  4. Escalate if pods remain unschedulable after 5 minutes
+
+METRICS TO MONITOR:
+  - kube_pod_status_phase{phase="Pending"} — should return to 0 within 2 minutes
+  - aws_spot_interruption_total — counter of interruption events (Prometheus)
+  - pod_rescheduling_duration_seconds — histogram, target p99 < 120s
+  - node_termination_handler_actions_total — counter by action type
+  - cluster_autoscaler_unschedulable_pods_count — should resolve quickly after interruption
+
+RECENT INCIDENT REFERENCE:
+  2025-09-08T05:31 — Spot interruption on ip-10-42-8-141
+  Instance Type: m6i.2xlarge
+  Availability Zone: us-east-1c
+  Pods Affected: 4
+  Rescheduling Duration: 47 seconds
+  Customer Impact: None
+  SLA Met: Yes (target: 120 seconds)
+
+HISTORICAL METRICS (past 30 days):
+  Total Spot Interruptions: 7
+  Average Rescheduling Duration: 38 seconds
+  Longest Rescheduling Duration: 84 seconds
+  Customer-Impacting Interruptions: 0
+  SLA Compliance: 100%
+
+--- SECTION 8: NODE POOL DETAILED STATUS REPORT ---
+
+Report Generated: 2025-09-08T18:00:00Z
+Reporting Period: 2025-09-08T00:00:00Z — 2025-09-08T18:00:00Z
+
+WORKER-GENERAL-V5 NODE INVENTORY:
+
+  Node: ip-10-42-17-201
+    AZ: us-east-1a
+    Instance ID: i-0a1b2c3d4e5f6789
+    Launch Time: 2025-08-12T03:22:00Z
+    Uptime: 27 days 14 hours
+    Kubelet Version: v1.29.6
+    OS: Amazon Linux 2023.5
+    CPU Usage (18h avg): 72%
+    Memory Usage (18h avg): 61%
+    Pods Running: 18
+    Pods Allocatable: 234
+    Disk Usage: 62%
+    Network In: 84 GB
+    Network Out: 62 GB
+    Conditions: Ready=True, MemoryPressure=False, DiskPressure=False
+
+  Node: ip-10-42-17-203
+    AZ: us-east-1a
+    Instance ID: i-0b2c3d4e5f6a7890
+    Launch Time: 2025-08-12T03:22:00Z
+    Uptime: 27 days 14 hours
+    CPU Usage (18h avg): 68%
+    Memory Usage (18h avg): 58%
+    Pods Running: 16
+    Disk Usage: 59%
+    Network In: 71 GB
+    Network Out: 55 GB
+    Conditions: Ready=True
+
+  Node: ip-10-42-18-105
+    AZ: us-east-1b
+    Instance ID: i-0c3d4e5f6a7b8901
+    Launch Time: 2025-08-12T03:25:00Z
+    Uptime: 27 days 14 hours
+    CPU Usage (18h avg): 74%
+    Memory Usage (18h avg): 63%
+    Pods Running: 19
+    Disk Usage: 64%
+    Network In: 92 GB
+    Network Out: 68 GB
+    Conditions: Ready=True
+
+  Node: ip-10-42-18-107
+    AZ: us-east-1b
+    Instance ID: i-0d4e5f6a7b8c9012
+    Launch Time: 2025-08-15T14:10:00Z
+    Uptime: 24 days 3 hours
+    CPU Usage (18h avg): 65%
+    Memory Usage (18h avg): 55%
+    Pods Running: 14
+    Disk Usage: 57%
+    Network In: 66 GB
+    Network Out: 48 GB
+    Conditions: Ready=True
+
+  Node: ip-10-42-19-44
+    AZ: us-east-1c
+    Instance ID: i-0e5f6a7b8c9d0123
+    Launch Time: 2025-08-12T03:28:00Z
+    Uptime: 27 days 14 hours
+    CPU Usage (18h avg): 71%
+    Memory Usage (18h avg): 60%
+    Pods Running: 17
+    Disk Usage: 61%
+    Network In: 78 GB
+    Network Out: 59 GB
+    Conditions: Ready=True
+
+  Node: ip-10-42-19-46
+    AZ: us-east-1c
+    Instance ID: i-0f6a7b8c9d0e1234
+    Launch Time: 2025-08-12T03:28:00Z
+    Uptime: 27 days 14 hours
+    CPU Usage (18h avg): 69%
+    Memory Usage (18h avg): 57%
+    Pods Running: 15
+    Disk Usage: 58%
+    Network In: 72 GB
+    Network Out: 54 GB
+    Conditions: Ready=True
+
+  [Remaining 12 nodes in pool omitted for brevity — all healthy, Ready=True]
+
+  Pool Summary:
+    Total Nodes: 18
+    Healthy: 18
+    Unhealthy: 0
+    Average CPU Usage: 68%
+    Average Memory Usage: 54%
+    Average Disk Usage: 64%
+    Nodes Added (24h): 2 (scale-up event at 05:48)
+    Nodes Removed (24h): 1 (cordon/drain at 05:52, replaced at 06:02)
+
+WORKER-MEMORY-V3 NODE INVENTORY:
+
+  Node: ip-10-42-20-101
+    AZ: us-east-1a
+    Instance ID: i-0a7b8c9d0e1f2345
+    Instance Type: r6i.2xlarge
+    CPU Usage (18h avg): 42%
+    Memory Usage (18h avg): 78%
+    Pods Running: 6
+    Top Memory Consumers on Node:
+      - analytics-aggregator-0: 7.8 GiB / 8 GiB limit
+      - redis-exporter: 128 MiB / 256 MiB limit
+      - fluent-bit: 96 MiB / 128 MiB limit
+
+  Node: ip-10-42-20-103
+    AZ: us-east-1a
+    Instance Type: r6i.2xlarge
+    CPU Usage (18h avg): 38%
+    Memory Usage (18h avg): 72%
+    Pods Running: 5
+
+  Node: ip-10-42-21-88
+    AZ: us-east-1b
+    Instance Type: r6i.2xlarge
+    CPU Usage (18h avg): 45%
+    Memory Usage (18h avg): 81%
+    Pods Running: 7
+
+  Node: ip-10-42-21-90
+    AZ: us-east-1b
+    Instance Type: r6i.2xlarge
+    CPU Usage (18h avg): 40%
+    Memory Usage (18h avg): 74%
+    Pods Running: 5
+
+  Node: ip-10-42-22-54
+    AZ: us-east-1c
+    Instance Type: r6i.2xlarge
+    CPU Usage (18h avg): 44%
+    Memory Usage (18h avg): 76%
+    Pods Running: 6
+
+  Node: ip-10-42-22-56
+    AZ: us-east-1c
+    Instance Type: r6i.2xlarge
+    CPU Usage (18h avg): 43%
+    Memory Usage (18h avg): 75%
+    Pods Running: 6
+    Note: NodeDiskPressure alert fired at 09:22 UTC, auto-resolved at 09:41 UTC
+
+  Node: ip-10-42-22-58
+    AZ: us-east-1c
+    Instance Type: r6i.2xlarge
+    CPU Usage (18h avg): 41%
+    Memory Usage (18h avg): 73%
+    Pods Running: 5
+
+  Pool Summary:
+    Total Nodes: 7
+    Healthy: 7
+    Average CPU Usage: 42%
+    Average Memory Usage: 76%
+    Scaling Events (24h): 0
+
+WORKER-SPOT-V2 NODE INVENTORY:
+
+  Active Nodes: 11
+  Instance Types in Use: m6i.2xlarge (8), m5.2xlarge (2), m5a.2xlarge (1)
+  Spot Price Average (24h): $0.1247/hr (on-demand: $0.384/hr, 68% savings)
+  Interruptions (24h): 1 (ip-10-42-8-141 at 05:31 UTC)
+  Interruption Rate (30-day): 2.1%
+  Pool Summary:
+    Total Nodes: 11
+    Healthy: 11
+    Average CPU Usage: 58%
+    Average Memory Usage: 44%
+
+--- SECTION 9: CHANGE MANAGEMENT LOG ---
+
+Change Record: CHG-2025-09-08-001
+  Title: Redis Cluster Rolling Upgrade 7.2.4 to 7.2.5
+  Type: Standard Change (pre-approved)
+  Risk Level: Low
+  CAB Approval: Pre-approved per Standard Change Template SC-042
+  Implementer: drew.park
+  Start Time: 2025-09-08T14:30:00Z
+  End Time: 2025-09-08T15:02:00Z
+  Duration: 32 minutes
+  Result: Successful
+  Customer Impact: None
+  Rollback Required: No
+  Post-Implementation Review: Scheduled 2025-09-10
+
+Change Record: CHG-2025-09-08-002
+  Title: Cluster Autoscaler Scale-Up for Pending Pod Backlog
+  Type: Automated Change
+  Risk Level: Low
+  Trigger: 14 unschedulable pods detected
+  Start Time: 2025-09-08T05:48:33Z
+  End Time: 2025-09-08T05:50:57Z
+  Duration: 2 minutes 24 seconds
+  Result: Successful — 2 nodes added, all pods scheduled
+
+Change Record: CHG-2025-09-08-003
+  Title: Node Cordon/Drain for Kernel Security Patch
+  Type: Standard Change
+  Risk Level: Low
+  Node: ip-10-42-17-209
+  Start Time: 2025-09-08T05:52:10Z
+  End Time: 2025-09-08T06:02:44Z
+  Duration: 10 minutes 34 seconds
+  Result: Successful — node replaced with ip-10-42-19-88
+
+--- SECTION 10: MONITORING DASHBOARD ANNOTATIONS ---
+
+Dashboard: Cluster Overview — prod-us-east-1
+Annotations Added (2025-09-08):
+
+  [05:31:12Z] "Spot interruption: ip-10-42-8-141 (worker-spot-v2)"
+    Tags: spot, interruption, automated
+    Color: orange
+
+  [05:48:33Z] "Autoscaler scale-up: worker-general-v5 16→18 nodes"
+    Tags: autoscaler, scale-up
+    Color: blue
+
+  [05:52:10Z] "Node drain: ip-10-42-17-209 (kernel patch)"
+    Tags: maintenance, drain
+    Color: gray
+
+  [09:22:14Z] "Alert: NodeDiskPressure on ip-10-42-22-56 (87%)"
+    Tags: alert, disk, warning
+    Color: yellow
+
+  [09:41:02Z] "Resolved: NodeDiskPressure on ip-10-42-22-56 (71%)"
+    Tags: alert, resolved
+    Color: green
+
+  [14:30:00Z] "Redis upgrade start: 7.2.4→7.2.5 on redis-prod-main"
+    Tags: upgrade, redis, change
+    Color: blue
+
+  [15:02:00Z] "Redis upgrade complete: all shards on 7.2.5, validation passed"
+    Tags: upgrade, redis, complete
+    Color: green
+
+Dashboard: Redis Cluster — redis-prod-main
+Annotations Added (2025-09-08):
+
+  [14:15:00Z] "Pre-upgrade backup: RDB snapshot 14.2 GB to S3"
+    Tags: backup, pre-upgrade
+
+  [14:30:22Z] "Replica upgrade phase start"
+    Tags: upgrade, replica
+
+  [14:42:30Z] "Primary failover phase start"
+    Tags: upgrade, failover
+
+  [15:02:00Z] "Post-upgrade failover validation test — PASSED"
+    Tags: validation, complete
+
+--- SECTION 11: REDIS CLUSTER PERFORMANCE BASELINE ---
+
+Post-Upgrade Performance Snapshot (15:30 UTC — 30 minutes after upgrade completion):
+
+  Shard-0 Metrics:
+    Commands Processed/sec: 18,420
+    Read Commands/sec: 14,200
+    Write Commands/sec: 4,220
+    Connected Clients: 2,841
+    Blocked Clients: 0
+    Used Memory: 4.72 GB
+    Used Memory RSS: 5.10 GB
+    Memory Fragmentation Ratio: 1.08
+    Total Connections Received (since restart): 4,218
+    Total Commands Processed (since restart): 1,104,200
+    Instantaneous Input kbps: 2,840
+    Instantaneous Output kbps: 14,200
+    Keyspace Hits: 348,201
+    Keyspace Misses: 21,104
+    Hit Rate: 94.3%
+    Evicted Keys: 0
+    Expired Keys (last hour): 12,401
+    Slowlog Entries (last hour): 1 (12.4ms GET on large hash)
+    AOF Rewrite In Progress: No
+    AOF Last Write Status: OK
+    RDB Last Save Status: OK
+
+  Shard-1 Metrics:
+    Commands Processed/sec: 19,140
+    Connected Clients: 2,798
+    Used Memory: 4.91 GB
+    Memory Fragmentation Ratio: 1.07
+    Hit Rate: 93.9%
+    Evicted Keys: 0
+    Slowlog Entries (last hour): 0
+
+  Shard-2 Metrics:
+    Commands Processed/sec: 17,840
+    Connected Clients: 2,822
+    Used Memory: 4.53 GB
+    Memory Fragmentation Ratio: 1.09
+    Hit Rate: 94.5%
+    Evicted Keys: 0
+    Slowlog Entries (last hour): 2 (both < 15ms)
+
+  Cluster-Wide Aggregates:
+    Total Commands/sec: 55,400
+    Total Connected Clients: 8,461
+    Total Memory Used: 14.16 GB / 42 GB (33.7% of cluster maxmemory)
+    Total Keyspace Size: 14,523,450 keys
+    Total Expirations/hour: 38,204
+    Network Bandwidth (cluster bus): 12.4 Mbps inter-node gossip
+    Cluster Bus Latency p50: 0.2ms
+    Cluster Bus Latency p99: 1.4ms
+
+--- SECTION 12: WEEKLY CAPACITY PLANNING METRICS ---
+
+Report: Weekly Infrastructure Capacity Review
+Week: 2025-09-02 through 2025-09-08
+Prepared For: Platform Engineering Weekly Standup
+
+  Compute Headroom:
+    CPU: 87.4 vCPU available (28% of capacity)
+    Memory: 396 GiB available (32.7% of capacity)
+    Assessment: Adequate for current growth. No immediate scaling needed.
+
+  Cost Efficiency:
+    Spot Savings (week): $1,840 (11 spot nodes vs on-demand pricing)
+    Reserved Instance Utilization: 72%
+    Unused Reservations: 3 (flagged for review in November RI renewal)
+
+  Growth Projections:
+    Projected Node Count (end of September): 38 (current: 36)
+    Projected Monthly EC2 Cost: $13,200 (current: $12,800)
+    Primary Growth Driver: analytics-aggregator workload expansion
+
+  Storage Capacity:
+    EBS Provisioned IOPS Utilization: 23.3% average, 48% peak
+    EBS GP3 Throughput: 2.1 GiB/s avg, 3.8 GiB/s peak
+    S3 Storage (total platform): 14.8 TiB across 42 buckets
+    S3 Request Rate: 2.4M GET/day, 180K PUT/day
+    EBS Snapshots: 284 active snapshots, 8.2 TiB total, $410/month
+
+  Network Capacity:
+    Transit Gateway Throughput: 2.8 Gbps avg, 6.1 Gbps peak
+    NAT Gateway Data Processed: 4.2 TB/week
+    NAT Gateway Cost: $420/week
+    VPC Endpoints Active: 8 (S3, DynamoDB, ECR, STS, SSM, Secrets Manager, KMS, CloudWatch)
+    VPC Endpoint Data Processed: 1.8 TB/week (saves ~$180/week vs NAT)
+
+  Reliability Metrics (weekly):
+    SLO: 99.95% availability for customer-facing services
+    Actual: 99.98% (4 minutes 12 seconds unplanned downtime)
+    Error Budget Remaining: 87%
+    P1 Incidents: 0
+    P2 Incidents: 0
+    P3 Incidents: 0
+    Planned Maintenance Windows: 2 (Redis upgrade, kernel patches)
+
+  Action Items from Previous Week:
+    - [DONE] Update spot instance diversification to include m5a family
+    - [DONE] Increase worker-general-v5 max from 35 to 40
+    - [OPEN] Evaluate Graviton instances (c7g) for catalog-search workload
+    - [OPEN] Right-size recommendation-engine pods (overprovisioned by ~30%)
+    - [OPEN] Investigate cross-AZ data transfer costs ($320/week, up 12% MoM)
+    - [NEW] Review image GC thresholds after ip-10-42-22-56 disk pressure event
+    - [NEW] Schedule Redis 7.2.5 upgrade for redis-prod-sessions cluster
+
+================================================================================
+END OF INFRASTRUCTURE OPERATIONS LOG — 2025-09-08
+================================================================================

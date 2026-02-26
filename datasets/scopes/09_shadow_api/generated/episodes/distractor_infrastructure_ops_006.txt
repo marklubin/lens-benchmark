@@ -1,0 +1,1181 @@
+================================================================================
+INFRASTRUCTURE OPERATIONS LOG — VANTAGE COMMERCE PLATFORM
+Date: 2025-10-09
+Cluster: prod-us-east-1
+Classification: Internal — Operations Team Only
+================================================================================
+
+--- SECTION 1: DEPLOY MANIFEST — POSTGRES OPERATOR AND FAILOVER DRILL ---
+
+Timestamp: 2025-10-09T03:00:00Z
+Service: postgres-operator
+Environment: production
+Operator: Zalando Postgres Operator v1.12.2
+Namespace: postgres-system
+
+POSTGRESQL CLUSTER CONFIGURATION:
+
+  Cluster Name: user-profile-db
+  Namespace: user-profile-prod
+  PostgreSQL Version: 16.4
+  Patroni Version: 3.3.2
+  DCS Backend: etcd-prod cluster (3 nodes)
+  WAL Archiving: WAL-G v3.0.0 to S3
+
+  Node Configuration:
+    Primary: user-profile-db-0
+      Role: Master
+      vCPU: 8
+      Memory: 64 GiB
+      Storage: 500 GiB gp3 (6000 IOPS, 250 MiB/s)
+      Pod IP: 10.42.6.201
+      Node: ip-10-42-21-88 (worker-memory-v3, us-east-1b)
+      Connections Active: 182
+      CPU Usage: 32%
+      Memory Usage: 48%
+
+    Replica 1: user-profile-db-1
+      Role: Sync Replica
+      vCPU: 8
+      Memory: 64 GiB
+      Storage: 500 GiB gp3
+      Pod IP: 10.42.5.142
+      Node: ip-10-42-20-101 (worker-memory-v3, us-east-1a)
+      Replication Mode: Synchronous
+      Replication Lag: 0.3ms
+      WAL Receiver Status: streaming
+      Received LSN: 2A/4B8C9D0E
+
+    Replica 2: user-profile-db-2
+      Role: Async Replica
+      vCPU: 8
+      Memory: 64 GiB
+      Storage: 500 GiB gp3
+      Pod IP: 10.42.7.88
+      Node: ip-10-42-22-54 (worker-memory-v3, us-east-1c)
+      Replication Mode: Asynchronous
+      Replication Lag: 12ms (cross-AZ)
+      WAL Receiver Status: streaming
+
+  Patroni Configuration:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql.parameters:
+      max_connections: 400
+      shared_buffers: 16GB
+      effective_cache_size: 48GB
+      work_mem: 64MB
+      maintenance_work_mem: 2GB
+      wal_buffers: 64MB
+      checkpoint_completion_target: 0.9
+      random_page_cost: 1.1
+      effective_io_concurrency: 200
+      min_wal_size: 2GB
+      max_wal_size: 8GB
+      max_worker_processes: 8
+      max_parallel_workers_per_gather: 4
+      max_parallel_workers: 8
+      max_parallel_maintenance_workers: 4
+      wal_level: replica
+      max_wal_senders: 10
+      max_replication_slots: 10
+      hot_standby: on
+      synchronous_commit: on
+      synchronous_standby_names: 'user-profile-db-1'
+
+  etcd-prod Cluster:
+    Members: 3
+    Leader: etcd-prod-0 (us-east-1a)
+    Cluster Health: Healthy
+    DB Size: 4.8 GiB (alarm threshold 8 GiB)
+    Keys: 142,000
+    Compaction Schedule: Nightly at 20:30 UTC
+
+DATABASE METRICS:
+
+  Database Size: 112 GB
+  Table Count: 24
+  Index Count: 68
+  Largest Table: user_profiles — 480,000,000 rows, 82 GB
+  Total Rows: 624,000,000
+  WAL Generation Rate: 1.8 GB/hr
+  Checkpoint Frequency: Every 5 minutes
+  Buffer Cache Hit Rate: 99.4%
+  Index Hit Rate: 99.8%
+  Dead Tuple Ratio: 2.1% (autovacuum active)
+  Transaction Rate: 4,200 TPS (read+write)
+  Read/Write Ratio: 85/15
+
+  Connection Pool (PgBouncer):
+    Active Connections: 340
+    Direct Connections (admin/monitoring): 28
+    Total Server Connections: 42
+    Pool Mode: transaction
+    Max Client Connections: 500
+    Default Pool Size: 40
+    Reserve Pool Size: 10
+    Client Wait Time (avg): 0ms
+    Server Round Trip (avg): 0.4ms
+
+FAILOVER DRILL EXECUTION:
+
+  Drill Type: Automated failover test (scheduled quarterly)
+  Start Time: 2025-10-09T03:00:00Z
+  Maintenance Window: Thursday 03:00-04:00 UTC
+
+  [03:00:00Z] Drill initiated — killing primary pod user-profile-db-0
+    Method: kubectl delete pod user-profile-db-0 --grace-period=0
+    Purpose: Simulate sudden primary failure (no graceful shutdown)
+
+  [03:00:02Z] Patroni detected primary absence
+    etcd key /service/user-profile-db/leader: TTL expired
+    Patroni on user-profile-db-1: Detected leader key gone
+
+  [03:00:04Z] Patroni promotion started on user-profile-db-1
+    Promotion Method: pg_ctl promote
+    Synchronous replication guarantee: 0 bytes data loss (sync replica was caught up)
+    WAL position at promotion: 2A/4B8C9D0E (matches last received from primary)
+
+  [03:00:04.2Z] Promotion completed
+    Promotion Duration: 4.2 seconds (from pod kill to new primary accepting writes)
+    New Primary: user-profile-db-1 (us-east-1a)
+    New Role Assignment:
+      user-profile-db-1: Master (promoted)
+      user-profile-db-2: Async Replica (replication source updated to new master)
+      user-profile-db-0: Pending (pod restarting, will join as sync replica)
+
+  [03:00:05Z] PgBouncer failover
+    PgBouncer detected primary endpoint change via DNS/endpoint update
+    Old primary endpoint removed: 10.42.6.201:5432
+    New primary endpoint added: 10.42.5.142:5432
+    PgBouncer reconnection time: 0.8 seconds
+    In-flight transactions: 12 (all retried by application, no errors logged)
+    Client reconnection: Transparent (PgBouncer handles reconnection)
+
+  [03:00:08Z] Application health check
+    user-profile-service: All 8 replicas healthy, responding to requests
+    Write operations: Resuming on new primary
+    Read operations: Uninterrupted (replica 2 continued serving reads)
+    HTTP error rate: 0.00% (zero errors in application logs)
+
+  [03:00:42Z] Old primary pod restarted
+    user-profile-db-0: Pod recreated by StatefulSet controller
+    Role: Replica (joining cluster as new sync replica)
+    Initial Recovery: WAL replay from 2A/4B8C9D0E (minimal, only ~2 seconds of WAL)
+    Recovery Duration: 12 seconds
+    Streaming Replication Established: 03:00:54Z
+    Sync Replica Status: Fully caught up at 03:00:56Z
+
+  [03:01:00Z] Drill complete — cluster topology stable
+    Primary: user-profile-db-1 (us-east-1a) — promoted
+    Sync Replica: user-profile-db-0 (us-east-1b) — recovered
+    Async Replica: user-profile-db-2 (us-east-1c) — continuous
+
+DRILL RESULTS:
+
+  Failover Duration: 4.2 seconds (target: < 10 seconds)
+  Data Loss: 0 bytes (synchronous replication)
+  PgBouncer Reconnection: 0.8 seconds
+  Application Errors: 0
+  Total Cluster Recovery: 56 seconds
+  Drill Status: PASSED
+
+--- SECTION 2: PG_REPACK MAINTENANCE ---
+
+Timestamp: 2025-10-09T03:30:00Z
+Service: user-profile-db
+Operation: Table Maintenance — pg_repack
+Target Table: user_profiles
+Executed By: jenna.liu (scheduled maintenance)
+
+TABLE STATE BEFORE REPACK:
+
+  Table: user_profiles
+  Schema: public
+  Rows: 480,000,000
+  Table Size (on disk): 112 GB (82 GB data + 30 GB TOAST)
+  Indexes: 12
+  Total Index Size: 48 GB
+  Dead Tuples: 4,200,000 (0.88%)
+  Bloat Estimate: 8.4 GB (7.5%)
+  Last Autovacuum: 2025-10-09T02:14:00Z
+  Last Autoanalyze: 2025-10-09T02:18:00Z
+  Fillfactor: 90
+
+  Table Columns:
+    id: uuid (primary key)
+    email: varchar(255), unique index
+    username: varchar(100), unique index
+    first_name: varchar(100)
+    last_name: varchar(100)
+    phone: varchar(20)
+    address_json: jsonb
+    preferences_json: jsonb
+    created_at: timestamptz, btree index
+    updated_at: timestamptz, btree index
+    last_login_at: timestamptz
+    subscription_tier: varchar(20), btree index
+    account_status: varchar(20), btree index
+    metadata: hstore
+    search_vector: tsvector, GIN index
+
+PG_REPACK EXECUTION:
+
+  [03:30:00Z] pg_repack started
+    Command: pg_repack --dbname=userprofiles --table=public.user_profiles --jobs=4 --no-superuser-check
+    Method: Online rebuild — creates new table, swaps atomically
+    Lock Level: ACCESS EXCLUSIVE (only at final swap, milliseconds)
+    Impact: Minimal — table remains fully readable and writable during repack
+
+  [03:30:05Z] Phase 1: Create log trigger
+    Trigger installed to capture changes during repack
+    Changes captured: INSERT, UPDATE, DELETE
+
+  [03:30:10Z] Phase 2: Create new table structure
+    New table: repack.table_user_profiles_nnnn
+    Indexes being rebuilt: 12
+
+  [03:30:15Z] Phase 3: Copy data to new table
+    Rows copied: 480,000,000
+    Copy rate: ~10M rows/minute
+    Progress:
+      03:35: 50M rows (10%)
+      03:40: 100M rows (21%)
+      03:45: 150M rows (31%)
+      03:50: 200M rows (42%)
+      03:55: 250M rows (52%)
+      04:00: 300M rows (63%)
+      04:05: 350M rows (73%)
+      04:10: 400M rows (83%)
+      04:14: 450M rows (94%)
+      04:17: 480M rows (100%) — copy complete
+
+  [04:17:00Z] Phase 4: Apply captured changes
+    Changes accumulated during copy: 142,000 rows (INSERT: 28K, UPDATE: 108K, DELETE: 6K)
+    Apply duration: 18 seconds
+
+  [04:17:18Z] Phase 5: Swap tables (atomic)
+    ACCESS EXCLUSIVE lock acquired: 4ms
+    Table rename: old -> repack.old, new -> user_profiles
+    Lock released: 4ms total lock hold time
+    Zero visible downtime
+
+  [04:17:22Z] Phase 6: Cleanup
+    Old table dropped: 112 GB freed (will be reclaimed by filesystem)
+    Triggers removed
+
+  Repack Duration: 47 minutes 22 seconds
+
+TABLE STATE AFTER REPACK:
+
+  Table Size: 103.6 GB (reduced from 112 GB)
+  Bloat: 0 GB (0%, freshly packed)
+  Space Reclaimed: 8.4 GB
+  Dead Tuples: 0
+  Index Sizes (unchanged structure, rebuilt):
+    idx_user_profiles_pkey: 14.2 GB
+    idx_user_profiles_email: 8.4 GB
+    idx_user_profiles_username: 6.8 GB
+    idx_user_profiles_created_at: 4.2 GB
+    idx_user_profiles_updated_at: 4.1 GB
+    idx_user_profiles_subscription_tier: 2.8 GB
+    idx_user_profiles_account_status: 2.4 GB
+    idx_user_profiles_search_vector: 3.8 GB (GIN)
+    [4 additional indexes]: 1.3 GB combined
+
+PERFORMANCE COMPARISON (post-repack):
+
+  Sequential Scan Times (analytics query set):
+    Before Repack: 14 seconds (average over 10 runs)
+    After Repack: 11 seconds (average over 10 runs)
+    Improvement: 21.4%
+
+  Index Scan Times (random access):
+    Before: 0.8ms average
+    After: 0.7ms average
+    Improvement: 12.5%
+
+  Buffer Cache Utilization:
+    Before: 99.2% hit rate
+    After: 99.5% hit rate (denser pages = better cache efficiency)
+
+--- SLACK TRANSCRIPT: #database-ops ---
+
+Timestamp Range: 2025-10-09T03:00:00Z — 2025-10-09T04:30:00Z
+Channel: #database-ops
+
+[03:00:05] @patroni-bot: FAILOVER: user-profile-db — primary changed from user-profile-db-0 to user-profile-db-1
+[03:00:10] @carlos.mendez: that's the scheduled drill. Watching recovery
+[03:00:30] @carlos.mendez: Failover drill on user-profile-db completed. 4.2s promotion time, PgBouncer reconnected in under 1 second. Zero errors in application logs.
+[03:01:10] @carlos.mendez: old primary restarted as sync replica, fully caught up in 56 seconds. Cluster healthy
+[03:01:30] @jenna.liu: nice. I'll start the pg_repack on user_profiles in 30 minutes
+[03:30:05] @jenna.liu: starting pg_repack on user_profiles. 480M rows, ~82 GB data. Should take about 45 minutes
+[03:30:30] @carlos.mendez: connection pool looking stable? PgBouncer not getting backed up?
+[03:31:00] @jenna.liu: connections fine. pg_repack uses a trigger-based approach, not a lock. Table remains fully accessible. PgBouncer active connections at 182, no waiting
+[03:55:00] @jenna.liu: 50% done. 250M rows copied. Capture trigger has logged 72K changes so far
+[04:17:30] @jenna.liu: pg_repack on user_profiles done. 8.4 GB freed. Sequential scan times improved from 14s to 11s on the analytics query set.
+[04:18:00] @carlos.mendez: excellent. What's the new bloat percentage?
+[04:18:30] @jenna.liu: 0% — freshly packed table. It'll gradually accumulate again but we schedule repack quarterly. Should stay under 10% between runs
+[04:19:00] @carlos.mendez: should we schedule user_sessions next? That table has been growing fast
+[04:19:30] @jenna.liu: already on the schedule for next week. 120M rows, about 28 GB. Smaller job, should be done in 15 minutes
+[04:20:00] @carlos.mendez: sounds good. Anything else from the failover drill we need to document?
+[04:20:30] @jenna.liu: nope, clean drill. 4.2 seconds promotion, zero data loss, zero errors. PgBouncer reconnection under 1 second. I'll update the failover runbook with today's metrics
+
+--- SECTION 3: SLACK TRANSCRIPT — #platform-infra (TERRAFORM AND COST REVIEW) ---
+
+Timestamp Range: 2025-10-09T14:15:00Z — 2025-10-09T15:30:00Z
+Channel: #platform-infra
+
+[14:15:00] @marcus.wright: September AWS bill landed at $127,400. Up 6% from August. Main drivers: EC2 +$4,200 (added 2 nodes for K8s upgrade headroom), data transfer +$1,800 (CDN traffic spike during fall sale).
+[14:15:30] @drew.park: the K8s headroom nodes are temporary — scaling back down this week. Should save ~$2,100/month.
+[14:16:00] @nina.patel: also found 4 orphaned EBS volumes from old staging. Deleting after snapshot. Another $200/month saved.
+[14:16:30] @marcus.wright: nice. Those 4 volumes total 2 TB. I'll snapshot them to S3 Standard-IA first, then delete
+[14:17:00] @drew.park: what's the cost center breakdown?
+[14:17:30] @marcus.wright: EC2 $68,200 (54%), RDS $22,400 (18%), S3 $12,100 (10%), data transfer $9,800 (8%), other $14,900 (12%). The "other" bucket is CloudFront, Route 53, Lambda, KMS, Secrets Manager, CloudWatch
+[14:18:00] @nina.patel: RI coverage still at 72%?
+[14:18:30] @marcus.wright: yep. 72% of steady-state EC2 is covered by RIs. We have 3 RI renewals due in November — 2x r6g.2xlarge for database workloads and 1x m6i.4xlarge for general compute
+[14:19:00] @drew.park: should we look at Savings Plans instead of RIs for the renewal?
+[14:19:30] @marcus.wright: good idea. Compute Savings Plans would give us more flexibility to switch instance types. I'll run the cost analysis. Typically 3% less savings than RIs but much more flexibility
+[14:20:00] @nina.patel: what about the 4 orphaned EBS volumes? When were they detached?
+[14:20:30] @marcus.wright: detached 2025-08-15 when we decommissioned staging-v1. Nobody cleaned up the volumes. They're all gp3, 500 GB each
+[14:21:00] @drew.park: let's add a cleanup automation — Lambda function triggered by CloudWatch Events when EBS volumes are detached for more than 7 days
+[14:21:30] @marcus.wright: on it. I'll use the existing AWS Config rule for unattached volumes and add an auto-remediation via Systems Manager
+[14:22:00] @ravi.shankar: terraform state — how many resources are we managing now?
+[14:22:30] @marcus.wright: 1,842 managed resources in vantage-infra-prod workspace. Zero drift detected in nightly reconciliation. Last drift event was 3 weeks ago — someone manually changed an SG rule, Config caught it, we imported the change
+[14:23:00] @drew.park: good. Zero drift is the goal. The Config Rule for SGs from last week should prevent manual changes going forward
+[14:23:30] @tanya.okonkwo: question on the data transfer cost — $9,800 seems high. What's driving that?
+[14:24:00] @marcus.wright: breakdown: CDN egress $3,860 (48 TB), NAT gateway $1,680 (4.2 TB/week * 4 weeks), cross-AZ transfer $1,400 (3.5 TB), VPN $480, inter-region replication $380, other $2,000
+[14:24:30] @tanya.okonkwo: the cross-AZ is the one we can optimize. VPC endpoints for more services?
+[14:25:00] @marcus.wright: we already have 8 VPC endpoints. Main cross-AZ traffic is pod-to-pod within the K8s cluster. Hard to optimize without changing pod placement policies
+[14:25:30] @drew.park: topology-aware routing would help. Istio can prefer same-zone backends. I'll evaluate it next sprint
+
+--- SECTION 4: TERRAFORM STATE AND DRIFT REPORT ---
+
+Timestamp: 2025-10-09T14:00:00Z
+Workspace: vantage-infra-prod (Terraform Cloud)
+Terraform Version: 1.8.4
+Provider Versions:
+  hashicorp/aws: 5.62.0
+  hashicorp/kubernetes: 2.31.0
+  hashicorp/helm: 2.14.0
+  hashicorp/random: 3.6.2
+  hashicorp/null: 3.2.2
+
+STATE SUMMARY:
+
+  Total Managed Resources: 1,842
+  Resource Types (top 15 by count):
+    1. aws_security_group_rule: 192
+    2. kubernetes_config_map: 148
+    3. kubernetes_service: 142
+    4. aws_route53_record: 124
+    5. kubernetes_deployment: 48
+    6. aws_iam_role_policy_attachment: 42
+    7. aws_ebs_volume: 38
+    8. kubernetes_namespace: 42
+    9. aws_subnet: 24
+    10. kubernetes_stateful_set: 12
+    11. aws_nat_gateway: 3
+    12. aws_eks_node_group: 3
+    13. aws_rds_cluster: 2
+    14. aws_elasticache_replication_group: 2
+    15. aws_msk_cluster: 1
+
+NIGHTLY DRIFT DETECTION:
+
+  Schedule: Daily at 00:00 UTC
+  Method: terraform plan -detailed-exitcode
+  Last Run: 2025-10-09T00:00:00Z
+  Result: Exit code 0 (no changes detected)
+  Duration: 4 minutes 12 seconds
+  API Calls: 2,841
+
+  Drift History (past 30 days):
+    2025-09-18: 1 drift detected (SG rule manual change, imported)
+    2025-09-12: 0 drift
+    2025-09-05: 0 drift
+    2025-08-29: 0 drift
+    2025-08-22: 1 drift detected (Route53 record TTL manual change, corrected)
+    [Earlier weeks: 0 drift each]
+
+  Total Drift Events (past 90 days): 3
+  Drift Resolution Time (avg): 2 hours
+
+--- SECTION 5: HTTP LOG EXCERPTS — SHIPPING SERVICE ---
+
+Timestamp Range: 2025-10-09T11:00:00Z — 2025-10-09T11:30:00Z
+Service: shipping-service v2.6.3
+Namespace: logistics-prod
+Replicas: 4
+Load Balancer: ALB alb-logistics-prod
+
+[11:00:14Z] POST /api/v2/shipments/rate-quote HTTP/1.1
+  Host: api.vantagecommerce.com
+  User-Agent: VantageApp/4.12.0 (iOS)
+  Content-Type: application/json
+  Authorization: Bearer [REDACTED]
+  X-Request-ID: ship-rq-8a2b3c
+  X-Forwarded-For: 73.162.44.128
+  Status: 200 OK
+  Response-Time: 340ms
+  Request-Size: 1.2 KB
+  Response-Size: 3.8 KB
+  Request-Body: {
+    "origin": {"zip": "10001", "country": "US"},
+    "destination": {"zip": "90210", "country": "US"},
+    "packages": [
+      {"weight_oz": 32, "dimensions": {"length": 12, "width": 8, "height": 6}},
+      {"weight_oz": 16, "dimensions": {"length": 8, "width": 6, "height": 4}}
+    ],
+    "service_types": ["ground", "express", "overnight"]
+  }
+  Response-Body: {
+    "quotes": [
+      {"carrier": "UPS", "service": "Ground", "rate": 12.45, "transit_days": 5, "delivery_date": "2025-10-14"},
+      {"carrier": "UPS", "service": "2nd Day Air", "rate": 28.90, "transit_days": 2, "delivery_date": "2025-10-11"},
+      {"carrier": "FedEx", "service": "Ground", "rate": 11.95, "transit_days": 5, "delivery_date": "2025-10-14"},
+      {"carrier": "FedEx", "service": "Express Saver", "rate": 24.50, "transit_days": 3, "delivery_date": "2025-10-12"},
+      {"carrier": "USPS", "service": "Priority Mail", "rate": 9.80, "transit_days": 3, "delivery_date": "2025-10-12"}
+    ],
+    "request_id": "ship-rq-8a2b3c",
+    "cached": false
+  }
+
+[11:02:44Z] GET /api/v2/shipments/VNT-2025-8847291/tracking HTTP/1.1
+  Host: api.vantagecommerce.com
+  User-Agent: VantageApp/4.12.0 (Android)
+  Authorization: Bearer [REDACTED]
+  X-Request-ID: ship-track-4d5e6f
+  X-Cache: HIT
+  Status: 200 OK
+  Response-Time: 45ms
+  Response-Size: 1.1 KB
+  Response-Body: {
+    "shipment_id": "VNT-2025-8847291",
+    "carrier": "UPS",
+    "tracking_number": "1Z999AA10123456784",
+    "status": "in_transit",
+    "estimated_delivery": "2025-10-11",
+    "events": [
+      {"timestamp": "2025-10-08T14:22:00Z", "location": "New York, NY", "status": "Picked up"},
+      {"timestamp": "2025-10-08T18:44:00Z", "location": "Newark, NJ", "status": "Departed facility"},
+      {"timestamp": "2025-10-09T06:12:00Z", "location": "Columbus, OH", "status": "In transit"}
+    ],
+    "cached": true,
+    "cache_ttl": 300
+  }
+
+[11:05:18Z] POST /api/v2/shipments/rate-quote HTTP/1.1
+  Host: api.vantagecommerce.com
+  User-Agent: VantageWeb/4.12.0
+  X-Request-ID: ship-rq-7g8h9i
+  Status: 200 OK
+  Response-Time: 520ms
+  Response-Body: {
+    "quotes": [
+      {"carrier": "FedEx", "service": "Home Delivery", "rate": 14.20, "transit_days": 4},
+      {"carrier": "UPS", "service": "Ground", "rate": 15.80, "transit_days": 3},
+      {"carrier": "USPS", "service": "Priority Mail", "rate": 11.40, "transit_days": 3}
+    ]
+  }
+
+[11:08:32Z] POST /api/v2/shipments/create HTTP/1.1
+  Host: api.vantagecommerce.com
+  User-Agent: order-processor/v3.8.2
+  Content-Type: application/json
+  X-Request-ID: ship-create-j1k2l3
+  Status: 201 Created
+  Response-Time: 1240ms
+  Request-Size: 2.4 KB
+  Response-Size: 1.8 KB
+  Note: Carrier API (FedEx) response time was 980ms of the total 1240ms
+
+SHIPPING SERVICE METRICS (24-hour):
+
+  Request Rate: 420 req/s
+  Error Rate: 0.12% (HTTP 5xx)
+  Error Breakdown:
+    502 Bad Gateway: 0.08% (carrier API timeouts)
+    500 Internal Server Error: 0.03% (application errors)
+    503 Service Unavailable: 0.01% (circuit breaker trips)
+  Latency:
+    p50: 180ms
+    p95: 680ms
+    p99: 1,240ms
+  Carrier API Call Breakdown:
+    UPS: 48% of requests, avg response 420ms
+    FedEx: 31% of requests, avg response 620ms
+    USPS: 21% of requests, avg response 280ms
+  Average Carrier Response Time: 620ms (drives the p95/p99 latency)
+  Cache Hit Rate: 34% (tracking endpoint only, rate quotes not cached)
+
+--- SECTION 6: COST OPTIMIZATION DETAILS ---
+
+Timestamp: 2025-10-09T14:30:00Z
+Source: AWS Cost Explorer / September 2025 Invoice
+
+SEPTEMBER 2025 COST BREAKDOWN:
+
+  Total Monthly Cost: $127,400
+
+  Category 1: EC2 Compute — $68,200 (53.5%)
+    On-Demand Instances: $19,040
+    Reserved Instances: $44,960 (72% coverage)
+    Spot Instances: $4,200 (11 instances, 68% savings vs on-demand)
+    EKS Control Plane: $73/cluster ($0.10/hr)
+    EBS Volumes: $4,200 (28.4 TiB gp3 + io2)
+      gp3: $2,340 (22.1 TiB at $0.08/GB-month)
+      io2: $1,440 (4.8 TiB + provisioned IOPS)
+      st1: $420 (1.5 TiB at $0.02/GB-month)
+
+  Category 2: RDS — $22,400 (17.6%)
+    Aurora PostgreSQL (orders): $14,200
+    RDS PostgreSQL (user-profiles via Zalando operator): included in EC2
+    ElastiCache (Redis): $6,800
+    RDS Backup Storage: $1,400
+
+  Category 3: S3 — $12,100 (9.5%)
+    Standard: $4,200 (8.4 TiB)
+    Standard-IA: $2,400 (9.6 TiB, backups)
+    Intelligent-Tiering: $1,800 (7.2 TiB, logs)
+    Glacier: $800 (32 TiB, archives)
+    S3 Requests: $1,200 (GET/PUT/LIST)
+    S3 Data Transfer: $1,700
+
+  Category 4: Data Transfer — $9,800 (7.7%)
+    CloudFront Egress: $3,860 (48.2 TB)
+    NAT Gateway Processing: $1,680
+    Cross-AZ Transfer: $1,400
+    VPN: $480
+    Inter-Region Replication: $380
+    Other: $2,000
+
+  Category 5: Other — $14,900 (11.7%)
+    CloudFront Distribution: $1,200
+    Route 53: $420 (4 hosted zones + queries)
+    Lambda: $280 (automation functions)
+    KMS: $180 (18 keys)
+    Secrets Manager: $240 (60 secrets)
+    CloudWatch: $3,800 (logs, metrics, alarms)
+    WAF: $1,200 (WebACL + rules)
+    Network Firewall: $2,400
+    ECR: $340
+    Systems Manager: $180
+    Config: $420
+    GuardDuty: $680
+    Other (misc): $3,460
+
+ORPHANED RESOURCE CLEANUP:
+
+  Found: 4 unattached EBS volumes
+    Volume 1: vol-0orphan1 — 500 GB gp3, detached 2025-08-15 — $40/month
+    Volume 2: vol-0orphan2 — 500 GB gp3, detached 2025-08-15 — $40/month
+    Volume 3: vol-0orphan3 — 500 GB gp3, detached 2025-08-15 — $40/month
+    Volume 4: vol-0orphan4 — 500 GB gp3, detached 2025-08-15 — $40/month
+    Total: 2 TB, $160/month (was listed as $200 in Slack — corrected after volume type review)
+
+  Action: Snapshot to S3 Standard-IA, then delete volumes
+  Snapshot Cost: ~$12/month (2 TB at $0.05/GB-month S3-IA, compressed)
+  Net Savings: $148/month
+
+RESERVED INSTANCE STATUS:
+
+  Active RIs:
+    1. r6g.2xlarge x2: Expiring 2025-11-14 (database workloads)
+    2. m6i.4xlarge x8: Expiring 2026-03-22 (general compute)
+    3. m6i.4xlarge x1: Expiring 2025-11-28 (general compute)
+    4. i3en.2xlarge x5: Expiring 2026-06-15 (Kafka brokers)
+
+  Upcoming Renewals:
+    November 2025: 2x r6g.2xlarge + 1x m6i.4xlarge
+    Evaluation: Compute Savings Plans vs RI renewal
+    Analysis Due: 2025-10-20
+
+--- SECTION 7: CHANGE MANAGEMENT LOG ---
+
+Change Record: CHG-2025-10-09-001
+  Title: PostgreSQL Failover Drill — user-profile-db
+  Type: Standard Change (quarterly drill)
+  Risk Level: Medium
+  Implementer: carlos.mendez
+  Start: 03:00 UTC, End: 03:01 UTC
+  Result: PASSED — 4.2s promotion, 0 data loss, 0 errors
+
+Change Record: CHG-2025-10-09-002
+  Title: pg_repack on user_profiles table
+  Type: Standard Change (quarterly maintenance)
+  Risk Level: Low
+  Implementer: jenna.liu
+  Start: 03:30 UTC, End: 04:17 UTC (47 minutes)
+  Result: Successful — 8.4 GB reclaimed, scan time 14s to 11s
+
+Change Record: CHG-2025-10-09-003
+  Title: EBS Orphaned Volume Cleanup (staging-v1 remnants)
+  Type: Standard Change
+  Risk Level: Low
+  Implementer: nina.patel, marcus.wright
+  Result: 4 volumes snapshotted and deleted, $148/month saved
+
+--- SECTION 8: DEPLOY MANIFEST — ZALANDO POSTGRES OPERATOR ---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-operator
+  namespace: postgres-system
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/version: "1.12.2"
+    app.kubernetes.io/managed-by: helm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-operator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: postgres-operator
+      containers:
+        - name: postgres-operator
+          image: registry.opensource.zalan.do/acid/postgres-operator:v1.12.2
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 100m
+              memory: 250Mi
+            limits:
+              cpu: 500m
+              memory: 500Mi
+          env:
+            - name: POSTGRES_OPERATOR_CONFIGURATION_OBJECT
+              value: postgres-operator-default-configuration
+            - name: CONFIG_MAP_NAME
+              value: postgres-operator
+            - name: WATCHED_NAMESPACE
+              value: "*"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+
+---
+apiVersion: acid.zalan.do/v1
+kind: postgresql
+metadata:
+  name: user-profile-db
+  namespace: user-profile-prod
+  labels:
+    team: database-ops
+    environment: production
+spec:
+  teamId: database-ops
+  postgresql:
+    version: "16"
+    parameters:
+      max_connections: "400"
+      shared_buffers: 16GB
+      effective_cache_size: 48GB
+      work_mem: 64MB
+      maintenance_work_mem: 2GB
+      wal_buffers: 64MB
+      checkpoint_completion_target: "0.9"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      min_wal_size: 2GB
+      max_wal_size: 8GB
+      max_worker_processes: "8"
+      max_parallel_workers_per_gather: "4"
+      log_min_duration_statement: "1000"
+      log_checkpoints: "on"
+      log_lock_waits: "on"
+      track_activity_query_size: "4096"
+  numberOfInstances: 3
+  volume:
+    size: 500Gi
+    storageClass: gp3-encrypted
+    iops: 6000
+    throughput: 250
+  resources:
+    requests:
+      cpu: "4"
+      memory: 32Gi
+    limits:
+      cpu: "8"
+      memory: 64Gi
+  patroni:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: true
+    synchronous_mode_strict: false
+  enableShmVolume: true
+  shmVolume:
+    sizeLimit: 2Gi
+  sidecars:
+    - name: postgres-exporter
+      image: prometheuscommunity/postgres-exporter:v0.15.0
+      ports:
+        - containerPort: 9187
+          protocol: TCP
+      env:
+        - name: DATA_SOURCE_URI
+          value: "localhost:5432/userprofiles?sslmode=disable"
+        - name: DATA_SOURCE_USER
+          value: postgres_exporter
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9187"
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node.kubernetes.io/pool
+              operator: In
+              values: ["worker-memory-v3"]
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: memory-workloads
+      effect: PreferNoSchedule
+
+--- SECTION 9: WAL-G BACKUP STATUS ---
+
+Timestamp: 2025-10-09T06:00:00Z
+Service: WAL-G v3.0.0
+Cluster: user-profile-db
+
+BACKUP CONFIGURATION:
+
+  Storage: s3://vantage-backups/wal-g/user-profile-db/
+  Region: us-east-1
+  Encryption: AES-256 (KMS key: arn:aws:kms:us-east-1:123456789012:key/pg-backup-key)
+  Compression: LZ4
+  Upload Concurrency: 16
+  Delta Backup: Enabled (delta from last full every 6 hours)
+  Full Backup Schedule: Weekly (Sunday 02:00 UTC)
+  WAL Archive: Continuous (every WAL segment, ~16 MB each)
+
+BACKUP INVENTORY:
+
+  Full Backups:
+    1. base_000000010000002A0000004B — 2025-10-05T02:00:00Z — 42 GB compressed — OK
+    2. base_0000000100000029000000A2 — 2025-09-28T02:00:00Z — 41 GB compressed — OK
+    3. base_000000010000002800000018 — 2025-09-21T02:00:00Z — 40 GB compressed — OK
+
+  Delta Backups (since last full):
+    1. delta_000000010000002A0000008C — 2025-10-09T02:00:00Z — 2.1 GB — OK
+    2. delta_000000010000002A00000078 — 2025-10-08T20:00:00Z — 1.8 GB — OK
+    3. delta_000000010000002A00000064 — 2025-10-08T14:00:00Z — 1.9 GB — OK
+    4. delta_000000010000002A00000050 — 2025-10-08T08:00:00Z — 2.0 GB — OK
+    5. delta_000000010000002A0000003C — 2025-10-08T02:00:00Z — 1.7 GB — OK
+    [Earlier deltas omitted — all OK]
+
+  WAL Archive Status:
+    WAL Segments Archived (24h): 108
+    WAL Archive Lag: 0 (current)
+    Archive Command: wal-g wal-push %p
+    Last Archived WAL: 000000010000002A0000008F
+    Archive Rate: ~1.8 GB/hr (matches WAL generation rate)
+
+  Recovery Point Objective (RPO): 0 seconds (continuous WAL archiving)
+  Recovery Time Objective (RTO): < 10 minutes (tested quarterly)
+
+  Storage Usage:
+    Full Backups: 123 GB (3 retained)
+    Delta Backups: 48 GB
+    WAL Archives: 184 GB (30-day retention)
+    Total S3 Usage: 355 GB
+    Monthly S3 Cost: $8.88 (Standard-IA, $0.025/GB)
+
+--- SECTION 10: PGBOUNCER FAILOVER BEHAVIOR ---
+
+Timestamp: 2025-10-09T03:00:00Z — 2025-10-09T03:01:00Z
+Source: PgBouncer logs during failover drill
+
+PgBouncer Configuration (relevant to failover):
+  dns_max_ttl = 15
+  dns_nxdomain_ttl = 15
+  server_connect_timeout = 15
+  server_login_retry = 1
+  server_idle_timeout = 600
+
+FAILOVER SEQUENCE FROM PGBOUNCER PERSPECTIVE:
+
+  [03:00:00Z] Primary pod killed
+  [03:00:00Z] PgBouncer: Existing connections to user-profile-db-0 (10.42.6.201) still active
+  [03:00:02Z] PgBouncer: Connection to 10.42.6.201:5432 lost (TCP RST received)
+  [03:00:02Z] PgBouncer: 12 in-flight transactions on lost connection — returning error to clients
+  [03:00:02Z] PgBouncer: Client error messages: "server closed the connection unexpectedly"
+  [03:00:02Z] PgBouncer: Attempting to reconnect to primary endpoint
+  [03:00:03Z] PgBouncer: DNS lookup for user-profile-db.user-profile-prod.svc.cluster.local
+  [03:00:03Z] PgBouncer: DNS returned new IP 10.42.5.142 (user-profile-db-1, new primary)
+  [03:00:04Z] PgBouncer: Connection established to 10.42.5.142:5432
+  [03:00:04Z] PgBouncer: Authentication successful (scram-sha-256)
+  [03:00:05Z] PgBouncer: Server connection pool repopulated — 40 connections established
+  [03:00:05Z] PgBouncer: Client requests resuming on new primary
+
+  Total PgBouncer Failover Time: 0.8 seconds (from DNS update to connections restored)
+  Client Retries Required: 12 transactions (application retry logic handled all)
+  Application-Visible Errors: 0 (retry logic masked the brief interruption)
+
+PgBouncer Connection Pool Stats During Failover:
+
+  Time     | Active Server | Idle Server | Client Active | Client Waiting
+  02:59:58 | 38            | 2           | 182           | 0
+  03:00:00 | 38            | 2           | 182           | 0
+  03:00:02 | 0             | 0           | 0             | 182  (all clients waiting)
+  03:00:04 | 0             | 0           | 0             | 182
+  03:00:05 | 40            | 0           | 182           | 0   (connections restored)
+  03:00:10 | 38            | 2           | 180           | 0   (steady state)
+
+--- SECTION 11: ETCD CLUSTER HEALTH ---
+
+Timestamp: 2025-10-09T06:00:00Z
+Cluster: etcd-prod
+Members: 3
+Used By: Patroni (PostgreSQL HA), Vault (secrets management)
+
+MEMBER STATUS:
+
+  etcd-prod-0:
+    Endpoint: https://etcd-prod-0.etcd-prod.svc.cluster.local:2379
+    Role: Leader
+    DB Size: 4.8 GiB
+    DB Size In Use: 3.6 GiB (75%)
+    Version: 3.5.14
+    Raft Term: 42
+    Raft Index: 8,421,947
+    Is Learner: false
+    Health: true
+
+  etcd-prod-1:
+    Endpoint: https://etcd-prod-1.etcd-prod.svc.cluster.local:2379
+    Role: Follower
+    DB Size: 4.8 GiB
+    Version: 3.5.14
+    Raft Term: 42
+    Is Learner: false
+    Health: true
+
+  etcd-prod-2:
+    Endpoint: https://etcd-prod-2.etcd-prod.svc.cluster.local:2379
+    Role: Follower
+    DB Size: 4.8 GiB
+    Version: 3.5.14
+    Raft Term: 42
+    Is Learner: false
+    Health: true
+
+PERFORMANCE METRICS:
+
+  Request Latency p50: 1.2ms
+  Request Latency p99: 8.4ms
+  Leader Elections (30d): 0
+  Compaction Schedule: Nightly 20:30 UTC
+  Last Compaction: 2025-10-08T20:30:00Z (duration: 7 minutes, freed 1.2 GiB)
+  Snapshot Schedule: Every 10,000 revisions
+  Total Keys: 142,000
+  Watches Active: 284
+
+ETCD ALARM STATUS:
+  Alarms: None
+  Space Alarm Threshold: 8 GiB (current: 4.8 GiB, 60%)
+  Projected Time to Threshold: >365 days (minimal growth, compaction effective)
+
+--- SECTION 12: POSTGRESQL PERFORMANCE INSIGHTS ---
+
+Timestamp: 2025-10-09T06:00:00Z (post-maintenance snapshot)
+Instance: user-profile-db-1 (current primary after failover drill)
+Engine: PostgreSQL 16.4
+
+TOP SQL BY TOTAL TIME (past 6 hours, post-repack):
+
+  1. SELECT u.id, u.email, u.first_name, u.last_name, u.subscription_tier
+     FROM user_profiles u WHERE u.id = $1
+     Calls: 2,840,000
+     Total Time: 142s
+     Avg Time: 0.05ms
+     Shared Buffers Hit: 99.8%
+     Rows Returned: 2,840,000
+
+  2. UPDATE user_profiles SET last_login_at = $1, updated_at = $2 WHERE id = $3
+     Calls: 420,000
+     Total Time: 84s
+     Avg Time: 0.2ms
+     Rows Affected: 420,000
+     WAL Generated: 840 MB
+
+  3. SELECT u.id, u.username, u.preferences_json FROM user_profiles u
+     WHERE u.email = $1
+     Calls: 180,000
+     Total Time: 36s
+     Avg Time: 0.2ms
+     Shared Buffers Hit: 99.6%
+
+  4. INSERT INTO user_profiles (id, email, username, first_name, last_name,
+     phone, address_json, preferences_json, created_at, updated_at,
+     subscription_tier, account_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     Calls: 14,200
+     Total Time: 28s
+     Avg Time: 2.0ms (index maintenance overhead)
+     WAL Generated: 420 MB
+
+  5. SELECT u.id, u.first_name, u.last_name, u.subscription_tier, u.created_at
+     FROM user_profiles u WHERE u.subscription_tier = $1
+     AND u.created_at > $2 ORDER BY u.created_at DESC LIMIT $3
+     Calls: 8,400
+     Total Time: 92s
+     Avg Time: 11.0ms (sequential scan times improved from 14s to 11s post-repack)
+     Shared Buffers Hit: 99.4%
+
+  [Remaining queries omitted — all within normal parameters]
+
+WAIT EVENT ANALYSIS (post-repack):
+
+  CPU: 68.2% of total wait time (healthy — compute-bound workload)
+  IO:DataFileRead: 14.1% (down from 18.4% pre-repack — denser pages)
+  IO:WALWrite: 8.8%
+  Lock:transactionid: 3.2%
+  IO:BufferFileWrite: 2.8%
+  Client:ClientRead: 2.0%
+  Other: 0.9%
+
+VACUUM AND MAINTENANCE STATUS:
+
+  Table: user_profiles (post-repack)
+    Live Tuples: 480,000,000
+    Dead Tuples: 0 (just repacked)
+    Dead Tuple Ratio: 0.0%
+    Last Vacuum: pg_repack (2025-10-09T04:17:22Z)
+    Last Analyze: autovacuum (2025-10-09T04:20:00Z — triggered by repack)
+    Estimated Rows: 480,000,000 (statistics up to date)
+    Pages: 13,257,408 (down from 14,336,000 pre-repack)
+    Tuple Density: 36.2 tuples/page (up from 33.5 pre-repack)
+
+  Table: user_sessions
+    Live Tuples: 120,000,000
+    Dead Tuples: 2,400,000 (2.0%)
+    Last Autovacuum: 2025-10-09T05:42:00Z
+    Scheduled for pg_repack: 2025-10-16
+
+  Table: user_preferences
+    Live Tuples: 48,000,000
+    Dead Tuples: 480,000 (1.0%)
+    Last Autovacuum: 2025-10-09T04:30:00Z
+    Status: Healthy, no maintenance needed
+
+  Table: user_addresses
+    Live Tuples: 62,000,000
+    Dead Tuples: 620,000 (1.0%)
+    Last Autovacuum: 2025-10-09T03:45:00Z
+    Status: Healthy
+
+INDEX HEALTH (user_profiles, post-repack):
+
+  Index: idx_user_profiles_pkey
+    Size: 14.2 GB
+    Bloat: 0% (rebuilt by pg_repack)
+    Depth: 3 levels
+    Leaf Pages: 1,842,000
+
+  Index: idx_user_profiles_email
+    Size: 8.4 GB
+    Bloat: 0%
+    Unique: Yes
+    Null Entries: 0
+
+  Index: idx_user_profiles_username
+    Size: 6.8 GB
+    Bloat: 0%
+    Unique: Yes
+
+  Index: idx_user_profiles_search_vector (GIN)
+    Size: 3.8 GB
+    Bloat: 0%
+    Pending List Pages: 0 (fastupdate off for performance)
+
+  All Indexes: 0% bloat (all rebuilt during pg_repack)
+
+--- SECTION 13: REPLICATION TOPOLOGY AFTER FAILOVER ---
+
+Post-Drill Topology (stable since 03:01 UTC):
+
+  Primary: user-profile-db-1 (10.42.5.142, us-east-1a)
+    Role: Master
+    Timeline: 3 (incremented during promotion)
+    WAL Position: 2A/4B8C9E42
+    Connections: 340 (via PgBouncer) + 28 (direct admin)
+
+  Sync Replica: user-profile-db-0 (10.42.6.201, us-east-1b)
+    Role: Sync Standby
+    Upstream: user-profile-db-1
+    Replication Lag: 0.3ms
+    WAL Received: 2A/4B8C9E42 (in sync)
+    WAL Applied: 2A/4B8C9E42
+    Replay Lag: 0 bytes
+    State: streaming
+
+  Async Replica: user-profile-db-2 (10.42.7.88, us-east-1c)
+    Role: Async Standby
+    Upstream: user-profile-db-1
+    Replication Lag: 12ms (cross-AZ)
+    WAL Received: 2A/4B8C9E40
+    WAL Applied: 2A/4B8C9E3E
+    Replay Lag: 2 bytes
+    State: streaming
+
+  Patroni Cluster State:
+    + Cluster: user-profile-db (5431-16.4)
+    +----------+------------------+---------+---------+----+-----------+
+    | Member   | Host             | Role    | State   | TL | Lag in MB |
+    +----------+------------------+---------+---------+----+-----------+
+    | db-0     | 10.42.6.201:5432 | Replica | running |  3 |         0 |
+    | db-1     | 10.42.5.142:5432 | Leader  | running |  3 |           |
+    | db-2     | 10.42.7.88:5432  | Replica | running |  3 |         0 |
+    +----------+------------------+---------+---------+----+-----------+
+
+  Note: db-0 and db-1 swapped roles compared to pre-drill topology.
+  No action needed — Patroni manages role assignment. Next failover drill
+  will naturally test failover from the new primary (db-1).
+
+--- SECTION 14: DAILY OPERATIONS CHECKLIST ---
+
+Date: 2025-10-09
+Completed By: @carlos.mendez (overnight/DB), @marcus.wright (day shift/infra)
+
+Overnight Checks (06:00 UTC):
+  [x] PostgreSQL failover drill — PASSED (4.2s promotion, 0 data loss)
+  [x] pg_repack completed — 8.4 GB reclaimed on user_profiles
+  [x] PgBouncer health — 340 active connections, 0 waiting
+  [x] WAL-G backups — all OK, delta backup at 02:00 UTC completed
+  [x] etcd cluster — 3/3 healthy, leader stable
+  [x] Replication lag — sync: 0.3ms, async: 12ms (normal)
+  [x] Cluster node health — 36/36 Ready
+  [x] Pod status — 496 running, 0 pending
+
+Day Shift Checks (14:00 UTC):
+  [x] AWS cost review — September $127,400 reviewed, optimizations identified
+  [x] Terraform drift — 0 drift detected in nightly run
+  [x] Orphaned resources — 4 EBS volumes identified, snapshotted, deleted ($148/month saved)
+  [x] Shipping service — 420 req/s, 0.12% error rate (normal, carrier timeout driven)
+  [x] RI renewal analysis — initiated for November expirations
+  [x] Savings Plans evaluation — comparing to RI renewal, analysis due 2025-10-20
+  [x] K8s headroom nodes — scaling back this week, $2,100/month savings expected
+  [x] Cross-AZ transfer — topology-aware routing evaluation added to next sprint
+  [x] PostgreSQL replication — sync lag 0.3ms, async lag 12ms (normal post-drill)
+  [x] PgBouncer failover tested — 0.8s reconnection during drill, application saw 0 errors
+  [x] etcd compaction — last compaction freed 1.2 GiB, DB at 4.8 GiB (60% of alarm threshold)
+  [x] WAL-G backup health — all full and delta backups OK, WAL archive current
+  [x] Index health — all 12 indexes on user_profiles at 0% bloat post-repack
+  [x] Next maintenance scheduled — user_sessions pg_repack 2025-10-16
+
+--- SECTION 15: SHIPPING SERVICE CARRIER HEALTH CHECK ---
+
+Timestamp: 2025-10-09T12:00:00Z
+Service: shipping-service v2.6.3
+Check Type: Carrier API availability and latency
+
+UPS API:
+  Endpoint: https://onlinetools.ups.com/rest/Rate
+  Status: Available
+  Latency p50: 320ms
+  Latency p99: 1,200ms
+  Error Rate: 0.04%
+  Rate Limit: 100 req/s (current usage: 42 req/s, 42%)
+  Authentication: OAuth2 (token refreshed at 11:42 UTC, valid until 12:42 UTC)
+  API Version: v1.1
+  Last Outage: 2025-09-22T14:00-14:12 UTC (12 minutes, circuit breaker tripped)
+
+FedEx API:
+  Endpoint: https://apis.fedex.com/rate/v1/rates/quotes
+  Status: Available
+  Latency p50: 480ms
+  Latency p99: 1,800ms
+  Error Rate: 0.08%
+  Rate Limit: 80 req/s (current usage: 28 req/s, 35%)
+  Authentication: OAuth2 (client credentials grant)
+  API Version: v1
+  Last Outage: 2025-09-18T08:30-08:45 UTC (15 minutes)
+  Note: FedEx consistently has higher latency than UPS and USPS
+
+USPS API:
+  Endpoint: https://secure.shippingapis.com/ShippingAPI.dll
+  Status: Available
+  Latency p50: 180ms
+  Latency p99: 620ms
+  Error Rate: 0.02%
+  Rate Limit: 200 req/s (current usage: 18 req/s, 9%)
+  Authentication: API key
+  API Version: Web Tools v5
+  Last Outage: None in past 30 days
+
+Circuit Breaker Configuration:
+  Failure Threshold: 5 consecutive failures
+  Reset Timeout: 30 seconds
+  Half-Open Retries: 2
+  Current State: All carriers CLOSED (healthy)
+
+Carrier Response Time Monitoring:
+  Alert Threshold: p99 > 3,000ms sustained for 5 minutes
+  Current Status: All carriers within threshold
+  Grafana Dashboard: https://grafana.vantage.internal/d/shipping-carriers/carrier-health
+
+--- SECTION 16: INFRASTRUCTURE METRICS SNAPSHOT ---
+
+Timestamp: 2025-10-09T00:00:00Z — 2025-10-09T23:59:59Z
+Source: Prometheus / Grafana
+
+COMPUTE:
+  CPU avg: 60%, peak 68% (normal business hours)
+  Memory avg: 54%, peak 62%
+  Nodes: 36/36 Ready
+  Pods: 496 running, 0 pending
+  Pod Restarts (24h): 0
+
+DATABASE:
+  user-profile-db: Healthy (failover drill + repack completed, no issues)
+  orders-prod-primary: Healthy, CPU 32%, 284 connections
+  Redis clusters: Both healthy, memory 34% (main), 28% (sessions)
+  ES cluster: GREEN, disk 52-57% on data-hot nodes
+
+NETWORK:
+  Ingress: 2.6 TB
+  Egress: 1.9 TB
+  Cross-AZ: 920 GB ($82.80)
+  DNS: 49.8M queries, 99.8% success
+
+STORAGE:
+  EBS Total: 27.4 TiB (reduced by 2 TB after orphan cleanup)
+  S3 Total: 15.2 TiB across 42 buckets
+  PostgreSQL WAL Archive: 184 GB (30-day retention)
+  Velero Backups: 4,540 items, 148 MB tarball
+  EBS Snapshots: 280 active (down from 284 after orphan cleanup), 8.0 TiB total
+  PostgreSQL Table Bloat (post-repack): user_profiles 0%, user_sessions 2.0%, others <1.5%
+
+COST (October projection based on first 9 days):
+  Projected Monthly: $124,200 (down from September $127,400)
+  Savings from Optimizations: $2,248/month (headroom nodes $2,100 + orphaned EBS $148)
+  RI Coverage: 72% (renewal analysis in progress for November expirations)
+  Spot Savings: $4,200/month (11 instances, 68% discount vs on-demand)
+  Spot Interruptions (October to date): 2 (both handled automatically, avg 42s rescheduling)
+
+================================================================================
+END OF INFRASTRUCTURE OPERATIONS LOG — 2025-10-09
+================================================================================

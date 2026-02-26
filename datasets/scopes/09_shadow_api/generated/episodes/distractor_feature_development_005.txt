@@ -1,0 +1,1004 @@
+================================================================================
+VANTAGE COMMERCE — FEATURE DEVELOPMENT LOG
+Date: 2025-10-03
+Classification: INTERNAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Pull Request #4712 — Real-Time Order Tracking via WebSocket
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/svc-order-service
+PR: #4712
+Branch: feature/order-tracking-realtime
+Author: janet.okoye
+Reviewers: carlos.medina, rafael.silva
+Status: APPROVED
+Files changed: 27
+Insertions: 1567
+Deletions: 289
+Created: 2025-10-01T09:00:00Z
+Merged: 2025-10-03T16:00:00Z
+
+--- Affected Services ---
+
+- svc-order-service v6.4.0
+- svc-logistics-gateway
+- WebSocket server (ws-order-tracking, new service)
+- Redis Pub/Sub (order-tracking-events channel)
+- DHL API v2
+- FedEx Track API
+- Kong API gateway (WebSocket upgrade route)
+
+--- Changes Summary ---
+
+1. Adds real-time order tracking via WebSocket connection from the customer-facing
+   application. Currently, the tracking page refreshes every 60 seconds with a full page
+   reload. The WebSocket implementation provides real-time updates without any reload.
+   Analytics data shows tracking pages get 4.2 views per order on average, and this
+   should reduce that to 1 or 2 views since users will get updates pushed to them without
+   needing to manually refresh.
+
+2. New WebSocket endpoint for real-time tracking updates. The WebSocket server is a
+   separate service called ws-order-tracking that handles persistent connections. It
+   scales horizontally with each instance handling approximately 10,000 concurrent
+   connections. Redis Pub/Sub is used to fan out tracking updates to all WebSocket server
+   instances.
+
+3. Backend polling of carrier APIs. The logistics gateway service polls carrier APIs at
+   intervals specific to each carrier: DHL every 60 seconds, FedEx every 90 seconds, and
+   UPS every 120 seconds. These different intervals are due to rate limit differences
+   across carriers. When a tracking update is received from a carrier, it is published to
+   the Redis Pub/Sub channel for the specific order.
+
+4. Fallback mechanism. If the WebSocket connection drops for any reason (network change,
+   phone sleep, browser tab backgrounded), the client automatically reverts to polling
+   the existing REST endpoint every 30 seconds. The fallback is transparent to the user
+   and the tracking page continues to show updates.
+
+janet.okoye: "Current tracking page refreshes every 60s with a full page reload. This
+gives real-time updates without any reload. Analytics show tracking pages get 4.2 views
+per order on average — this should reduce that to 1-2."
+
+carlos.medina: "WebSocket connection limits concern me. What happens if 100K users are
+all tracking orders during a sale event?"
+
+janet.okoye: "Good question — the ws-order-tracking service scales horizontally and each
+instance handles ~10K connections. Redis Pub/Sub fans out to all instances. We tested 50K
+concurrent in staging."
+
+--- WebSocket Protocol Details ---
+
+  Endpoint: wss://api.vantage.com/ws/orders/{order_id}/track
+  Protocol: WebSocket (RFC 6455)
+  Subprotocol: vantage-tracking-v1
+
+  Authentication:
+    The WebSocket upgrade request requires a valid JWT in the Authorization header.
+    The JWT must contain the order_id in its claims, and the user associated with the
+    token must be the owner of the order. If authentication fails, the server returns
+    a 401 Unauthorized HTTP response and refuses the WebSocket upgrade.
+
+  Connection limit:
+    Maximum 5 concurrent WebSocket connections per user, enforced via a Redis counter
+    keyed by user_id. If a user attempts to open a 6th connection, the oldest connection
+    is gracefully closed with WebSocket close code 4001 (connection limit exceeded).
+
+  Message format (server to client):
+    All messages are JSON objects with the following structure:
+    event field: string, the type of tracking event (tracking_update, connection_ack,
+    heartbeat_ack, error)
+    data field: object, the event payload
+
+    For tracking_update events, the data object contains:
+    status: string, the current tracking status (e.g., in_transit, out_for_delivery,
+    delivered, exception)
+    location: string, the current location description
+    timestamp: string, ISO 8601 timestamp of the status update
+    estimated_delivery: string, ISO 8601 timestamp of estimated delivery
+    carrier: string, the carrier name (dhl, fedex, ups)
+
+  Heartbeat:
+    The server sends a WebSocket ping frame every 30 seconds. The client must respond
+    with a pong frame within 10 seconds. If no pong is received within 10 seconds, the
+    server closes the connection and cleans up resources.
+
+  Connection cleanup on disconnect:
+    When a client disconnects (gracefully or due to heartbeat timeout):
+    Step one: cancel the Redis Pub/Sub subscription for this connection
+    Step two: decrement the user's connection counter in Redis
+    Step three: log the disconnect reason (client_close, heartbeat_timeout, server_shutdown,
+    connection_limit)
+    Step four: emit a Datadog metric for tracking purposes
+
+--- Redis Pub/Sub Configuration ---
+
+  Channel pattern: order:tracking:{order_id}
+  Message format: JSON with fields for status, location, timestamp, estimated_delivery,
+  carrier, and raw_carrier_response
+  Publisher: svc-logistics-gateway (publishes when carrier API returns a new status)
+  Subscriber: ws-order-tracking (one subscription per active WebSocket connection)
+
+  Redis cluster: tracking-events-prod (2-node, Redis 7.2)
+  Region: us-east-1
+  Memory: 4 GB per node
+  Expected message volume: approximately 50 messages per second at peak (based on
+  current order volume and carrier polling intervals)
+
+--- Carrier API Polling Configuration ---
+
+  Carrier     | Poll Interval | Rate Limit (per hour) | API Version | Auth Method
+  ------------|---------------|----------------------|-------------|-------------------
+  DHL         | 60 seconds    | 2,000                | v2          | API key in header
+  FedEx       | 90 seconds    | 1,000                | Track API   | OAuth 2.0
+  UPS         | 120 seconds   | 500                  | v1          | API key + secret
+
+  Polling architecture:
+  The logistics gateway maintains a list of active orders (orders with status in_transit
+  or out_for_delivery). For each carrier, a separate polling loop runs at the configured
+  interval. Each loop iterates through active orders for that carrier and calls the
+  carrier tracking API. If the carrier returns a new status that differs from the last
+  known status, the update is published to Redis Pub/Sub and persisted to the order
+  tracking database.
+
+  Error handling for carrier APIs:
+  If a carrier API returns an error (4xx or 5xx), the polling loop logs the error and
+  skips that order for the current cycle. The order will be retried in the next polling
+  cycle. If a carrier API is consistently failing (more than 10 consecutive failures for
+  the same order), an alert is sent to PagerDuty and the order is flagged for manual
+  investigation.
+
+--- HTTP Traces — WebSocket Upgrade and Tracking ---
+
+[2025-10-03T14:00:00.001Z] Request (WebSocket upgrade):
+  GET /ws/orders/ord_1a2b3c4d5e6f/track HTTP/1.1
+  Host: api.vantage.com
+  Upgrade: websocket
+  Connection: Upgrade
+  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+  Sec-WebSocket-Version: 13
+  Sec-WebSocket-Protocol: vantage-tracking-v1
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_ws_track_001
+  User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/117.0
+
+[2025-10-03T14:00:00.045Z] Response:
+  HTTP/1.1 101 Switching Protocols
+  Upgrade: websocket
+  Connection: Upgrade
+  Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+  Sec-WebSocket-Protocol: vantage-tracking-v1
+  X-Request-ID: req_ws_track_001
+  X-WS-Connection-ID: ws_conn_7f8e9d0a
+
+  WebSocket connection established. Server sends connection acknowledgment:
+  {"event": "connection_ack", "data": {"connection_id": "ws_conn_7f8e9d0a", "order_id": "ord_1a2b3c4d5e6f", "carrier": "dhl", "current_status": "in_transit"}}
+
+[2025-10-03T14:02:30.112Z] WebSocket message (server to client):
+  {"event": "tracking_update", "data": {"status": "in_transit", "location": "Distribution Center, Newark NJ", "timestamp": "2025-10-03T14:02:00Z", "estimated_delivery": "2025-10-04T18:00:00Z", "carrier": "dhl"}}
+
+[2025-10-03T14:05:00.001Z] WebSocket ping frame (server to client):
+  (binary ping frame, 0 bytes payload)
+
+[2025-10-03T14:05:00.234Z] WebSocket pong frame (client to server):
+  (binary pong frame, matching payload)
+
+[2025-10-03T14:08:15.887Z] WebSocket message (server to client):
+  {"event": "tracking_update", "data": {"status": "out_for_delivery", "location": "Local Delivery Vehicle, Brooklyn NY", "timestamp": "2025-10-03T14:08:00Z", "estimated_delivery": "2025-10-03T17:00:00Z", "carrier": "dhl"}}
+
+[2025-10-03T14:12:44.001Z] Request (failed WebSocket upgrade, unauthorized):
+  GET /ws/orders/ord_other_user_order/track HTTP/1.1
+  Host: api.vantage.com
+  Upgrade: websocket
+  Connection: Upgrade
+  Sec-WebSocket-Key: YW5vdGhlciBub25jZQ==
+  Sec-WebSocket-Version: 13
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.*** (token for different user)
+  X-Request-ID: req_ws_track_002
+
+[2025-10-03T14:12:44.012Z] Response:
+  HTTP/1.1 403 Forbidden
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ws_track_002
+
+  {
+    "error": "FORBIDDEN",
+    "message": "You can only track orders you own"
+  }
+
+[2025-10-03T14:15:00.001Z] Request (REST fallback polling):
+  GET /api/v2/orders/ord_1a2b3c4d5e6f/tracking HTTP/1.1
+  Host: api.vantage.com
+  Accept: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_track_poll_001
+  X-Fallback-Reason: websocket_disconnected
+
+[2025-10-03T14:15:00.078Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_track_poll_001
+
+  {
+    "order_id": "ord_1a2b3c4d5e6f",
+    "tracking_number": "DHL1234567890",
+    "carrier": "dhl",
+    "status": "out_for_delivery",
+    "last_update": "2025-10-03T14:08:00Z",
+    "estimated_delivery": "2025-10-03T17:00:00Z",
+    "history": [
+      {"status": "shipped", "location": "Warehouse, Chicago IL", "timestamp": "2025-10-01T10:00:00Z"},
+      {"status": "in_transit", "location": "Sort Facility, Columbus OH", "timestamp": "2025-10-02T06:00:00Z"},
+      {"status": "in_transit", "location": "Distribution Center, Newark NJ", "timestamp": "2025-10-03T14:02:00Z"},
+      {"status": "out_for_delivery", "location": "Local Delivery Vehicle, Brooklyn NY", "timestamp": "2025-10-03T14:08:00Z"}
+    ]
+  }
+
+  Latency: 77ms
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: Code Review — Performance Review of PR #4712
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/svc-order-service
+PR: #4712
+Reviewer: rafael.silva
+Review type: Performance
+Timestamp: 2025-10-03T16:45:00Z
+
+--- Entities Under Review ---
+
+- ws-order-tracking service (new)
+- Redis Pub/Sub integration
+- Kubernetes HPA configuration for WebSocket service
+- Datadog WebSocket metrics dashboard
+- Connection lifecycle management
+
+--- Review Comments ---
+
+rafael.silva [Comment 1, Line 89]:
+  "Line 89: there is no cleanup when the client silently disconnects (e.g., phone goes
+  to sleep). Without heartbeat these zombie connections will accumulate and hit the
+  per-pod limit. Need ping/pong at minimum."
+
+  Severity: BLOCKING
+  Category: Resource management
+  Labels: performance, reliability
+
+  Context: When a mobile device goes to sleep or a user switches to another app, the TCP
+  connection may remain open from the server's perspective even though the client is no
+  longer actively listening. Without a heartbeat mechanism, these zombie connections
+  consume resources (memory for the connection state, Redis Pub/Sub subscription) and
+  count toward the per-pod connection limit of 10,000. Over time, zombie connections
+  could exhaust the connection capacity and prevent new legitimate connections.
+
+rafael.silva [Comment 2, Line 112]:
+  Suggested adding a Datadog custom metric for active WebSocket connections per pod.
+  This metric is essential for HPA scaling decisions. The current HPA configuration
+  scales based on CPU utilization, but for a WebSocket server the bottleneck is typically
+  connection count rather than CPU. Without a connection-count-based scaling metric, the
+  HPA may not scale up quickly enough during traffic spikes.
+
+  Severity: NON-BLOCKING
+  Category: Observability
+  Labels: monitoring, scaling
+
+rafael.silva [Comment 3, Line 145]:
+  The Redis Pub/Sub subscription is created when the WebSocket connection opens but there
+  is no timeout on the subscription itself. If Redis Pub/Sub is unavailable, the
+  subscription attempt will hang indefinitely. Add a 5-second timeout on the Redis
+  SUBSCRIBE operation and close the WebSocket connection with an error if the subscription
+  fails.
+
+  Severity: NON-BLOCKING
+  Category: Reliability
+  Labels: timeout, error-handling
+
+--- Author Response ---
+
+janet.okoye [Response to all comments]:
+  "Added 30s ping/pong with 10s timeout for pong response. Dead connections are cleaned
+  up and Redis subscription is cancelled. Also added the Datadog gauge for active
+  connections."
+
+  Changes committed:
+  One: heartbeat implementation. Server sends WebSocket ping frame every 30 seconds. If
+  no pong response is received within 10 seconds, the server closes the connection and
+  performs the full cleanup procedure (cancel Redis subscription, decrement connection
+  counter, log disconnect reason).
+
+  Two: Datadog custom metric. New gauge metric named vantage.ws.order_tracking.active_connections
+  tagged by pod, region, and carrier. Updated every 10 seconds. Published via StatsD to
+  the Datadog agent running as a DaemonSet on each node.
+
+  Three: Redis subscription timeout. Added a 5-second timeout on the SUBSCRIBE operation.
+  If the timeout is reached, the WebSocket connection is closed with close code 4002
+  (internal error) and the client can retry with a new connection or fall back to REST
+  polling.
+
+  Four: HPA configuration update. Changed the HPA to scale on the custom metric
+  vantage.ws.order_tracking.active_connections with a target of 7,500 active connections
+  per pod (75 percent of the 10,000 connection limit). This ensures new pods are added
+  before any single pod reaches capacity.
+
+--- WebSocket Service Metrics ---
+
+  Connection cleanup behavior:
+    On disconnect, the following sequence executes:
+    Step one: cancel the Redis Pub/Sub subscription for this specific order channel
+    Step two: decrement the user connection counter in Redis (atomic DECR operation)
+    Step three: log the disconnect reason to the application log and Datadog
+    Step four: release the connection resources (buffer memory, goroutine/thread)
+
+  Datadog metric: vantage.ws.order_tracking.active_connections
+    Type: gauge
+    Tags: pod (pod name), region (us-east-1 or eu-west-1), carrier (dhl, fedex, ups, unknown)
+    Update interval: every 10 seconds
+    Dashboard: ws-order-tracking-monitoring
+
+  HPA configuration:
+    Metric: vantage.ws.order_tracking.active_connections
+    Target: 7,500 per pod (75 percent of 10,000 limit)
+    Min replicas: 2
+    Max replicas: 20
+    Scale up cooldown: 60 seconds
+    Scale down cooldown: 300 seconds
+
+  Heartbeat configuration:
+    Ping interval: 30 seconds
+    Pong timeout: 10 seconds
+    Close code on timeout: 4000 (heartbeat timeout)
+    Reconnect guidance: client should wait 1 second and attempt reconnect
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Feature Flag Rollout — Real-Time Order Tracking Initial Rollout
+────────────────────────────────────────────────────────────────────────────────
+
+Flag name: realtime_order_tracking
+Platform: LaunchDarkly
+Team: Order Experience
+Current rollout: 0% (pre-rollout)
+Target rollout: 5%
+Rollout date: 2025-10-03
+Owner: janet.okoye
+
+--- Rollout Strategy ---
+
+  Initial 5 percent rollout of real-time order tracking to web users only. Mobile
+  support is planned for the next sprint. The initial rollout is targeted at users in
+  us-east-1 with orders shipped via DHL because the DHL carrier API is the most reliable
+  and has the highest polling frequency (60 seconds).
+
+janet.okoye: "Starting narrow — DHL only in us-east-1. Once we validate the WebSocket
+infrastructure, we add FedEx and UPS then go global."
+
+--- LaunchDarkly Configuration ---
+
+  Project: vantage-web
+  Flag key: realtime_order_tracking
+  Flag type: boolean
+  Default rule: false (serve legacy polling page)
+  Off variation: false
+
+  Targeting rule:
+    Condition: user.region equals us-east-1 AND order.carrier equals dhl AND
+    random percentage is less than 5
+    Serve: true (WebSocket-powered tracking page)
+
+  The feature flag controls both the backend (whether to offer WebSocket upgrade) and
+  the frontend (whether to render the WebSocket-powered tracking component or the legacy
+  polling version).
+
+--- Expected Traffic at 5 Percent ---
+
+  Current tracking page traffic: approximately 4,000 concurrent sessions at peak
+  DHL orders as percentage of total: 35 percent
+  us-east-1 as percentage of total: 65 percent
+  5 percent of eligible: 0.05 times 0.35 times 0.65 times 4,000 equals approximately 46
+  Expected concurrent WebSocket connections at 5 percent: approximately 200
+
+  This low volume allows safe validation of the WebSocket infrastructure before ramping
+  to higher traffic levels.
+
+--- Monitoring ---
+
+  Datadog monitor: ws-tracking-errors
+    Condition: WebSocket error rate exceeds 2 percent of total connections for 5 minutes
+    Severity: P2
+    Notification: PagerDuty for janet.okoye and the checkout-team Slack channel
+
+  Datadog monitor: ws-tracking-capacity
+    Condition: active WebSocket connections exceed 80 percent of pod capacity on any pod
+    Severity: P2
+    Notification: PagerDuty for the order experience on-call
+
+  Grafana dashboard: ws-order-tracking-monitoring
+    Panels: active connections (by pod, region, carrier), connection duration distribution,
+    message delivery latency, heartbeat timeout rate, Redis Pub/Sub message volume,
+    carrier API polling success rate
+
+--- Rollback Plan ---
+
+  Kill switch: disable the realtime_order_tracking feature flag in LaunchDarkly
+  Effect: WebSocket upgrade is no longer offered to clients. Existing WebSocket connections
+  receive a close frame with code 4003 (feature disabled) and clients automatically fall
+  back to REST polling.
+  Recovery time: within 60 seconds of flag change, all clients will be on REST polling
+  No data loss: tracking data is always available via REST endpoint regardless of WebSocket status
+
+--- Success Criteria for Ramp to 25 Percent ---
+
+  Criterion one: zero WebSocket-related incidents for 7 consecutive days
+  Criterion two: tracking page bounce rate decreases compared to control group
+  Criterion three: average page views per order decreases from 4.2 to less than 3
+  Criterion four: WebSocket connection stability rate greater than 95 percent (connections
+  lasting longer than 5 minutes without unexpected disconnection)
+  Criterion five: carrier API polling success rate remains above 99 percent
+
+--- Slack Thread: #order-experience WebSocket Launch ---
+
+[2025-10-03T16:15:00Z] janet.okoye:
+  PR 4712 is merged and deployed. ws-order-tracking service is live with 2 pods in
+  us-east-1 and 1 pod in eu-west-1. the realtime_order_tracking flag is currently at
+  0 percent. i am going to enable it for 5 percent now.
+
+[2025-10-03T16:16:30Z] carlos.medina:
+  go for it. i will keep an eye on the monitoring dashboard.
+
+[2025-10-03T16:17:15Z] janet.okoye:
+  flag is live at 5 percent. targeting DHL orders in us-east-1 only. we should see
+  the first WebSocket connections appearing in the next few minutes.
+
+[2025-10-03T16:20:00Z] janet.okoye:
+  first connections coming in. i can see 12 active WebSocket connections on the
+  monitoring dashboard. all healthy, heartbeats working correctly.
+
+[2025-10-03T16:22:30Z] rafael.silva:
+  latency on the Redis Pub/Sub messages looks good. average 2 milliseconds from publish
+  to delivery to the WebSocket client. well within acceptable range.
+
+[2025-10-03T16:25:00Z] janet.okoye:
+  just saw the first real-time tracking update delivered via WebSocket. a DHL package
+  moved from in_transit to out_for_delivery and the client got the update within 3
+  seconds of us polling the DHL API.
+
+[2025-10-03T16:27:15Z] carlos.medina:
+  that is a great user experience. going from 60-second refresh intervals to 3-second
+  real-time updates is a huge improvement.
+
+[2025-10-03T16:30:00Z] janet.okoye:
+  we are now at 47 active connections. close to the 46 estimate. everything looks
+  stable. i will monitor for the rest of the day and report back tomorrow morning.
+
+[2025-10-03T16:32:00Z] rafael.silva:
+  one thing to watch: the ws-order-tracking pods are using about 120 MB memory each
+  with 47 connections. at 10,000 connections per pod the memory usage would extrapolate
+  to about 2.5 GB per pod. we should set the memory limit to 4 GB when we ramp beyond
+  25 percent.
+
+[2025-10-03T16:34:00Z] janet.okoye:
+  good point. i will update the deployment manifest for the next rollout phase. for
+  now at 200 connections we have plenty of headroom.
+
+[2025-10-03T16:36:00Z] carlos.medina:
+  looks like a clean launch. let us keep it at 5 percent for a week and then evaluate
+  the success criteria for ramping to 25 percent.
+
+[2025-10-03T16:37:30Z] janet.okoye:
+  agreed. i set a calendar reminder for October 10 to review the metrics and decide
+  on the next ramp phase. i will also have the mobile implementation started by then
+  so we can include mobile in the 25 percent rollout.
+
+[2025-10-03T16:39:00Z] rafael.silva:
+  also consider adding UPS and FedEx tracking at the 25 percent phase. having only
+  DHL limits the impact of the feature. FedEx is 28 percent of our shipments and UPS
+  is 22 percent. together with DHL at 35 percent that would cover 85 percent of all
+  tracked orders.
+
+[2025-10-03T16:41:00Z] janet.okoye:
+  that is the plan. the FedEx and UPS integrations are already built in the logistics
+  gateway. i just need to update the LaunchDarkly targeting rules to include those
+  carriers. the main risk is UPS's lower rate limit (500 per hour) but at 25 percent
+  we should be well within that limit.
+
+--- Infrastructure Metrics: ws-order-tracking Service ---
+
+  Sampling period: 2025-10-03T16:15:00Z to 2025-10-03T23:59:59Z (first 8 hours)
+
+  Metric                              | Value
+  -------------------------------------|------------------
+  Peak active connections              | 203
+  Total connections opened             | 847
+  Total connections closed             | 644
+  Average connection duration          | 14 minutes 22 seconds
+  Heartbeat timeouts                   | 12 (1.4% of connections)
+  Client-initiated closes              | 598 (92.9% of closes)
+  Server-initiated closes              | 34 (5.3% of closes, heartbeat timeout)
+  Connection limit exceeded events     | 0
+  Redis Pub/Sub messages published     | 3,421
+  Redis Pub/Sub messages delivered      | 3,421 (100% delivery)
+  Average message delivery latency     | 2.1 milliseconds
+  DHL API polling success rate         | 99.8%
+  DHL API polling errors               | 7 (all transient 503, retried successfully)
+  Memory usage per pod (peak)          | 142 MB
+  CPU usage per pod (peak)             | 8%
+  Pod restarts                         | 0
+
+--- WebSocket Service Deploy Manifest ---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ws-order-tracking
+  namespace: vantage-prod
+  labels:
+    app: ws-order-tracking
+    version: v1.0.0
+    team: order-experience
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ws-order-tracking
+  template:
+    metadata:
+      labels:
+        app: ws-order-tracking
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      containers:
+      - name: ws-order-tracking
+        image: ghcr.io/vantage-commerce/ws-order-tracking:1.0.0-sha-b4c5d6e7
+        ports:
+        - containerPort: 8080
+          name: ws
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: tracking-redis-credentials
+              key: url
+        - name: MAX_CONNECTIONS_PER_POD
+          value: "10000"
+        - name: HEARTBEAT_INTERVAL_SECONDS
+          value: "30"
+        - name: HEARTBEAT_TIMEOUT_SECONDS
+          value: "10"
+        - name: MAX_CONNECTIONS_PER_USER
+          value: "5"
+        - name: REDIS_SUBSCRIBE_TIMEOUT_SECONDS
+          value: "5"
+        - name: JWT_PUBLIC_KEY
+          valueFrom:
+            secretKeyRef:
+              name: jwt-signing-keys
+              key: public-key
+        - name: DATADOG_AGENT_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 30
+
+--- Kong Gateway: WebSocket Route Configuration ---
+
+Service: ws-order-tracking
+  URL: http://ws-order-tracking.vantage-prod.svc.cluster.local:8080
+  Protocol: http
+
+Route: order-tracking-websocket
+  Paths: /ws/orders
+  Methods: GET
+  Protocols: http, https, ws, wss
+  Strip path: false
+  Plugins:
+    - jwt:
+        key_claim_name: kid
+        claims_to_verify: exp
+    - rate-limiting:
+        second: 10
+        minute: 100
+        policy: redis
+    - cors:
+        origins: ["https://www.vantage.com", "https://m.vantage.com"]
+        methods: ["GET", "OPTIONS"]
+    - request-size-limiting:
+        allowed_payload_size: 4
+        size_unit: kilobytes
+    - ip-restriction:
+        deny: []
+        allow: []
+
+  WebSocket-specific Kong configuration:
+    The Kong gateway is configured to pass through WebSocket upgrade requests without
+    modification. The Upgrade and Connection headers are forwarded to the upstream service.
+    Kong does not terminate the WebSocket connection; it acts as a transparent proxy.
+    The connection timeout is set to 86400 seconds (24 hours) to accommodate long-lived
+    WebSocket connections.
+
+--- Carrier API Integration Details ---
+
+DHL Tracking API v2:
+  Base URL: https://api-eu.dhl.com/track/shipments
+  Authentication: API key in DHL-API-Key header
+  Rate limit: 2,000 requests per hour (with burst allowance of 100 per minute)
+  Response format: JSON
+  Fields used: status.statusCode, status.description, status.location.address.addressLocality,
+  status.timestamp, details.estimatedDeliveryDate
+  Error handling: retry on 429 (rate limit) and 503 (service unavailable) with exponential
+  backoff. Maximum 3 retries per request. On persistent failure, log warning and skip to
+  next polling cycle.
+  Timeout: 10 seconds per request
+
+  Sample DHL API request and response:
+
+  Request:
+    GET /track/shipments?trackingNumber=DHL1234567890 HTTP/1.1
+    Host: api-eu.dhl.com
+    DHL-API-Key: dhl_api_key_****
+    Accept: application/json
+    X-Request-ID: req_dhl_track_001
+
+  Response:
+    HTTP/1.1 200 OK
+    Content-Type: application/json
+
+    {
+      "shipments": [{
+        "id": "DHL1234567890",
+        "status": {
+          "statusCode": "transit",
+          "status": "In transit",
+          "description": "Shipment is in transit to destination",
+          "location": {
+            "address": {
+              "addressLocality": "Newark NJ"
+            }
+          },
+          "timestamp": "2025-10-03T14:02:00Z"
+        },
+        "details": {
+          "estimatedDeliveryDate": "2025-10-04"
+        }
+      }]
+    }
+
+    Latency: 234ms
+
+FedEx Track API:
+  Base URL: https://apis.fedex.com/track/v1/trackingnumbers
+  Authentication: OAuth 2.0 (client credentials grant)
+  Token endpoint: https://apis.fedex.com/oauth/token
+  Token TTL: 3600 seconds (refreshed 5 minutes before expiry)
+  Rate limit: 1,000 requests per hour
+  Response format: JSON
+  Fields used: latestStatusDetail.statusByLocale, latestStatusDetail.scanLocation,
+  dateAndTimes[type=ESTIMATED_DELIVERY].dateTime
+  Error handling: same retry policy as DHL
+  Timeout: 15 seconds per request (FedEx API is slower than DHL)
+
+  Sample FedEx API request and response:
+
+  Request:
+    POST /track/v1/trackingnumbers HTTP/1.1
+    Host: apis.fedex.com
+    Authorization: Bearer fedex_oauth_token_****
+    Content-Type: application/json
+    X-locale: en_US
+
+    {
+      "trackingInfo": [{
+        "trackingNumberInfo": {
+          "trackingNumber": "FX9876543210"
+        }
+      }],
+      "includeDetailedScans": true
+    }
+
+  Response:
+    HTTP/1.1 200 OK
+    Content-Type: application/json
+
+    {
+      "output": {
+        "completeTrackResults": [{
+          "trackResults": [{
+            "latestStatusDetail": {
+              "statusByLocale": "In Transit",
+              "scanLocation": {
+                "city": "MEMPHIS",
+                "stateOrProvinceCode": "TN"
+              }
+            },
+            "dateAndTimes": [{
+              "type": "ESTIMATED_DELIVERY",
+              "dateTime": "2025-10-05T20:00:00Z"
+            }]
+          }]
+        }]
+      }
+    }
+
+    Latency: 445ms
+
+UPS Tracking API v1:
+  Base URL: https://onlinetools.ups.com/api/track/v1/details
+  Authentication: API key and secret in headers
+  Rate limit: 500 requests per hour
+  Response format: JSON
+  Timeout: 12 seconds per request
+
+  Sample UPS API request and response:
+
+  Request:
+    GET /api/track/v1/details/1Z999AA10123456784 HTTP/1.1
+    Host: onlinetools.ups.com
+    Authorization: Bearer ups_token_****
+    transId: req_ups_track_001
+    Accept: application/json
+
+  Response:
+    HTTP/1.1 200 OK
+    Content-Type: application/json
+
+    {
+      "trackResponse": {
+        "shipment": [{
+          "package": [{
+            "trackingNumber": "1Z999AA10123456784",
+            "currentStatus": {
+              "description": "On The Way",
+              "code": "I"
+            },
+            "activity": [{
+              "location": {
+                "address": {
+                  "city": "LOUISVILLE",
+                  "stateProvince": "KY"
+                }
+              },
+              "date": "20251003",
+              "time": "140000"
+            }],
+            "deliveryDate": [{
+              "type": "SDD",
+              "date": "20251004"
+            }]
+          }]
+        }]
+      }
+    }
+
+    Latency: 312ms
+
+--- Runbook: WebSocket Order Tracking Service ---
+
+Runbook identifier: RB-ORDER-009
+Owner: janet.okoye
+Last updated: 2025-10-03
+
+Overview:
+  The ws-order-tracking service provides real-time order tracking updates to customers via
+  WebSocket connections. It subscribes to Redis Pub/Sub channels for order tracking events
+  published by the logistics gateway and pushes updates to connected clients.
+
+Common issues and resolution:
+
+  Issue one: high number of zombie connections (heartbeat timeouts exceeding 5 percent)
+    Symptom: the heartbeat timeout rate metric in Datadog exceeds 5 percent of active
+    connections. This may indicate that the heartbeat interval is too aggressive for
+    mobile networks with high latency.
+    Diagnosis: check the heartbeat timeout rate on the ws-order-tracking monitoring
+    dashboard. Filter by user agent to determine if the issue is specific to mobile
+    clients. Check the network latency distribution for WebSocket ping/pong round trips.
+    Resolution: if the issue is mobile-specific, consider extending the pong timeout
+    from 10 seconds to 15 seconds for mobile user agents. If the issue is general,
+    extend the pong timeout for all clients. The timeout values are configurable via
+    environment variables and do not require a code change or redeployment.
+
+  Issue two: Redis Pub/Sub subscription failures
+    Symptom: new WebSocket connections fail to establish because the Redis SUBSCRIBE
+    operation times out after 5 seconds. The client receives a WebSocket close frame with
+    code 4002 (internal error).
+    Diagnosis: check the Redis cluster health for tracking-events-prod. Common causes
+    include Redis node failure (automatic failover should handle this within seconds),
+    network partition between the application and Redis, or Redis memory exhaustion.
+    Resolution: check Redis cluster status. If a node is down, verify failover completed.
+    If network partition, check Kubernetes network policies and pod DNS resolution. If
+    memory exhaustion, clear expired keys and increase Redis memory limit.
+
+  Issue three: carrier API polling failures
+    Symptom: tracking updates are not delivered to WebSocket clients because the logistics
+    gateway is unable to poll carrier APIs successfully.
+    Diagnosis: check the carrier API polling dashboard in Grafana. Filter by carrier to
+    identify which carrier API is failing. Check the carrier status pages for outage
+    information (DHL: https://developer.dhl.com/status, FedEx: https://developer.fedex.com/status,
+    UPS: https://developer.ups.com/status).
+    Resolution: carrier API outages are outside our control. The polling loop will
+    automatically retry failed requests in the next cycle. During a sustained carrier
+    outage, WebSocket clients will simply not receive updates for orders shipped via
+    that carrier. The REST polling fallback endpoint also depends on the same carrier
+    data, so both real-time and polling experiences are equally affected by carrier
+    API outages. No manual intervention required unless the outage persists for more
+    than 4 hours, in which case page the logistics team to investigate.
+
+  Issue four: connection limit reached on a pod
+    Symptom: new WebSocket connections are refused because a pod has reached its 10,000
+    connection limit. The client receives a 503 Service Unavailable response during the
+    WebSocket upgrade.
+    Diagnosis: check the active connections per pod metric in Datadog. If one pod has
+    significantly more connections than others, there may be a load balancing issue.
+    Resolution: the HPA should automatically scale up when connections reach 7,500 per
+    pod. If the HPA is not scaling, check the HPA status with kubectl. Common issues
+    include metrics not being available (check the Datadog cluster agent), HPA cooldown
+    period preventing scale-up, or max replicas reached. If max replicas is reached,
+    consider increasing it or optimizing connection handling to support more connections
+    per pod.
+
+Contact information:
+  Primary: janet.okoye via PagerDuty and Slack
+  Secondary: carlos.medina via PagerDuty and Slack
+  Escalation: order experience engineering manager
+
+--- WebSocket Load Testing Results (Staging Environment) ---
+
+  Tool: Artillery.io with WebSocket plugin
+  Environment: staging (mirrors production topology with 2 ws-order-tracking pods)
+  Date: 2025-10-02T22:00:00Z
+  Duration: 45 minutes (15 minute ramp-up, 20 minute sustained, 10 minute ramp-down)
+
+  Test configuration:
+    Target: 50,000 concurrent WebSocket connections
+    Ramp-up rate: 500 new connections per second during ramp-up phase
+    Each virtual client connects to a unique order tracking WebSocket endpoint, receives
+    simulated tracking updates every 30 seconds, and responds to heartbeat pings.
+    Think time between actions: none (WebSocket connections are persistent)
+
+  Results at peak load (50,000 concurrent connections):
+    Active connections: 49,847 (99.7% of target)
+    Connections that failed to establish: 153 (0.3% failure rate)
+    Connection establishment p50 latency: 45 milliseconds
+    Connection establishment p99 latency: 312 milliseconds
+    Tracking update delivery p50 latency: 3 milliseconds from Redis publish to client receive
+    Tracking update delivery p99 latency: 18 milliseconds
+    Heartbeat round-trip p50: 12 milliseconds
+    Heartbeat round-trip p99: 48 milliseconds
+    Heartbeat timeouts: 247 out of 49,847 connections (0.5% timeout rate)
+    Graceful disconnects during test: 1,203
+    Reconnections after disconnect: 1,189 (98.8% reconnection success rate)
+
+  Pod-level metrics at peak:
+    Pod 1 (us-east-1): 25,012 connections, CPU 34%, memory 1.8 GB of 2 GB limit
+    Pod 2 (us-east-1): 24,835 connections, CPU 31%, memory 1.7 GB of 2 GB limit
+    Note: at 25,000 connections per pod, memory usage is 1.8 GB which is within the
+    2 GB limit but does not leave much headroom. Recommendation: increase memory limit
+    to 4 GB for production when scaling beyond 25 percent rollout.
+
+  Redis metrics at peak:
+    Pub/Sub channels active: 49,847
+    Messages published per second: 1,661 (approximately 50,000 connections divided by
+    30 second tracking update interval)
+    Publish latency p50: 0.2 milliseconds
+    Publish latency p99: 1.1 milliseconds
+    Memory usage: 820 MB of 4 GB
+    CPU: 22%
+    Network bandwidth: 14 MB/s ingress, 28 MB/s egress (fan-out to 2 subscribers per message)
+
+  Conclusions from load test:
+    The WebSocket service successfully handled 50,000 concurrent connections across 2 pods
+    in the staging environment. The primary bottleneck is memory, not CPU. At production
+    scale with 10 pods and 10,000 connections per pod, the service can handle 100,000
+    concurrent connections which is more than sufficient for our projected peak traffic
+    of 40,000 concurrent tracking sessions. The Redis Pub/Sub infrastructure handled
+    1,661 messages per second without any issues and has headroom to support 10x this
+    volume if needed.
+
+    Recommendations for production:
+    One: increase memory limit from 2 GB to 4 GB when ramping beyond 25 percent to
+    provide adequate headroom for garbage collection and connection state.
+    Two: set the HPA target to 7,500 connections per pod (75 percent of the 10,000 limit)
+    to ensure scaling happens before pods reach capacity.
+    Three: monitor the heartbeat timeout rate closely during mobile rollout, as mobile
+    networks have higher latency and more frequent connectivity interruptions.
+    Four: consider implementing connection draining during pod deployments, where existing
+    connections are gracefully migrated to new pods rather than abruptly closed.
+
+--- Grafana Dashboard: ws-order-tracking-monitoring ---
+
+  Dashboard URL: https://grafana.vantage.internal/d/ws-order-tracking
+  Owner: janet.okoye
+  Created: 2025-10-03
+  Refresh interval: 10 seconds
+
+  Panel 1: Active WebSocket Connections
+    Query: sum of vantage.ws.order_tracking.active_connections grouped by pod
+    Visualization: time series with stacked areas per pod
+    Alert: if any single pod exceeds 8,000 connections
+
+  Panel 2: Connection Duration Distribution
+    Query: histogram of WebSocket connection duration in minutes
+    Visualization: histogram with buckets at 1 minute, 5 minutes, 15 minutes, 30 minutes,
+    60 minutes, and 120 plus minutes
+    Purpose: understand how long users keep tracking pages open
+
+  Panel 3: Tracking Update Delivery Latency
+    Query: percentiles of time from Redis publish to WebSocket send at p50, p90, and p99
+    Visualization: time series with three lines
+    Alert: if p99 exceeds 100 milliseconds for 5 minutes
+
+  Panel 4: Heartbeat Timeout Rate
+    Query: rate of heartbeat timeouts divided by active connections
+    Visualization: time series as percentage
+    Alert: if rate exceeds 5 percent for 10 minutes
+
+  Panel 5: Carrier API Polling Success Rate
+    Query: successful polls divided by total polls grouped by carrier
+    Visualization: time series with three lines (DHL, FedEx, UPS)
+    Alert: if any carrier drops below 95 percent for 15 minutes
+
+  Panel 6: Redis Pub/Sub Message Volume
+    Query: rate of messages published to order tracking channels per second
+    Visualization: time series
+    Purpose: capacity planning and anomaly detection
+
+--- PagerDuty Incident Response Configuration ---
+
+  Service: ws-order-tracking
+  Escalation policy: order-experience-oncall
+
+  Level one: primary on-call for the order experience team receives the alert. The
+  engineer has 5 minutes to acknowledge. If the incident is a WebSocket service issue,
+  the on-call engineer should check the monitoring dashboard, review recent deployments,
+  and assess whether the kill switch should be activated. For carrier API issues, no
+  immediate action is required since the polling loop handles retries automatically.
+
+  Level two: if the primary on-call does not acknowledge within 5 minutes, the secondary
+  on-call and the checkout team lead carlos.medina are paged simultaneously. The secondary
+  on-call should coordinate with the primary or take ownership if the primary is
+  unavailable.
+
+  Level three: if neither the primary nor secondary acknowledges within 15 minutes, the
+  engineering manager for the order experience team is paged along with the VP of
+  engineering. At this level, the incident should be treated as an active production
+  outage and an incident channel should be created in Slack.
+
+  Incident severity mapping:
+    P1 severity is for total WebSocket service outage affecting all users. The expected
+    response time is under 5 minutes and the target resolution time is under 30 minutes.
+    P2 severity is for partial degradation such as high error rates, memory pressure, or
+    carrier API failures. The expected response time is under 15 minutes and the target
+    resolution time is under 1 hour.
+    P3 severity is for minor issues such as elevated heartbeat timeout rates or non-critical
+    metric anomalies. These are addressed during business hours and have a target
+    resolution time of 1 business day.
+
+  Week of 2025-10-03 on-call schedule:
+    Primary: janet.okoye (weekdays 09:00 to 18:00 Eastern Time)
+    Secondary: carlos.medina (weekdays 09:00 to 18:00 Eastern Time)
+    After hours: rotating (currently janet.okoye for weeknights and weekends)
+
+================================================================================
+END OF LOG — 2025-10-03
+================================================================================

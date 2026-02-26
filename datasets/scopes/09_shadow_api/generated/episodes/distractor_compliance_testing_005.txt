@@ -1,0 +1,974 @@
+================================================================================
+VANTAGE COMMERCE — COMPLIANCE & SECURITY TESTING LOG
+Date: 2025-10-08
+Classification: CONFIDENTIAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: SOC 2 Type II — Auditor Onsite Fieldwork Day 3 Notes
+────────────────────────────────────────────────────────────────────────────────
+
+Title: SOC 2 Type II — Auditor Onsite Fieldwork Day 3 Notes
+Auditor: James Reiter (Thornton-Kiley Associates, QSA/SOC 2 lead)
+Associate Auditor: Sarah Kim (Thornton-Kiley Associates)
+Date: 2025-10-08
+Attendees: Nathan Osei, Lena Vasquez, Carla Mendes, Marcus Tran
+Location: Vantage Commerce HQ, Conference Room B
+Fieldwork Day: 3 of 5 (October 6-10, 2025)
+
+--- Controls Tested Today ---
+
+Controls tested on Day 3:
+  CC7.1 — Infrastructure and Application Monitoring
+  CC7.2 — Incident Management
+  CC7.3 — Backup and Recovery
+  CC7.4 — Change Monitoring
+
+Evidence binder references: AV-2025-SOC2-CC7-001 through CC7-018
+
+--- CC7.1: Infrastructure and Application Monitoring ---
+
+James Reiter conducted CC7.1 walkthrough with Carla Mendes.
+
+Reviewed Grafana monitoring dashboards for production services:
+  Dashboard inventory:
+    1. Platform Overview — uptime, error rates, request volume for all services
+    2. Service Detail (per-service) — latency percentiles, CPU, memory, pod count, restart count
+    3. Database Performance — IOPS, connections, replication lag, slow queries
+    4. Redis & Cache — hit rate, memory, evictions, connection count
+    5. Kubernetes Cluster — node health, pod status, resource utilization
+    6. Network & Ingress — bandwidth, error rates, TLS handshake metrics
+    7. Compliance Monitoring — SLA & Control Health dashboard
+    8. Security — WAF events, auth failures, suspicious activity
+
+  Confirmed alerting covers:
+    - Availability (uptime below 99.9% triggers P2 alert)
+    - Latency (p99 above 2x SLA target triggers P2 alert)
+    - Error rates (5xx rate above 0.1% triggers P2 alert)
+    - Resource utilization (CPU above 85% for 5 minutes triggers P3 alert)
+    - Memory utilization (above 90% of limit triggers P3 alert)
+    - Disk usage (above 80% triggers P3 alert)
+
+  Data sources:
+    Prometheus (application metrics) — 15-second scrape interval
+    CloudWatch (AWS infrastructure) — 60-second interval
+    Loki (log aggregation) — real-time
+    PagerDuty (incident management) — webhook integration
+
+  Retention:
+    Prometheus: 30 days hot storage, 13 months in Thanos long-term storage
+    Loki: 90 days
+    CloudWatch: 15 months
+
+  James verified alert definitions in Grafana:
+    Total alert rules defined: 187
+    Alert rules actively firing: 3 (all P4/low priority)
+    Alert notification channels: PagerDuty (P1/P2), Slack #ops-alerts (P3/P4), email (P1 only)
+
+--- CC7.2: Incident Management ---
+
+Examined PagerDuty escalation policies:
+  3-tier escalation confirmed:
+    Tier 1: On-call engineer — acknowledgment within 5 minutes
+    Tier 2: Team lead — escalation if unacknowledged after 15 minutes
+    Tier 3: VP Engineering (Diana Flores) — escalation if unresolved after 30 minutes
+
+  Escalation policies reviewed for all 6 service teams:
+    1. platform-team: 4 engineers in rotation, weekly schedule
+    2. payments-team: 3 engineers in rotation, weekly schedule
+    3. search-team: 3 engineers in rotation, weekly schedule
+    4. sre-team: 6 engineers in rotation, daily schedule
+    5. data-team: 2 engineers in rotation, weekly schedule
+    6. infrastructure-team: 4 engineers in rotation, weekly schedule
+
+  PagerDuty statistics for audit period (April-September 2025):
+    Total incidents: 287
+    P1/P2 incidents: 36
+    P3 incidents: 142
+    P4 incidents: 109
+    Average MTTA (mean time to acknowledge): 3.4 minutes across all P1/P2 incidents
+    Average MTTR (mean time to resolve): 31 minutes across all P1/P2 incidents
+    No unplanned outages exceeding 30 minutes in audit period
+
+  Post-mortem process reviewed:
+    Policy: All P1/P2 incidents require a post-mortem within 5 business days
+    Post-mortem template: standard Vantage Commerce format (timeline, root cause, impact, action items)
+    Storage: Confluence under Engineering/Incidents/Post-Mortems/
+
+  Auditor Note CC7-OBS-001: Post-mortem completion rate below target. 28/36 incidents in audit period have finalized post-mortems (77.8%). 6 in draft, 2 not started. Recommend: establish weekly post-mortem review meeting and deadline policy. Management response due: 2025-10-17.
+
+  Post-mortem detail:
+    Total P1/P2 incidents in audit period: 36
+    Post-mortems finalized: 28 (77.8%)
+    Post-mortems in draft status: 6
+      PM-2025-0612 (search-service index corruption) — draft since 2025-06-17
+      PM-2025-0701 (payment-gateway timeout spike) — draft since 2025-07-05
+      PM-2025-0718 (notification-service email queue) — draft since 2025-07-22
+      PM-2025-0729 (checkout-service memory leak) — draft since 2025-08-02
+      PM-2025-0811 (api-gateway certificate rotation) — draft since 2025-08-15
+      PM-2025-0819 (search-service Elasticsearch reindex) — draft since 2025-08-23
+    Post-mortems not started: 2
+      PM-2025-0824 (inventory-service sync delay) — assigned but not started
+      PM-2025-0902 (shipping-calculator rate error) — assigned but not started
+
+  Nathan Osei committed to closing draft post-mortems by 2025-10-17.
+  Plan: Schedule dedicated post-mortem review sessions 2025-10-09, 10-13, 10-15 to finalize all 8 outstanding items.
+
+  James Reiter: Overall CC7 looks solid. The monitoring coverage is comprehensive and the escalation paths are well-defined. The post-mortem gap is the main thing — it's not a deficiency, but I'll note it as an observation if it's not closed by report issuance.
+
+--- CC7.3: Backup and Recovery ---
+
+Sarah Kim tested backup and recovery procedures.
+
+Backup schedule:
+  Daily incremental backups: 02:00 UTC
+  Weekly full backups: Sunday 04:00 UTC
+  Retention: 30 days
+  Storage: S3 bucket vc-backups-prod-us-east-1, cross-region replication to vc-backups-prod-eu-west-1
+  Encryption: AES-256-GCM via vault-kms-prod backup-encryption-key
+
+Requested evidence of last successful disaster recovery test:
+
+DR Test Evidence: DR-TEST-2025-Q2 executed 2025-06-20. Scope: full application stack (42 services). Environment: staging-dr (us-east-1). RTO achieved: 47 min (target 60 min). RPO achieved: 12 min data loss (target 15 min). Result: PASS.
+
+  DR test details:
+    Test ID: DR-TEST-2025-Q2
+    Date: 2025-06-20
+    Scope: Full application stack — 42 production services
+    Target environment: staging-dr (us-east-1, separate VPC)
+    Test type: Full stack recovery from last weekly backup + incremental
+
+    Timeline:
+      06:00 UTC — DR test initiated by SRE team
+      06:02 UTC — Backup catalog queried — latest weekly (June 15) + 5 daily incrementals identified
+      06:05 UTC — Database restore initiated (orders-db, payment-db, user-db, search-index)
+      06:22 UTC — Database restore complete (17 minutes for 4 databases, 847 GB total)
+      06:23 UTC — Application deployment initiated via ArgoCD DR manifest
+      06:35 UTC — 38/42 services running and passing health checks
+      06:41 UTC — 42/42 services running (4 slow starters: Elasticsearch, Kafka, Redis cluster, Vault)
+      06:42 UTC — End-to-end smoke test initiated (automated test suite)
+      06:47 UTC — Smoke test passed: checkout flow, payment flow, search, user authentication all functional
+      06:47 UTC — DR test complete
+
+    RTO (Recovery Time Objective):
+      Target: 60 minutes
+      Achieved: 47 minutes
+      Result: PASS
+
+    RPO (Recovery Point Objective):
+      Target: 15 minutes data loss
+      Achieved: 12 minutes data loss (gap between last incremental backup and DR initiation)
+      Result: PASS
+
+    Data integrity verification:
+      Order count in recovered database vs production: 99.998% match (delta: 34 orders in 12-minute RPO gap)
+      Payment records: 100% match (tokenization-service writes are synchronous)
+      User accounts: 100% match
+
+    Participants:
+      Lead: Anna Petrov (SRE Lead)
+      Support: Ben Okoro (SRE), Rachel Kim (Platform)
+      Observer: Nathan Osei (Internal Audit)
+
+    Evidence stored: AV-2025-SOC2-CC7-012
+
+  Next DR test scheduled: Q4 2025 (December)
+  DR test frequency: Semi-annual
+
+--- CC7.4: Change Monitoring ---
+
+James verified change monitoring controls:
+  All production deployments generate Kubernetes events captured in audit log
+  ArgoCD sync events forwarded to Splunk via webhook
+  ServiceNow change requests linked to deployment events via X-Change-ID header
+  Unauthorized changes (deployments without matching change request): 0 in audit period
+
+--- PCI-DSS Evidence Overlap ---
+
+Lena Vasquez walked through PCI-DSS evidence overlap:
+  34 controls shared between SOC 2 and PCI assessments
+  Evidence reuse reduces redundant testing
+  Shared control areas: access management (CC6/Req 7-8), change management (CC8/Req 6), monitoring (CC7/Req 10-11)
+  Lena maintains a cross-reference spreadsheet mapping SOC 2 controls to PCI-DSS requirements
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: Incident Summary — INC-2025-1003: Certificate Expiry Alert
+────────────────────────────────────────────────────────────────────────────────
+
+Title: Incident Summary — INC-2025-1003: Certificate Expiry Alert for payments.vantage.com
+Incident ID: INC-2025-1003
+Severity: P3
+Service: certificate-monitoring
+Date: 2025-10-08
+On-call: Ben Okoro (SRE)
+
+--- Timeline ---
+
+INC-2025-1003 Timeline:
+  09:14 UTC — Alert: payments.vantage.com cert expires in 6d.
+  09:16 UTC — Ack (Ben Okoro).
+  09:28 UTC — Manual renewal initiated.
+  09:31 UTC — Cert issued by DigiCert.
+  09:45 UTC — Deployed to ingress.
+  09:52 UTC — Resolved. Duration: 38m.
+
+--- Detailed Timeline ---
+
+[09:14:22 UTC] PagerDuty alert fired
+  Alert: certificate-monitoring — *.payments.vantage.com expires in 6 days (2025-10-14)
+  Service: certificate-monitoring
+  Severity: P3
+  Routing: sre-team on-call rotation
+  On-call: Ben Okoro
+
+[09:16:01 UTC] Alert acknowledged by Ben Okoro
+  MTTA: 1 minute 39 seconds
+
+[09:16:30 UTC] Ben checked cert-manager logs
+  kubectl -n cert-management logs -l app=cert-manager --since=72h | grep payments.vantage.com
+  Finding: auto-renewal had failed on 2025-10-05 03:00 UTC
+
+[09:17:15 UTC] cert-manager error log excerpt:
+  2025-10-05 03:00:14 UTC ERROR cert-manager/certificates: Failed to renew certificate
+    certificate: payments-wildcard
+    namespace: cert-management
+    issuer: digicert-prod
+    error: "HTTP 429 Too Many Requests from DigiCert API"
+    retry: false (no retry configured for 429)
+    next_attempt: none (cert-manager v1.12.3 does not retry on 429)
+
+Root cause: cert-manager renewal job ran 2025-10-05 03:00 UTC, received HTTP 429 from DigiCert API, did not retry. cert-manager v1.12.3 has no built-in retry for 429.
+
+[09:20:00 UTC] Ben investigated DigiCert API status
+  DigiCert status page: https://status.digicert.com — no active incidents on 2025-10-05
+  Likely cause: rate limit hit due to multiple certificate renewals scheduled at same time (3 certificates due in October)
+  DigiCert rate limit: 20 requests per minute per API key
+
+[09:28:00 UTC] Manual renewal initiated via DigiCert portal
+  Certificate CN: *.payments.vantage.com
+  SAN: payments.vantage.com
+  Key type: RSA 2048
+  Validity: 1 year
+  DigiCert order ID: DC-2025-10-08-00847
+
+[09:31:22 UTC] New certificate issued by DigiCert
+  Previous certificate serial: 0A:3B:7C:... (issued 2024-10-09, expires 2025-10-14)
+  New certificate serial: 1D:4E:8F:... (issued 2025-10-08, expires 2026-10-08)
+
+[09:32:00 UTC] Certificate downloaded and base64-encoded for Kubernetes secret
+
+[09:33:00 UTC] Kubernetes secret updated
+  kubectl -n payment-gateway create secret tls payments-wildcard-tls \
+    --cert=payments-wildcard-2025.pem \
+    --key=payments-wildcard-2025-key.pem \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+[09:35:00 UTC] Ingress controller reload triggered
+  kubectl -n payment-gateway rollout restart deployment/nginx-ingress-payment-gateway
+
+[09:38:00 UTC] Ingress pod rolling restart in progress
+  Old pod: nginx-ingress-payment-gw-7d8b9c4f6-abc12 (terminating)
+  New pod: nginx-ingress-payment-gw-7d8b9c4f6-xyz34 (running, ready)
+
+[09:45:00 UTC] Certificate deployed and verified
+  TLS handshake test:
+    openssl s_client -connect payments.vantage.com:443 -servername payments.vantage.com </dev/null 2>/dev/null | openssl x509 -noout -dates -serial
+    notBefore=Oct  8 00:00:00 2025 GMT
+    notAfter=Oct  8 23:59:59 2026 GMT
+    serial=1D4E8F...
+
+  curl verification:
+    curl -sI https://payments.vantage.com/health
+    HTTP/2 200
+    x-served-by: payment-gateway-prod
+    strict-transport-security: max-age=31536000; includeSubDomains
+
+[09:48:00 UTC] Ben updated cert-manager retry config
+  Added custom annotation to Certificate resource:
+    cert-manager.io/renew-before: 720h  (30 days before expiry)
+  Updated cert-manager Helm values:
+    extraArgs:
+      - --retry-on-429=true
+      - --retry-max-attempts=5
+      - --retry-backoff-initial=60s
+      - --retry-backoff-max=3600s
+
+  Note: These flags are only available in cert-manager v1.13.1+
+  Action item: Upgrade cert-manager to v1.13.1 which includes retry-on-429. Ticket: VC-SRE-3421.
+  Current version: v1.12.3
+  Target version: v1.13.1
+  Upgrade scheduled: next maintenance window (2025-10-14)
+
+[09:52:00 UTC] Incident resolved
+  Total duration: 38 minutes
+  Customer impact: None — certificate was renewed 6 days before expiry
+  Data loss: None
+  Service disruption: None
+
+--- Incident Metadata ---
+
+Certificate details:
+  CN: *.payments.vantage.com
+  SAN: payments.vantage.com
+  CA: DigiCert
+  Previous serial: 0A:3B:7C:... (issued 2024-10-09)
+  New serial: 1D:4E:8F:... (issued 2025-10-08, expires 2026-10-08)
+
+Payment-gateway processes approximately 580,000 transactions per day through this certificate.
+This is the certificate flagged in SOC 2 CC6.7 evidence collection (renewal ticket CERT-2025-091).
+No customer impact — certificate was renewed 6 days before expiry.
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Quarterly Access Review — Production Kubernetes Cluster
+────────────────────────────────────────────────────────────────────────────────
+
+Title: Quarterly Access Review — Production Kubernetes Cluster
+Reviewer: Marcus Tran (Security Lead)
+Period: Q3 2025 (July-September)
+Date: 2025-10-08
+Cluster: k8s-prod-us-east-1
+
+--- Review Summary ---
+
+Marcus Tran conducted quarterly access review for production Kubernetes cluster.
+Cross-referenced Okta group memberships with HR active employee list (BambooHR export dated 2025-10-07).
+
+Access Review Summary — k8s-prod-us-east-1:
+  Total principals reviewed: 78
+  Changes: 6 (7.7%)
+  Downgrades: 2 (admin to readonly)
+  Suspensions: 1 (extended leave)
+  Deprovisions: 3 (terminated)
+  No new grants.
+
+Previous quarter review (Q2): 4 changes out of 72 principals (5.6%).
+
+--- Group Review Details ---
+
+Okta Group: k8s-prod-admin (14 members)
+  Members reviewed: 14
+  Changes: 2 downgrades
+
+  Access changes:
+    1. User: lisa.park@vantage.com
+       Previous role: k8s-prod-admin
+       New role: k8s-prod-readonly
+       Reason: Transferred from SRE team to Product Management on 2025-09-01
+       Effective: 2025-10-08
+       Approved by: Marcus Tran
+
+    2. User: derek.wilson@vantage.com
+       Previous role: k8s-prod-admin
+       New role: k8s-prod-readonly
+       Reason: Transferred from Platform Engineering to Data Science on 2025-08-15
+       Effective: 2025-10-08
+       Approved by: Marcus Tran
+
+  Remaining 12 admin users confirmed with valid role justification.
+
+Okta Group: k8s-prod-deployer (23 members)
+  Members reviewed: 23
+  Changes: 1 suspension
+
+  Access change:
+    1. User: chris.nakamura@vantage.com
+       Action: Access suspended
+       Reason: Extended leave (parental) starting 2025-09-25, expected return 2026-01-06
+       Effective: 2025-10-08
+       Note: Access will be restored upon return and manager confirmation
+       Approved by: Marcus Tran
+
+  Remaining 22 deployer users confirmed active with valid role justification.
+
+Okta Group: k8s-prod-readonly (41 members)
+  Members reviewed: 41
+  Changes: 3 deprovisions
+
+  Finding: 3 terminated employees retained k8s-prod-readonly access. Termination dates: 2025-08-14, 2025-09-02, 2025-09-19. Deprovisioning delay: 25 days, 36 days, 19 days respectively. Root cause: HR termination feed delay for contractors.
+
+  Access changes:
+    1. User: contractor-a.smith@ext.vantage.com
+       Action: Deprovisioned
+       Termination date: 2025-08-14
+       Deprovisioning delay: 55 days (should have been within 24 hours)
+       Contract type: IT contractor (Acme Staffing)
+       Effective: 2025-10-08 (immediate)
+
+    2. User: contractor-b.jones@ext.vantage.com
+       Action: Deprovisioned
+       Termination date: 2025-09-02
+       Deprovisioning delay: 36 days
+       Contract type: IT contractor (Acme Staffing)
+       Effective: 2025-10-08 (immediate)
+
+    3. User: contractor-c.lee@ext.vantage.com
+       Action: Deprovisioned
+       Termination date: 2025-09-19
+       Deprovisioning delay: 19 days
+       Contract type: IT contractor (TechForce Solutions)
+       Effective: 2025-10-08 (immediate)
+
+  Root cause analysis:
+    BambooHR termination feed for contractors runs weekly (every Monday at 06:00 UTC).
+    Contractor termination events from staffing agencies arrive via email to People Operations.
+    People Operations enters termination manually into BambooHR, sometimes with delay.
+    Weekly sync means worst-case 7-day delay from BambooHR entry to Okta deprovisioning.
+    Combined with manual entry delay, total delay can exceed 24-hour SLA significantly.
+
+  Action item: Implement daily sync between BambooHR termination events and Okta group membership. Current sync is weekly. Ticket: VC-SEC-1312. Target: 2025-10-31.
+
+  Marcus escalated contractor deprovisioning gap to People Operations and IT.
+  People Operations response: Will prioritize daily sync implementation and explore direct API integration with staffing agency systems.
+
+--- Compliance Mapping ---
+
+Access review complies with:
+  SOC 2 CC6.1 (Logical Access — user provisioning/deprovisioning)
+  PCI-DSS Requirement 7.2 (Access control systems)
+
+Contractor deprovisioning SLA: 24 hours from termination.
+SLA violations this quarter: 3 (all contractor accounts, all readonly access).
+Previous quarter (Q2): 0 SLA violations.
+
+Review artifacts stored in audit vault: AV-2025-ACCESS-K8S-Q3
+Review documented in: access-review-q3-2025-k8s-prod.pdf
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX A: HTTP Log Excerpts — Certificate Renewal API Calls
+────────────────────────────────────────────────────────────────────────────────
+
+Source: cert-manager application log and DigiCert API interaction log
+Date: 2025-10-05 (failed auto-renewal) and 2025-10-08 (manual renewal)
+
+--- Failed Auto-Renewal (2025-10-05) ---
+
+[2025-10-05 03:00:01.201 UTC] INFO cert-manager starting renewal check
+  Certificates due for renewal: 1
+    payments-wildcard (*.payments.vantage.com) — expires 2025-10-14, renew-before: 336h (14 days)
+
+[2025-10-05 03:00:02.104 UTC] REQUEST
+  Method: POST
+  URL: https://services.digicert.com/v2/order/certificate/ssl_wildcard
+  Headers:
+    X-DC-DEVKEY: <digicert-api-key-redacted>
+    Content-Type: application/json
+    X-Request-ID: cm-req-2025-10-05-00001
+  Body: {
+    "certificate": {
+      "common_name": "*.payments.vantage.com",
+      "dns_names": ["payments.vantage.com"],
+      "csr": "<csr-pem-redacted>",
+      "server_platform": {"id": -1},
+      "signature_hash": "sha256"
+    },
+    "validity_years": 1,
+    "organization": {"id": 847291}
+  }
+
+[2025-10-05 03:00:03.412 UTC] RESPONSE
+  Status: 429 Too Many Requests
+  Headers:
+    Retry-After: 60
+    X-RateLimit-Limit: 20
+    X-RateLimit-Remaining: 0
+    X-RateLimit-Reset: 1728097263
+  Body: {
+    "errors": [
+      {"code": "rate_limit_exceeded", "message": "API rate limit exceeded. Please wait 60 seconds before retrying."}
+    ]
+  }
+
+[2025-10-05 03:00:03.420 UTC] ERROR cert-manager: certificate renewal failed
+  Certificate: payments-wildcard
+  Error: HTTP 429 from DigiCert API
+  Retry: NOT CONFIGURED (cert-manager v1.12.3 does not retry on 429)
+  Next renewal attempt: NONE (no retry scheduled)
+
+--- Successful Manual Renewal (2025-10-08) ---
+
+[2025-10-08 09:28:14.301 UTC] REQUEST (via DigiCert web portal, logged by API)
+  Method: POST
+  URL: https://services.digicert.com/v2/order/certificate/ssl_wildcard
+  Headers:
+    X-DC-DEVKEY: <digicert-api-key-redacted>
+    Content-Type: application/json
+  Body: {
+    "certificate": {
+      "common_name": "*.payments.vantage.com",
+      "dns_names": ["payments.vantage.com"],
+      "csr": "<csr-pem-redacted>",
+      "server_platform": {"id": -1},
+      "signature_hash": "sha256"
+    },
+    "validity_years": 1
+  }
+
+[2025-10-08 09:31:22.104 UTC] RESPONSE
+  Status: 201 Created
+  Body: {
+    "id": 847291,
+    "certificate_id": 9128374,
+    "status": "issued",
+    "common_name": "*.payments.vantage.com",
+    "valid_from": "2025-10-08T00:00:00Z",
+    "valid_till": "2026-10-08T23:59:59Z",
+    "serial_number": "1D:4E:8F:...",
+    "key_size": 2048,
+    "signature_hash": "sha256WithRSAEncryption"
+  }
+
+[2025-10-08 09:31:30.201 UTC] INFO Certificate downloaded and verified
+  SHA-256 fingerprint: a1:b2:c3:d4:e5:f6:...
+  Chain: *.payments.vantage.com → DigiCert TLS RSA SHA256 2020 CA1 → DigiCert Global Root G2
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX B: Okta Group Membership Export — k8s-prod-us-east-1
+────────────────────────────────────────────────────────────────────────────────
+
+Export date: 2025-10-08
+Source: Okta Admin Console → Directory → Groups
+Cross-reference: BambooHR active employee export 2025-10-07
+
+--- k8s-prod-admin (14 members, post-review: 12 admin + 2 downgraded) ---
+
+User                              | Department        | Status    | Last Login          | Action
+----------------------------------|-------------------|-----------|---------------------|------------------
+anna.petrov@vantage.com           | SRE               | Active    | 2025-10-08 07:22    | No change
+rachel.kim@vantage.com            | Platform          | Active    | 2025-10-08 10:05    | No change
+carla.mendes@vantage.com          | DevOps            | Active    | 2025-10-08 09:14    | No change
+tom.nguyen@vantage.com            | DevOps            | Active    | 2025-10-07 16:42    | No change
+sara.johnson@vantage.com          | DevOps            | Active    | 2025-10-08 08:30    | No change
+mike.chen@vantage.com             | DevOps            | Active    | 2025-10-07 11:20    | No change
+david.okafor@vantage.com          | Platform          | Active    | 2025-10-07 14:55    | No change
+james.wu@vantage.com              | SRE               | Active    | 2025-10-07 13:08    | No change
+ben.okoro@vantage.com             | SRE               | Active    | 2025-10-08 09:16    | No change
+alex.rivera@vantage.com           | Backend Eng       | Active    | 2025-10-08 08:45    | No change
+maria.gonzalez@vantage.com        | Backend Eng       | Active    | 2025-10-07 15:30    | No change
+kevin.zhao@vantage.com            | Data Eng          | Active    | 2025-10-07 10:22    | No change
+lisa.park@vantage.com             | Product Mgmt      | Active    | 2025-10-07 09:00    | DOWNGRADED → readonly
+derek.wilson@vantage.com          | Data Science      | Active    | 2025-10-06 14:15    | DOWNGRADED → readonly
+
+--- k8s-prod-deployer (23 members, post-review: 22 active + 1 suspended) ---
+
+[22 active deployer users — all verified as current employees in engineering roles]
+[1 suspended: chris.nakamura@vantage.com — parental leave]
+
+--- k8s-prod-readonly (41 members, post-review: 38 active + 3 deprovisioned) ---
+
+Deprovisioned users:
+  contractor-a.smith@ext.vantage.com  | Terminated 2025-08-14 | DEPROVISIONED 2025-10-08
+  contractor-b.jones@ext.vantage.com  | Terminated 2025-09-02 | DEPROVISIONED 2025-10-08
+  contractor-c.lee@ext.vantage.com    | Terminated 2025-09-19 | DEPROVISIONED 2025-10-08
+
+[38 active readonly users — all verified against BambooHR]
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX C: Runbook — Certificate Emergency Renewal Procedure
+────────────────────────────────────────────────────────────────────────────────
+
+Runbook: RB-SRE-012 — Certificate Emergency Renewal for CDE Services
+Author: Ben Okoro (SRE)
+Created: 2025-10-08
+Last Updated: 2025-10-08
+Trigger: PagerDuty alert for certificate expiring within 7 days with failed auto-renewal
+
+Symptoms:
+  - PagerDuty alert: certificate-monitoring — *.payments.vantage.com (or other CDE cert) expiring within 7 days
+  - cert-manager logs show failed renewal attempt with no scheduled retry
+
+Diagnosis:
+  Step 1: Check cert-manager logs for the specific certificate
+    kubectl -n cert-management logs -l app=cert-manager --since=72h | grep <cert-common-name>
+    Look for: HTTP 429 (rate limit), HTTP 500 (server error), timeout, or DNS validation failure
+
+  Step 2: Check DigiCert API status
+    curl -s https://status.digicert.com/api/v2/summary.json | jq '.status.description'
+    If DigiCert is experiencing an outage, wait and retry.
+
+  Step 3: Check cert-manager Certificate resource status
+    kubectl -n cert-management get certificate <cert-name> -o yaml
+    Look at status.conditions for failure reason
+
+Recovery:
+  Step 4: If DigiCert is healthy, initiate manual renewal
+    Option A: Via DigiCert web portal (https://www.digicert.com/account/orders)
+      - Log in with security team credentials (stored in Vault: secret/digicert/portal-credentials)
+      - Find the certificate order
+      - Click "Renew" and submit CSR
+    Option B: Via DigiCert API (if rate limit has reset)
+      curl -X POST https://services.digicert.com/v2/order/certificate/ssl_wildcard \
+        -H "X-DC-DEVKEY: $(vault read -field=api_key secret/digicert/api)" \
+        -H "Content-Type: application/json" \
+        -d @/tmp/cert-renewal-request.json
+
+  Step 5: Download new certificate
+    Download PEM file from DigiCert portal or API response
+    Verify certificate chain: openssl verify -CAfile digicert-chain.pem new-cert.pem
+
+  Step 6: Deploy to Kubernetes
+    kubectl -n <namespace> create secret tls <secret-name> \
+      --cert=new-cert.pem --key=private-key.pem \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+  Step 7: Restart ingress to pick up new certificate
+    kubectl -n <namespace> rollout restart deployment/<ingress-deployment>
+
+  Step 8: Verify new certificate is serving
+    openssl s_client -connect <domain>:443 -servername <domain> </dev/null 2>/dev/null | openssl x509 -noout -dates
+    Verify: notAfter shows new expiry date
+
+  Step 9: Resolve PagerDuty incident
+    Add timeline note with certificate serial numbers (old and new)
+    Add root cause (rate limit, DNS failure, etc.)
+    Resolve incident
+
+Post-incident:
+  Step 10: File ticket to upgrade cert-manager if needed
+    If failure was due to missing retry logic, file upgrade ticket
+    Current version: v1.12.3
+    Recommended version: v1.13.1 (includes retry-on-429)
+    Ticket: VC-SRE-3421
+
+Escalation:
+  If DigiCert is unreachable for >4 hours and certificate expires within 48 hours:
+    Contact DigiCert support: +1-801-701-9600 (24/7 premium support)
+    Account number: DC-VC-2024-PREMIUM
+    Escalate internally to Marcus Tran (Security Lead)
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX D: PagerDuty Incident Detail — INC-2025-1003 Full Export
+────────────────────────────────────────────────────────────────────────────────
+
+Incident export from PagerDuty API for audit evidence.
+
+Incident ID: INC-2025-1003
+Service: certificate-monitoring
+Severity: P3
+Urgency: High
+Status: Resolved
+Created at: 2025-10-08 09:14:22 UTC
+Acknowledged at: 2025-10-08 09:16:01 UTC
+Resolved at: 2025-10-08 09:52:00 UTC
+Duration: 37 minutes 38 seconds
+
+Assigned to: Ben Okoro (SRE team)
+Escalation policy: sre-team-on-call
+Escalation level reached: 1 of 3 (no escalation needed)
+
+Alert details:
+  Alert source: Grafana
+  Alert rule: certificate-expiry-warning
+  Alert condition: Certificate expires within 7 days AND auto-renewal has failed
+  Trigger data:
+    certificate_cn: "*.payments.vantage.com"
+    certificate_expiry: "2025-10-14T23:59:59Z"
+    days_until_expiry: 6
+    auto_renewal_status: "FAILED"
+    auto_renewal_last_attempt: "2025-10-05T03:00:03Z"
+    auto_renewal_error: "HTTP 429 Too Many Requests"
+
+Incident timeline (PagerDuty log):
+  09:14:22 — Incident triggered by Grafana webhook
+  09:14:23 — Notification sent to Ben Okoro via push notification (mobile)
+  09:14:23 — Notification sent to Ben Okoro via SMS
+  09:14:24 — Notification sent to Ben Okoro via phone call
+  09:16:01 — Incident acknowledged by Ben Okoro via mobile app
+  09:16:30 — Note added by Ben Okoro: "Investigating cert-manager logs for payments.vantage.com renewal failure"
+  09:20:00 — Note added by Ben Okoro: "Root cause identified: DigiCert API returned 429 on Oct 5, cert-manager v1.12.3 does not retry on 429"
+  09:28:00 — Note added by Ben Okoro: "Manual renewal initiated via DigiCert portal"
+  09:31:22 — Note added by Ben Okoro: "New certificate issued by DigiCert, serial 1D:4E:8F:..."
+  09:45:00 — Note added by Ben Okoro: "Certificate deployed to payment-gateway ingress, TLS handshake verified with new cert"
+  09:48:00 — Note added by Ben Okoro: "Updated cert-manager retry config. Filed VC-SRE-3421 for cert-manager upgrade to v1.13.1"
+  09:52:00 — Incident resolved by Ben Okoro
+  09:52:01 — Resolution note: "Certificate renewed manually. No customer impact. cert-manager upgrade ticket filed to prevent recurrence."
+
+Related incidents:
+  No previous certificate expiry incidents in the past 12 months.
+  This is the first time DigiCert API rate limiting has affected auto-renewal.
+
+Post-mortem required: No (P3 with no customer impact, but recommended for process improvement)
+Post-mortem status: Ben Okoro will write brief post-mortem by 2025-10-11 covering the cert-manager retry gap
+
+Evidence reference: AV-2025-SOC2-CC7-015 (incident management evidence for SOC 2 audit)
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX E: SOC 2 Fieldwork Progress Tracker — Days 1 through 3
+────────────────────────────────────────────────────────────────────────────────
+
+Auditor team: James Reiter (lead), Sarah Kim (associate)
+Fieldwork period: 2025-10-06 through 2025-10-10 (5 business days)
+Audit period: 2025-04-01 through 2025-09-30
+
+Day 1 (2025-10-06) — Monday
+  Focus areas: CC1 (Control Environment), CC2 (Communication and Information), CC3 (Risk Assessment)
+  Controls tested: 24
+  Results: 24 no exceptions
+  Observations: 0
+  Attendees: Nathan Osei, Lena Vasquez
+  Key activities:
+    Morning: Reviewed organizational chart, security policies, risk assessment documentation
+    Afternoon: Interviewed HR director on hiring and background check procedures
+    Afternoon: Reviewed security awareness training records and completion rates
+  Evidence reviewed: 42 documents from audit vault
+  Notes from James Reiter: "Control environment is well-documented. Security policies are current and comprehensive. Risk assessment process follows NIST CSF framework."
+
+Day 2 (2025-10-07) — Tuesday
+  Focus areas: CC5 (Control Activities), CC6 (Logical and Physical Access Controls)
+  Controls tested: 31
+  Results: 29 no exceptions, 1 observation, 1 exception
+  Observation: ICMP segmentation leak (CC6.6) — classified as observation because remediation is already scheduled for same day maintenance window
+  Exception: Contractor deprovisioning delay (CC6.1) — 3 instances of delayed deprovisioning for terminated contractors
+  Attendees: Nathan Osei, Lena Vasquez, Marcus Tran
+  Key activities:
+    Morning: Reviewed Okta provisioning and deprovisioning logs (CC6.1)
+    Morning: Reviewed MFA enforcement reports (CC6.2)
+    Afternoon: Reviewed Kubernetes RBAC audit results (CC6.3)
+    Afternoon: Reviewed network segmentation and VPC flow logs (CC6.6)
+    Afternoon: Reviewed TLS certificate inventory (CC6.7)
+  Evidence reviewed: 78 documents from audit vault
+  Notes from James Reiter: "CC6 is mostly strong. The contractor deprovisioning gap is the notable finding. Management has already identified the root cause and has a remediation ticket in progress."
+  Notes from Sarah Kim: "PCI-DSS evidence overlap is well-mapped. 34 shared controls between SOC 2 and PCI reduce redundant work."
+
+Day 3 (2025-10-08) — Wednesday
+  Focus areas: CC7 (System Operations), CC8 (Change Management)
+  Controls tested: 32
+  Results: 30 no exceptions, 2 observations
+  Observations: Post-mortem completion rate (CC7.2), patch SLA for 2 non-critical services (CC7.1/CC8)
+  Attendees: Nathan Osei, Lena Vasquez, Carla Mendes, Marcus Tran
+  Key activities:
+    Morning: Reviewed Grafana monitoring dashboards for production services (CC7.1)
+    Morning: Examined PagerDuty escalation policies and incident statistics (CC7.2)
+    Afternoon: Reviewed DR test evidence and backup procedures (CC7.3)
+    Afternoon: Reviewed change management process with Carla Mendes (CC8)
+    Afternoon: Lena Vasquez presented PCI-DSS evidence overlap mapping
+  Evidence reviewed: 64 documents from audit vault
+  Notes from James Reiter: "CC7 looks solid overall. Monitoring coverage is comprehensive. DR test results are strong with RTO and RPO both well within targets. Post-mortem completion rate is the main area for improvement."
+
+Day 4 (2025-10-09) — Thursday (planned)
+  Focus areas: CC8 (Change Management continued), CC9 (Risk Mitigation)
+  Planned activities:
+    Review ServiceNow change management workflow end-to-end
+    Sample 10 additional production deployments for change authorization verification
+    Review vendor management program and third-party risk assessments
+    Review insurance coverage and risk transfer documentation
+
+Day 5 (2025-10-10) — Friday (planned)
+  Focus areas: Wrap-up, exception discussion, management response drafting
+  Planned activities:
+    Review remaining evidence items
+    Discuss preliminary findings with management team
+    Collect management responses for any exceptions or observations
+    Plan report drafting timeline
+
+Overall fieldwork progress through Day 3:
+  Controls tested: 87 of 87 planned (100%)
+    Note: Some additional testing may occur on Days 4-5 based on findings
+  No exceptions: 82 (94.3%)
+  Observations: 4 (4.6%) — post-mortem rate, patch SLA, evidence collector gap, ICMP leak
+  Exceptions: 1 (1.1%) — contractor deprovisioning delay
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX F: Backup Verification Evidence — DR-TEST-2025-Q2 Extended Detail
+────────────────────────────────────────────────────────────────────────────────
+
+Test reference: DR-TEST-2025-Q2
+Full test report: AV-2025-SOC2-CC7-012
+
+Database recovery detail:
+
+  orders-db-primary:
+    Backup source: s3://vc-backups-prod-us-east-1/weekly/2025-06-15/orders-db-full.sql.gz
+    Backup size: 312 GB (compressed), 847 GB (uncompressed)
+    Restore duration: 8 minutes 42 seconds
+    Incremental backups applied: 5 (June 16-20)
+    Final database size after restore: 849 GB
+    Row count verification: 142,847,291 orders (matched production within RPO gap)
+
+  payment-db-primary:
+    Backup source: s3://vc-backups-prod-us-east-1/weekly/2025-06-15/payment-db-full.sql.gz
+    Backup size: 89 GB (compressed), 234 GB (uncompressed)
+    Restore duration: 3 minutes 18 seconds
+    Row count verification: 87,412,847 transactions (exact match with production)
+
+  user-db-primary:
+    Backup source: s3://vc-backups-prod-us-east-1/weekly/2025-06-15/user-db-full.sql.gz
+    Backup size: 24 GB (compressed), 67 GB (uncompressed)
+    Restore duration: 1 minute 12 seconds
+    Row count verification: 4,847,291 user accounts (exact match)
+
+  search-index (Elasticsearch):
+    Snapshot source: s3://vc-backups-prod-us-east-1/weekly/2025-06-15/es-snapshot-weekly
+    Snapshot size: 178 GB
+    Restore duration: 4 minutes 8 seconds
+    Index count: 24 indices restored
+    Document count verification: 12,847,291 product documents (exact match)
+
+Application deployment recovery detail:
+  ArgoCD DR manifest: infrastructure/dr/argocd-dr-manifest-2025q2.yaml
+  Total applications: 42
+  Deployment method: ArgoCD sync from DR-specific manifest pointing to production container images
+  Service startup order:
+    Phase 1 (infrastructure): Vault, Redis, Kafka, Elasticsearch — 6 services, 12 minutes
+    Phase 2 (core services): auth-service, user-profile-service, payment-gateway, tokenization-service — 8 services, 4 minutes
+    Phase 3 (application services): checkout-service, order-management-service, search-service, and 24 others — 28 services, 3 minutes
+
+  Health check results:
+    42/42 services passed readiness probes within 47 minutes of DR initiation
+    Slowest service to ready: Elasticsearch (required index warm-up after restore)
+    Fastest service to ready: auth-service (stateless, ready in 22 seconds after pod scheduled)
+
+Smoke test suite:
+  Test suite: tests/dr-smoke/checkout_flow.py, payment_flow.py, search.py, auth.py
+  Total test cases: 47
+  Passed: 47
+  Failed: 0
+  Duration: 5 minutes 12 seconds
+
+  Smoke test detail:
+    1. User authentication: Login with test user, obtain JWT, verify claims — PASS
+    2. Product search: Search for "wireless earbuds", verify results returned — PASS
+    3. Add to cart: Add product to cart, verify cart state — PASS
+    4. Checkout flow: Complete checkout with test payment — PASS
+    5. Order verification: Verify order created in orders-db — PASS
+    6. Payment verification: Verify payment record in payment-db — PASS
+    7. Notification: Verify order confirmation email queued — PASS
+    [... 40 additional test cases ...]
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX G: Kubernetes RBAC Changes — Access Downgrade and Deprovision Audit
+────────────────────────────────────────────────────────────────────────────────
+
+The following kubectl commands were executed by Marcus Tran on 2025-10-08 to implement the access review findings. All commands logged in Kubernetes audit log and Teleport session recording.
+
+Teleport session: teleport-sess-2025-10-08-1047
+User: marcus.tran@vantage.com
+Node: k8s-admin-bastion (authorized admin workstation)
+Session start: 2025-10-08 10:47:00 UTC
+Session end: 2025-10-08 11:15:00 UTC
+
+Commands executed with output:
+
+Step 1: Verify current group membership before changes
+  $ kubectl auth can-i --list --as=lisa.park@vantage.com
+  Resources                                Non-Resource URLs   Verbs
+  *.*                                      []                  [*]
+  Note: lisa.park currently has cluster-admin equivalent access via k8s-prod-admin group binding
+
+Step 2: Downgrade lisa.park from k8s-prod-admin to k8s-prod-readonly
+  Okta group change: removed lisa.park@vantage.com from k8s-prod-admin, added to k8s-prod-readonly
+  Okta API call:
+    PUT /api/v1/groups/00g1admin/users/00u1lisapark → 204 No Content (removed from admin)
+    PUT /api/v1/groups/00g1readonly/users/00u1lisapark → 204 No Content (added to readonly)
+
+  Verification after Okta sync (approximately 2 minutes):
+  $ kubectl auth can-i create pods --as=lisa.park@vantage.com -n production
+  no
+  $ kubectl auth can-i get pods --as=lisa.park@vantage.com -n production
+  yes
+  Result: lisa.park now has readonly access only. Cannot create, update, or delete resources.
+
+Step 3: Downgrade derek.wilson from k8s-prod-admin to k8s-prod-readonly
+  Okta group change: removed derek.wilson@vantage.com from k8s-prod-admin, added to k8s-prod-readonly
+  Verification:
+  $ kubectl auth can-i create deployments --as=derek.wilson@vantage.com -n production
+  no
+  $ kubectl auth can-i get deployments --as=derek.wilson@vantage.com -n production
+  yes
+  Result: derek.wilson now has readonly access only. Downgrade confirmed.
+
+Step 4: Suspend chris.nakamura (extended leave)
+  Okta account action: suspended chris.nakamura@vantage.com account
+  Okta API call:
+    POST /api/v1/users/00u1chrisnakamura/lifecycle/suspend → 200 OK
+  Verification:
+  $ kubectl auth can-i get pods --as=chris.nakamura@vantage.com -n production
+  Error: Unauthorized (user account suspended in Okta, OIDC token invalid)
+  Result: chris.nakamura cannot authenticate to Kubernetes. Access fully suspended.
+
+Step 5: Deprovision 3 terminated contractors
+  Okta account action: deactivated and deleted contractor accounts
+
+  contractor-a.smith@ext.vantage.com:
+    POST /api/v1/users/00u1contasmith/lifecycle/deactivate → 200 OK
+    DELETE /api/v1/users/00u1contasmith → 204 No Content
+    Verification: kubectl auth can-i get pods --as=contractor-a.smith@ext.vantage.com → Error: user not found
+    Result: Account fully deprovisioned.
+
+  contractor-b.jones@ext.vantage.com:
+    POST /api/v1/users/00u1contbjones/lifecycle/deactivate → 200 OK
+    DELETE /api/v1/users/00u1contbjones → 204 No Content
+    Result: Account fully deprovisioned.
+
+  contractor-c.lee@ext.vantage.com:
+    POST /api/v1/users/00u1contclee/lifecycle/deactivate → 200 OK
+    DELETE /api/v1/users/00u1contclee → 204 No Content
+    Result: Account fully deprovisioned.
+
+Step 6: Final verification of all changes
+  $ kubectl get clusterrolebinding k8s-prod-admin-binding -o jsonpath='{.subjects[*].name}' | tr ' ' '\n' | wc -l
+  12
+  (was 14 before downgrades — lisa.park and derek.wilson removed)
+
+  $ kubectl get clusterrolebinding k8s-prod-readonly-binding -o jsonpath='{.subjects[*].name}' | tr ' ' '\n' | wc -l
+  40
+  (was 41 before deprovisions — 3 contractors removed, 2 downgrades added: net 40-3+2=39... actual count from Okta sync shows 40 because one new readonly user was added by HR earlier today)
+
+  Note: Minor discrepancy in readonly count will be verified in daily reconciliation report.
+
+Step 7: Generate access review summary report
+  $ python3 /opt/scripts/access-review-report.py --cluster k8s-prod-us-east-1 --quarter Q3-2025 --output /reports/access-review-q3-2025-k8s-prod.pdf
+  Report generated: 14 pages
+  Uploaded to audit vault: AV-2025-ACCESS-K8S-Q3
+
+Session end: 2025-10-08 11:15:00 UTC
+Total session duration: 28 minutes
+All changes completed and verified.
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX H: cert-manager Upgrade Plan — VC-SRE-3421
+────────────────────────────────────────────────────────────────────────────────
+
+JIRA Ticket: VC-SRE-3421
+Title: Upgrade cert-manager from v1.12.3 to v1.13.1 for 429 retry support
+Priority: P3 (Medium)
+Assignee: Ben Okoro (SRE)
+Reporter: Ben Okoro
+Created: 2025-10-08
+Target completion: 2025-10-14 (next maintenance window)
+Status: Open
+
+Description:
+  cert-manager v1.12.3 does not retry certificate renewal on HTTP 429 (Too Many Requests)
+  from certificate authorities. This caused the payments.vantage.com wildcard certificate
+  auto-renewal to fail on 2025-10-05, requiring manual intervention (INC-2025-1003).
+  cert-manager v1.13.1 includes built-in retry with exponential backoff for 429 responses.
+
+Upgrade plan:
+  1. Test upgrade in staging-cert-management namespace (pre-maintenance window)
+  2. Verify existing certificates are not disrupted during upgrade
+  3. Deploy upgrade during maintenance window (Tuesday 2025-10-14 02:00-04:00 UTC)
+  4. Verify all Certificate resources show Ready status after upgrade
+  5. Trigger a test renewal to verify 429 retry behavior with DigiCert sandbox
+
+Helm values changes:
+  Current: cert-manager chart version 1.12.3
+  Target: cert-manager chart version 1.13.1
+  New extraArgs:
+    --retry-on-429=true
+    --retry-max-attempts=5
+    --retry-backoff-initial=60s
+    --retry-backoff-max=3600s
+
+Risk assessment: LOW
+  cert-manager upgrade is backward-compatible for Certificate and Issuer CRDs
+  No expected disruption to existing certificates
+  Rollback: helm rollback cert-manager to previous revision
+
+Acceptance criteria:
+  All 187 tracked certificates show Ready status after upgrade
+  Test renewal against DigiCert sandbox succeeds with retry on simulated 429
+  No certificate-related PagerDuty alerts in 24 hours post-upgrade
+
+================================================================================
+END OF DOCUMENT — 2025-10-08
+================================================================================

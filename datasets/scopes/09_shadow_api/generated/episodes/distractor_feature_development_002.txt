@@ -1,0 +1,1421 @@
+================================================================================
+VANTAGE COMMERCE — FEATURE DEVELOPMENT LOG
+Date: 2025-09-16
+Classification: INTERNAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Feature Specification — Wishlist Sharing & Social Features
+────────────────────────────────────────────────────────────────────────────────
+
+Document ID: SPEC-2025-089
+Title: Wishlist Sharing & Social Features
+Author: maya.chen
+Status: IN REVIEW
+Team: Discovery & Engagement
+Target release: v4.2.0 (2025-10-01)
+Created: 2025-09-12
+Last updated: 2025-09-16
+Approvers: deepak.patel, angela.russo, lisa.park
+
+--- Affected Services ---
+
+- svc-wishlist
+- svc-notification-hub
+- svc-user-profile
+- CDN (Cloudflare R2 bucket: vantage-social-assets)
+- svc-og-renderer (new service, Puppeteer-based)
+- PostgreSQL (wishlist database, new wishlist_shares table)
+- Kafka cluster (new topic: wishlist.social.events)
+- Redis (rate limiter, share token cache)
+
+--- Key Stakeholders ---
+
+  Name              | Role              | Responsibility
+  ------------------|-------------------|------------------------------------
+  Maya Chen         | Product manager   | Feature owner, requirements, GTM
+  Deepak Patel      | Backend lead      | Architecture, API design, implementation
+  Lisa Park         | Data science      | A/B test design, metrics, analytics
+  Angela Russo      | Security review   | Security audit, token design, rate limiting
+  Kwame Asante      | Notifications     | Share notification integration
+
+--- Problem Statement ---
+
+User research conducted in Q2 2025 (N=2,400 survey respondents, 18 user interviews)
+showed that 34% of wishlist users want to share lists for holidays and birthdays. This
+is the number two requested feature after price alerts. Currently, users must manually
+screenshot their wishlists and share via messaging apps, losing product links, pricing
+information, and the ability for recipients to interact with the list.
+
+maya.chen: "User research shows 34% of wishlist users want to share lists for
+holidays/birthdays. This is the #2 requested feature after price alerts."
+
+--- Feature Description ---
+
+1. New endpoint: POST /api/v2/wishlists/{id}/share
+   Purpose: Generates a shareable link with Open Graph preview image
+   Authentication: Required (must own the wishlist)
+   Rate limit: 20 shares per hour per user (Redis sliding window)
+   Response: {share_url, share_token, preview_image_url, expires_at}
+
+2. Shared wishlists are read-only with optional "add to my list" action for logged-in
+   users. Anonymous recipients can view the list and click through to product pages but
+   cannot modify the shared list.
+
+3. Share events publish to Kafka topic wishlist.social.events for analytics consumption.
+   Event types: share_created, share_viewed, share_item_added, share_expired, share_revoked.
+   Consumers: analytics pipeline (Looker), recommendation engine, notification service.
+
+4. Rate limit: 20 shares per hour per user to prevent spam, enforced via Redis sliding
+   window counter. Implementation uses Redis ZADD with timestamp scores and ZRANGEBYSCORE
+   to count events in the window. Atomic via Lua script.
+
+5. OG preview images generated server-side using Puppeteer service (svc-og-renderer) with
+   product thumbnails. Each preview shows the wishlist title, owner's display name, item
+   count, and a grid of up to 4 product thumbnail images.
+
+deepak.patel: "Concern about the Puppeteer renderer — it's a new service and image
+generation under load could be expensive. Proposing we cache rendered images for 24h."
+
+--- Share Link Format ---
+
+  URL: https://vantage.com/wishlists/shared/{share_token}
+  Token: 22-character base62 string (~95 bits of entropy)
+  Generation: crypto.randomBytes(16).toString('base62')
+  Expiry: configurable per share (7 days, 30 days, or never)
+  Revocation: owner can revoke at any time via DELETE /api/v2/wishlists/{id}/shares/{token}
+
+  Example share URLs:
+    https://vantage.com/wishlists/shared/7fB9xK2mN4pQ8rT1vW3y
+    https://vantage.com/wishlists/shared/aH5jL8nP0sU3wX6zA9cE
+
+--- Database Schema ---
+
+  Table: wishlist_shares
+  Engine: PostgreSQL 15.4
+  Database: wishlist-prod
+
+  CREATE TABLE wishlist_shares (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    wishlist_id     UUID NOT NULL REFERENCES wishlists(id) ON DELETE CASCADE,
+    share_token     VARCHAR(22) NOT NULL UNIQUE,
+    created_by      UUID NOT NULL REFERENCES users(id),
+    expires_at      TIMESTAMP WITH TIME ZONE,
+    view_count      INTEGER NOT NULL DEFAULT 0,
+    items_added     INTEGER NOT NULL DEFAULT 0,
+    share_channel   VARCHAR(50),
+    is_revoked      BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+  );
+
+  CREATE INDEX idx_wishlist_shares_token ON wishlist_shares(share_token);
+  CREATE INDEX idx_wishlist_shares_wishlist_created ON wishlist_shares(wishlist_id, created_at DESC);
+  CREATE INDEX idx_wishlist_shares_created_by ON wishlist_shares(created_by);
+
+  Estimated table size at launch: ~50K rows (based on 5% share adoption of current wishlist users)
+  Growth estimate: ~10K new rows/month
+
+--- Kafka Event Schema ---
+
+  Topic: wishlist.social.events
+  Partitions: 12
+  Replication factor: 3
+  Retention: 30 days
+  Compression: lz4
+
+  Event schema (Avro):
+  {
+    "event_type": "string (enum: share_created, share_viewed, share_item_added, share_expired, share_revoked)",
+    "wishlist_id": "string (UUID)",
+    "user_id": "string (UUID, sharer)",
+    "share_token": "string",
+    "share_channel": "string (enum: link, email, facebook, twitter, whatsapp, copy_link)",
+    "item_count": "integer",
+    "recipient_user_id": "string (UUID, nullable, set on share_item_added)",
+    "timestamp": "string (ISO 8601)",
+    "metadata": {
+      "user_agent": "string",
+      "referrer": "string",
+      "country": "string (ISO 3166-1)"
+    }
+  }
+
+  Producer configuration:
+    enable.idempotence: true
+    acks: all
+    retries: 3
+    delivery.timeout.ms: 30000
+    max.in.flight.requests.per.connection: 1
+
+--- Privacy Controls ---
+
+  - Users can revoke share links at any time
+  - Expiry options: 7 days, 30 days, never (default: 30 days)
+  - Individual items can be toggled visible/hidden in shared view
+  - Share analytics (view count, items added) visible only to owner
+  - Shared list does not reveal owner's email, address, or payment info
+  - Recipients see only: display name, wishlist title, item names, prices, images
+
+--- Analytics Dashboard ---
+
+  Platform: Looker
+  Dashboard: "Wishlist Social — SPEC-2025-089"
+  Metrics:
+    - Share creation rate (shares/day, shares/user)
+    - Share conversion rate (views that result in "add to my list" action)
+    - Viral coefficient (shares per user that result in new wishlist creation)
+    - Items added from shared lists (total, per share)
+    - Share channel distribution (link, email, facebook, twitter, whatsapp, copy_link)
+    - Geographic distribution of share views
+    - Share link lifespan (time from creation to last view)
+    - Revocation rate (shares revoked / shares created)
+
+--- Open Graph Meta Tags ---
+
+  <meta property="og:type" content="product.group" />
+  <meta property="og:title" content="{owner_name}'s Wishlist: {wishlist_title}" />
+  <meta property="og:description" content="{item_count} items on {owner_name}'s wishlist" />
+  <meta property="og:image" content="https://cdn.vantage.com/social/{share_token}/preview.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:url" content="https://vantage.com/wishlists/shared/{share_token}" />
+
+  Twitter Card:
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="{owner_name}'s Wishlist" />
+  <meta name="twitter:description" content="Check out {item_count} items!" />
+  <meta name="twitter:image" content="https://cdn.vantage.com/social/{share_token}/preview.png" />
+
+--- HTTP Request/Response Samples ---
+
+[2025-09-16T10:22:14.551Z] Request:
+  POST /api/v2/wishlists/wl_8a2b3c4d5e6f/share HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_ws_001_share
+  X-Forwarded-For: 203.0.113.55
+  User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/117.0
+  Accept: application/json
+  Content-Length: 98
+
+  {
+    "channel": "copy_link",
+    "expires_in_days": 30,
+    "hidden_items": ["item_abc123"]
+  }
+
+[2025-09-16T10:22:15.204Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ws_001_share
+  X-Trace-ID: trace_ws_a1b2c3
+  X-RateLimit-Limit: 20
+  X-RateLimit-Remaining: 19
+  X-RateLimit-Reset: 1694862134
+  Content-Length: 312
+
+  {
+    "share_url": "https://vantage.com/wishlists/shared/7fB9xK2mN4pQ8rT1vW3y",
+    "share_token": "7fB9xK2mN4pQ8rT1vW3y",
+    "preview_image_url": "https://cdn.vantage.com/social/7fB9xK2mN4pQ8rT1vW3y/preview.png",
+    "expires_at": "2025-10-16T10:22:14Z",
+    "item_count": 8,
+    "hidden_items_count": 1,
+    "share_id": "share_9d8e7f6a5b4c"
+  }
+
+  Latency: 653ms (includes OG image render: 487ms)
+
+[2025-09-16T10:25:33.102Z] Request:
+  GET /wishlists/shared/7fB9xK2mN4pQ8rT1vW3y HTTP/1.1
+  Host: www.vantage.com
+  X-Request-ID: req_ws_002_view
+  X-Forwarded-For: 198.51.100.88
+  User-Agent: WhatsApp/2.23.20 (iPhone; iOS 17.0)
+  Accept: text/html
+  Accept-Language: en-US
+
+[2025-09-16T10:25:33.334Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: text/html; charset=utf-8
+  X-Request-ID: req_ws_002_view
+  Cache-Control: public, max-age=300
+  Content-Length: 45820
+
+  (HTML page with OG meta tags and rendered wishlist)
+
+  Latency: 232ms
+
+[2025-09-16T10:28:11.778Z] Request:
+  GET /api/v2/wishlists/shared/7fB9xK2mN4pQ8rT1vW3y HTTP/1.1
+  Host: api.vantage.com
+  X-Request-ID: req_ws_003_api
+  Accept: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+
+[2025-09-16T10:28:11.812Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ws_003_api
+  Content-Length: 2847
+
+  {
+    "wishlist": {
+      "title": "Holiday Gift Ideas 2025",
+      "owner_display_name": "Maya C.",
+      "item_count": 7,
+      "items": [
+        {
+          "product_id": "prod_1a2b3c",
+          "name": "Wireless Noise-Canceling Headphones",
+          "price": 249.99,
+          "currency": "USD",
+          "image_url": "https://cdn.vantage.com/products/prod_1a2b3c/thumb.jpg",
+          "in_stock": true
+        },
+        {
+          "product_id": "prod_4d5e6f",
+          "name": "Smart Watch Series 9",
+          "price": 399.00,
+          "currency": "USD",
+          "image_url": "https://cdn.vantage.com/products/prod_4d5e6f/thumb.jpg",
+          "in_stock": true
+        },
+        {
+          "product_id": "prod_7g8h9i",
+          "name": "Cashmere Scarf — Navy",
+          "price": 89.50,
+          "currency": "USD",
+          "image_url": "https://cdn.vantage.com/products/prod_7g8h9i/thumb.jpg",
+          "in_stock": true
+        },
+        {
+          "product_id": "prod_0j1k2l",
+          "name": "Leather Journal — Embossed",
+          "price": 45.00,
+          "currency": "USD",
+          "image_url": "https://cdn.vantage.com/products/prod_0j1k2l/thumb.jpg",
+          "in_stock": false
+        },
+        {
+          "product_id": "prod_3m4n5o",
+          "name": "Espresso Machine Pro",
+          "price": 599.00,
+          "currency": "USD",
+          "image_url": "https://cdn.vantage.com/products/prod_3m4n5o/thumb.jpg",
+          "in_stock": true
+        },
+        {
+          "product_id": "prod_6p7q8r",
+          "name": "Running Shoes — Cloud Foam",
+          "price": 129.99,
+          "currency": "USD",
+          "image_url": "https://cdn.vantage.com/products/prod_6p7q8r/thumb.jpg",
+          "in_stock": true
+        },
+        {
+          "product_id": "prod_9s0t1u",
+          "name": "Board Game Collection Box",
+          "price": 64.99,
+          "currency": "USD",
+          "image_url": "https://cdn.vantage.com/products/prod_9s0t1u/thumb.jpg",
+          "in_stock": true
+        }
+      ],
+      "total_value": 1577.47,
+      "created_at": "2025-08-20T14:30:00Z",
+      "share_view_count": 3
+    },
+    "can_add_to_own_list": true,
+    "is_authenticated": true
+  }
+
+  Latency: 34ms
+
+[2025-09-16T10:30:45.221Z] Request:
+  POST /api/v2/wishlists/my/items HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_ws_004_add
+  Accept: application/json
+  Content-Length: 89
+
+  {
+    "product_id": "prod_1a2b3c",
+    "source": "shared_wishlist",
+    "source_token": "7fB9xK2mN4pQ8rT1vW3y"
+  }
+
+[2025-09-16T10:30:45.287Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ws_004_add
+
+  {
+    "wishlist_item_id": "wli_5v6w7x8y",
+    "product_id": "prod_1a2b3c",
+    "added_at": "2025-09-16T10:30:45Z",
+    "wishlist_id": "wl_recipient_001"
+  }
+
+  Latency: 42ms
+
+[2025-09-16T10:33:18.009Z] Request:
+  POST /api/v2/wishlists/wl_8a2b3c4d5e6f/share HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_ws_005_ratelimit
+  Accept: application/json
+  Content-Length: 52
+
+  {
+    "channel": "email",
+    "expires_in_days": 7
+  }
+
+[2025-09-16T10:33:18.015Z] Response:
+  HTTP/1.1 429 Too Many Requests
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ws_005_ratelimit
+  X-RateLimit-Limit: 20
+  X-RateLimit-Remaining: 0
+  X-RateLimit-Reset: 1694865198
+  Retry-After: 3600
+
+  {
+    "error": "RATE_LIMIT_EXCEEDED",
+    "message": "Share rate limit exceeded. Maximum 20 shares per hour.",
+    "retry_after_seconds": 3600,
+    "request_id": "req_ws_005_ratelimit"
+  }
+
+  Latency: 6ms
+
+[2025-09-16T10:40:22.118Z] Request:
+  DELETE /api/v2/wishlists/wl_8a2b3c4d5e6f/shares/aH5jL8nP0sU3wX6zA9cE HTTP/1.1
+  Host: api.vantage.com
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_ws_006_revoke
+  Accept: application/json
+
+[2025-09-16T10:40:22.145Z] Response:
+  HTTP/1.1 204 No Content
+  X-Request-ID: req_ws_006_revoke
+
+  Latency: 27ms
+
+[2025-09-16T10:42:55.330Z] Request:
+  GET /wishlists/shared/aH5jL8nP0sU3wX6zA9cE HTTP/1.1
+  Host: www.vantage.com
+  X-Request-ID: req_ws_007_revoked
+  Accept: text/html
+
+[2025-09-16T10:42:55.338Z] Response:
+  HTTP/1.1 410 Gone
+  Content-Type: text/html; charset=utf-8
+  X-Request-ID: req_ws_007_revoked
+
+  (HTML page with "This shared wishlist is no longer available" message)
+
+  Latency: 8ms
+
+[2025-09-16T10:50:18.440Z] Request:
+  POST /api/v2/wishlists/wl_nonexistent/share HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_ws_008_notfound
+  Accept: application/json
+  Content-Length: 45
+
+  {
+    "channel": "copy_link",
+    "expires_in_days": 7
+  }
+
+[2025-09-16T10:50:18.452Z] Response:
+  HTTP/1.1 404 Not Found
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ws_008_notfound
+
+  {
+    "error": "WISHLIST_NOT_FOUND",
+    "message": "Wishlist wl_nonexistent does not exist or you do not have access",
+    "request_id": "req_ws_008_notfound"
+  }
+
+  Latency: 12ms
+
+[2025-09-16T10:55:44.210Z] Request:
+  POST /api/v2/wishlists/wl_other_user_list/share HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_ws_009_forbidden
+  Accept: application/json
+  Content-Length: 45
+
+  {
+    "channel": "copy_link",
+    "expires_in_days": 30
+  }
+
+[2025-09-16T10:55:44.228Z] Response:
+  HTTP/1.1 403 Forbidden
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ws_009_forbidden
+
+  {
+    "error": "FORBIDDEN",
+    "message": "You can only share wishlists you own",
+    "request_id": "req_ws_009_forbidden"
+  }
+
+  Latency: 18ms
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: A/B Test Configuration — Wishlist Share Button Placement
+────────────────────────────────────────────────────────────────────────────────
+
+Experiment ID: EXP-2025-147
+Name: wishlist_share_button_placement
+Platform: LaunchDarkly
+Team: Discovery & Engagement
+Status: RUNNING
+Start date: 2025-09-15
+Expected end date: 2025-09-29
+Owner: maya.chen
+Data analyst: lisa.park
+
+--- Experiment Design ---
+
+  Variant     | Traffic | Description
+  ------------|---------|------------------------------------------------------------
+  Control     | 50%     | Share button in overflow menu (three-dot icon) on wishlist page
+  Variant A   | 25%     | Prominent share button next to wishlist title with social icons
+  Variant B   | 25%     | Floating share FAB on mobile, inline button on desktop
+
+  Primary metric: share_initiated events per wishlist view
+  Target: +15% improvement over control
+
+  Guardrail metrics:
+    - Page load time (must not regress >200ms)
+    - wishlist_item_added rate (must not drop by more than 1%)
+    - Error rate on share flow (must remain <0.5%)
+
+  Statistical method: Sequential testing with always-valid p-values (no peeking penalty)
+  Confidence level: 95%
+  Minimum detectable effect: 10%
+
+lisa.park: "Power analysis says we need 14 days at current traffic to detect a 10% lift
+with 95% confidence. Adding the FAB variant because mobile is 68% of wishlist traffic."
+
+maya.chen: "If variant B wins on mobile but loses on desktop we'll ship a responsive
+version — FAB on mobile, inline on desktop."
+
+--- User Segmentation ---
+
+  Inclusion criteria:
+    - All logged-in users
+    - At least 1 wishlist item
+    - Account age > 7 days
+  Exclusion criteria:
+    - Internal/QA accounts (email domain @vantage.com, @vantage-qa.com)
+    - Users in active A/B tests on wishlist page (prevent collision)
+    - Users with browser extensions that modify page layout (detected via UA)
+
+  Estimated eligible population: 340,000 users/day
+  Estimated sessions per variant per day:
+    Control: ~85,000 sessions
+    Variant A: ~42,500 sessions
+    Variant B: ~42,500 sessions
+
+--- LaunchDarkly Configuration ---
+
+  Project: vantage-web
+  Environment: production
+  Flag key: wishlist-share-placement
+  Flag type: string (multivariate)
+  Variations:
+    - "control" (50% weight)
+    - "variant-a" (25% weight)
+    - "variant-b" (25% weight)
+  Default rule: serve "control"
+  Off variation: "control"
+  Client-side availability: JavaScript SDK
+
+  Targeting rules:
+    Rule 1: If user.account_type IN ["internal", "qa"] -> serve "control"
+    Rule 2: If user.wishlist_item_count == 0 -> serve "control"
+    Rule 3: Percentage rollout by user.id hash:
+      0-49%:   "control"
+      50-74%:  "variant-a"
+      75-99%:  "variant-b"
+
+--- Segment Analytics Events ---
+
+  Event: share_button_viewed
+    Properties: variant, platform (web/mobile), wishlist_item_count
+    Trigger: when wishlist page loads and share button is visible
+
+  Event: share_initiated
+    Properties: variant, platform, share_channel, wishlist_item_count
+    Trigger: when user clicks share button
+
+  Event: share_completed
+    Properties: variant, platform, share_channel, share_token, item_count
+    Trigger: when share link is successfully generated
+
+  Event: share_link_clicked (recipient side)
+    Properties: share_token, referrer, user_agent, is_authenticated
+    Trigger: when recipient opens the shared wishlist link
+
+--- Rollout Plan ---
+
+  Winner ships to 100% in v4.2.0 (2025-10-01)
+  Loser variants cleaned up in Sprint 39
+  Feature flag removed after 2 weeks at 100%
+  Cleanup PR tracked as DISC-2380
+
+--- HTTP Traces — A/B Test Flag Evaluation ---
+
+[2025-09-16T11:05:33.102Z] Request:
+  POST /sdk/evalx/vantage-web/contexts HTTP/1.1
+  Host: clientsdk.launchdarkly.com
+  Content-Type: application/json
+  Authorization: sdk-key-****
+  X-LaunchDarkly-Event-Schema: 4
+  Content-Length: 341
+
+  {
+    "key": "user_9a8b7c6d",
+    "kind": "user",
+    "custom": {
+      "account_type": "customer",
+      "wishlist_item_count": 5,
+      "platform": "web",
+      "region": "us-east-1"
+    }
+  }
+
+[2025-09-16T11:05:33.118Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json
+
+  {
+    "wishlist-share-placement": {
+      "value": "variant-b",
+      "variation": 2,
+      "version": 14,
+      "reason": {"kind": "RULE_MATCH", "ruleIndex": 2}
+    }
+  }
+
+  Latency: 16ms
+
+[2025-09-16T11:08:22.445Z] Request:
+  POST /sdk/evalx/vantage-web/contexts HTTP/1.1
+  Host: clientsdk.launchdarkly.com
+  Content-Type: application/json
+  Authorization: sdk-key-****
+  Content-Length: 298
+
+  {
+    "key": "user_internal_qa_01",
+    "kind": "user",
+    "custom": {
+      "account_type": "qa",
+      "wishlist_item_count": 12,
+      "platform": "web"
+    }
+  }
+
+[2025-09-16T11:08:22.461Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json
+
+  {
+    "wishlist-share-placement": {
+      "value": "control",
+      "variation": 0,
+      "version": 14,
+      "reason": {"kind": "RULE_MATCH", "ruleIndex": 0}
+    }
+  }
+
+  Latency: 14ms
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Code Review — PR #4638 Wishlist Sharing Backend
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/svc-wishlist
+PR: #4638
+Branch: feature/wishlist-sharing
+Author: deepak.patel
+Reviewers: angela.russo, kwame.asante
+Status: CHANGES REQUESTED
+Files changed: 22
+Insertions: 1204
+Deletions: 56
+Created: 2025-09-14T11:00:00Z
+Last updated: 2025-09-16T18:30:00Z
+
+--- Service Version ---
+
+svc-wishlist v2.6.0
+
+--- Files Changed (Summary) ---
+
+  File                                           | Changes | Type
+  -----------------------------------------------|---------|------
+  src/routes/wishlist-share.ts                   | +187    | New
+  src/services/ShareService.ts                   | +234    | New
+  src/services/OGRendererClient.ts               | +89     | New
+  src/middleware/share-rate-limiter.ts            | +67     | New
+  src/models/WishlistShare.ts                    | +45     | New
+  src/kafka/share-event-producer.ts              | +78     | New
+  migrations/048_add_wishlist_shares.sql          | +42     | New
+  tests/unit/share-service.test.ts               | +156    | New
+  tests/unit/share-rate-limiter.test.ts          | +48     | New
+  tests/integration/wishlist-share.test.ts       | +112    | New
+  src/config/circuit-breaker.ts                  | +34     | New
+  src/routes/wishlist.ts                         | -22/+18 | Modified
+  src/models/index.ts                            | +4      | Modified
+  package.json                                   | +8      | Modified
+  docker-compose.test.yml                        | -34/+48 | Modified
+
+--- Review Comments (Inline) ---
+
+File: src/routes/wishlist-share.ts
+
+  angela.russo [Line 34, 2025-09-16T10:15:00Z]:
+    "The share token lookup endpoint needs rate limiting too — without it someone
+    could enumerate valid tokens. Add 60 req/min per IP."
+
+    Severity: BLOCKING
+    Category: Security
+    Labels: security, rate-limiting
+
+  angela.russo [Line 78, 2025-09-16T10:22:00Z]:
+    The error response on invalid share token returns different HTTP status codes
+    for "not found" (404) vs "revoked" (410) vs "expired" (410). This leaks
+    information about whether a token ever existed. Return 404 for all cases.
+
+    Severity: NON-BLOCKING
+    Category: Security
+
+  angela.russo [Line 112, 2025-09-16T10:30:00Z]:
+    Share token generation uses crypto.randomBytes(16).toString('base62') which
+    gives 22 chars and approximately 95 bits of entropy. Acceptable for non-sensitive
+    share links. Approved.
+
+    Severity: INFORMATIONAL
+    Category: Security
+
+File: src/services/OGRendererClient.ts
+
+  kwame.asante [Line 23, 2025-09-16T11:45:00Z]:
+    "The Puppeteer renderer doesn't have a health check endpoint. If it goes down,
+    the share flow hangs for 30s on the HTTP timeout. Add a circuit breaker with 5s
+    timeout and fallback to a generic OG image."
+
+    Severity: BLOCKING
+    Category: Reliability
+
+File: src/kafka/share-event-producer.ts
+
+  kwame.asante [Line 15, 2025-09-16T11:52:00Z]:
+    Kafka producer uses idempotent delivery (enable.idempotence=true) with
+    exactly-once semantics. Good implementation.
+
+    Severity: INFORMATIONAL
+    Category: Architecture
+
+  kwame.asante [Line 28, 2025-09-16T11:55:00Z]:
+    Consider adding dead-letter topic for failed event deliveries. Currently if
+    Kafka is unavailable the event is logged and dropped.
+
+    Severity: NON-BLOCKING
+    Category: Reliability
+
+File: src/middleware/share-rate-limiter.ts
+
+  angela.russo [Line 8, 2025-09-16T10:35:00Z]:
+    Rate limiter implementation reviewed. Uses Redis MULTI/EXEC for atomicity with
+    ZADD and ZRANGEBYSCORE for sliding window. Correct implementation. Approved.
+
+    Severity: INFORMATIONAL
+    Category: Security
+
+File: migrations/048_add_wishlist_shares.sql
+
+  angela.russo [Line 5, 2025-09-16T10:40:00Z]:
+    Database migration adds index on (share_token) and (wishlist_id, created_at)
+    for efficient lookups. Migration is backward-compatible — new table only, no
+    column changes to existing wishlists table. Approved.
+
+    Severity: INFORMATIONAL
+    Category: Database
+
+--- Author Response ---
+
+  deepak.patel [2025-09-16T14:30:00Z]:
+    "Both valid. Adding IP rate limit on GET /shared/{token} and Resilience4j
+    circuit breaker for the renderer. Will push fixes tonight."
+
+    Changes committed:
+    1. IP rate limit: 60 req/min on GET /api/v2/wishlists/shared/{token}
+    2. Circuit breaker (Resilience4j):
+       - Failure threshold: 3 consecutive failures
+       - Wait duration: 30 seconds
+       - Fallback: return cached generic OG image from R2 bucket
+       - Timeout: 5 seconds
+    3. Unified 404 response for not-found, revoked, and expired tokens
+    4. Dead-letter topic: wishlist.social.events.dlq (7-day retention)
+
+--- Circuit Breaker Configuration ---
+
+  Library: Resilience4j v2.1.0
+  Instance: og-renderer-cb
+
+  Config:
+    failure_rate_threshold: 50%
+    slow_call_duration_threshold: 5s
+    slow_call_rate_threshold: 80%
+    minimum_number_of_calls: 3
+    wait_duration_in_open_state: 30s
+    permitted_number_of_calls_in_half_open_state: 2
+    sliding_window_type: COUNT_BASED
+    sliding_window_size: 10
+
+  Fallback behavior:
+    - On circuit open: return generic OG image URL from R2
+    - Generic image: https://cdn.vantage.com/social/default/wishlist-share-preview.png
+    - Log circuit breaker state change to Datadog
+
+  Datadog metrics:
+    - resilience4j.circuitbreaker.state{name="og-renderer-cb"}
+    - resilience4j.circuitbreaker.failure_rate{name="og-renderer-cb"}
+    - resilience4j.circuitbreaker.slow_call_rate{name="og-renderer-cb"}
+
+--- Internal HTTP Traces — OG Renderer Service ---
+
+[2025-09-16T14:45:22.110Z] Request:
+  POST /render HTTP/1.1
+  Host: svc-og-renderer.internal:3000
+  Content-Type: application/json
+  X-Request-ID: req_ogr_001
+  X-Circuit-Breaker: og-renderer-cb
+  X-Timeout-Ms: 5000
+
+  {
+    "template": "wishlist-share",
+    "data": {
+      "wishlist_title": "Holiday Gift Ideas 2025",
+      "owner_name": "Maya C.",
+      "items": [
+        {"name": "Wireless Headphones", "image": "https://cdn.vantage.com/products/prod_1a2b3c/thumb.jpg", "price": "$249.99"},
+        {"name": "Smart Watch", "image": "https://cdn.vantage.com/products/prod_4d5e6f/thumb.jpg", "price": "$399.00"},
+        {"name": "Cashmere Scarf", "image": "https://cdn.vantage.com/products/prod_7g8h9i/thumb.jpg", "price": "$89.50"},
+        {"name": "Espresso Machine", "image": "https://cdn.vantage.com/products/prod_3m4n5o/thumb.jpg", "price": "$599.00"}
+      ],
+      "item_count": 7
+    },
+    "output": {
+      "format": "png",
+      "width": 1200,
+      "height": 630,
+      "quality": 85
+    }
+  }
+
+[2025-09-16T14:45:22.597Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ogr_001
+  X-Render-Time-Ms: 478
+
+  {
+    "image_url": "https://cdn.vantage.com/social/7fB9xK2mN4pQ8rT1vW3y/preview.png",
+    "cache_key": "sha256:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    "cache_ttl_seconds": 86400,
+    "render_time_ms": 478,
+    "image_size_bytes": 142580
+  }
+
+  Latency: 487ms
+
+[2025-09-16T14:50:10.331Z] Request:
+  GET /healthz HTTP/1.1
+  Host: svc-og-renderer.internal:3000
+  X-Health-Check: true
+
+[2025-09-16T14:50:10.335Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json
+
+  {
+    "status": "healthy",
+    "browser_pool": {
+      "total": 3,
+      "available": 2,
+      "busy": 1
+    },
+    "r2_connection": "ok",
+    "uptime_seconds": 3420
+  }
+
+  Latency: 4ms
+
+[2025-09-16T15:02:45.881Z] Request:
+  POST /render HTTP/1.1
+  Host: svc-og-renderer.internal:3000
+  Content-Type: application/json
+  X-Request-ID: req_ogr_002
+  X-Circuit-Breaker: og-renderer-cb
+  X-Timeout-Ms: 5000
+
+  {
+    "template": "wishlist-share",
+    "data": {
+      "wishlist_title": "Kitchen Essentials",
+      "owner_name": "Alex T.",
+      "items": [
+        {"name": "Cast Iron Skillet 12in", "image": "https://cdn.vantage.com/products/prod_ki001/thumb.jpg", "price": "$34.99"},
+        {"name": "Chef Knife Set", "image": "https://cdn.vantage.com/products/prod_ki002/thumb.jpg", "price": "$189.00"},
+        {"name": "Stand Mixer Pro", "image": "https://cdn.vantage.com/products/prod_ki003/thumb.jpg", "price": "$449.00"},
+        {"name": "Bamboo Cutting Board", "image": "https://cdn.vantage.com/products/prod_ki004/thumb.jpg", "price": "$29.99"}
+      ],
+      "item_count": 11
+    },
+    "output": {
+      "format": "png",
+      "width": 1200,
+      "height": 630,
+      "quality": 85
+    }
+  }
+
+[2025-09-16T15:02:46.410Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_ogr_002
+  X-Render-Time-Ms: 521
+
+  {
+    "image_url": "https://cdn.vantage.com/social/bK4mN7pR2tV5xZ8aC1eG/preview.png",
+    "cache_key": "sha256:b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7",
+    "cache_ttl_seconds": 86400,
+    "render_time_ms": 521,
+    "image_size_bytes": 138920
+  }
+
+  Latency: 529ms
+
+--- Slack Thread: #discovery-eng PR Review Discussion ---
+
+[2025-09-16T10:45:00Z] deepak.patel:
+  PR #4638 is up for review. wishlist sharing backend — share link generation,
+  OG renderer integration, kafka events, rate limiting. angela and kwame, you're
+  both assigned.
+
+[2025-09-16T10:48:22Z] angela.russo:
+  looking at it now. will focus on security — token generation, rate limiting,
+  and the share lookup endpoint.
+
+[2025-09-16T10:52:11Z] kwame.asante:
+  i'll review the kafka producer and the OG renderer integration. heads up that
+  the renderer service is brand new — no prod history.
+
+[2025-09-16T11:30:00Z] angela.russo:
+  left comments. main issue is missing rate limit on the token lookup endpoint.
+  also the error response leaks token state.
+
+[2025-09-16T12:05:00Z] kwame.asante:
+  also left comments. the OG renderer needs a circuit breaker. if that service
+  goes down, it'll hang the share flow for 30 seconds.
+
+[2025-09-16T14:30:00Z] deepak.patel:
+  both valid points. i'll add the IP rate limit, circuit breaker, and unify the
+  error responses. pushing tonight.
+
+[2025-09-16T14:32:15Z] angela.russo:
+  once those are in i'm good to approve.
+
+[2025-09-16T14:33:40Z] kwame.asante:
+  same. also add a dead-letter topic for the kafka events if you can. not
+  blocking but good to have.
+
+[2025-09-16T14:35:00Z] deepak.patel:
+  will do. ETA: tonight around 9pm.
+
+[2025-09-16T14:36:22Z] maya.chen:
+  thanks team. how's the timeline looking for the 10% external rollout in sprint 39?
+
+[2025-09-16T14:38:00Z] deepak.patel:
+  on track. this PR merges tonight, OG renderer prod deploy is next week, then
+  we turn on the flag. main risk is the renderer load test — if it can't handle
+  500 concurrent renders we fall back to static images.
+
+[2025-09-16T14:40:11Z] maya.chen:
+  ok. wishlist sharing is the tentpole feature for the october product update email
+  so we need at least 10% external by sprint 39 end. keep me posted.
+
+[2025-09-16T14:41:30Z] lisa.park:
+  A/B test for share button placement has been running since yesterday. early data
+  looks promising for variant B on mobile but we need 12 more days for significance.
+
+[2025-09-16T14:43:00Z] maya.chen:
+  good. the A/B test result will inform the final UI but the backend can roll out
+  independently.
+
+[2025-09-16T14:45:22Z] kwame.asante:
+  btw deepak — the notification service can subscribe to the wishlist.social.events
+  topic to send push notifications when someone views a shared list. want me to
+  wire that up in parallel?
+
+[2025-09-16T14:47:10Z] deepak.patel:
+  yes please. just make sure we respect the notification preferences that kwame
+  is building for sprint 39. don't spam users with every view event — batch them
+  into a daily summary.
+
+[2025-09-16T14:48:44Z] kwame.asante:
+  makes sense. i'll add a "social" notification category and batch share views
+  into a daily digest. users can opt out via the new preferences API.
+
+--- Infrastructure Metrics: Redis Rate Limiter ---
+
+  Instance: rate-limiter-prod (shared instance)
+  Namespace: wishlists
+  Sampling period: 2025-09-16T00:00:00Z to 2025-09-16T23:59:59Z
+
+  Metric                              | Value
+  -------------------------------------|------------------
+  Rate limit checks (share create)     | 847
+  Rate limit blocks (share create)     | 3
+  Rate limit checks (share lookup)     | 12,441
+  Rate limit blocks (share lookup)     | 0
+  Redis commands/sec (rate limiter)    | 42
+  p50 rate limit check latency         | 0.6ms
+  p99 rate limit check latency         | 1.8ms
+  Lua script execution time (avg)      | 0.3ms
+  Memory used by rate limit keys       | 12 MB
+
+--- Grafana Alert: OG Renderer Health ---
+
+Alert: og-renderer-circuit-breaker-open
+  Condition: resilience4j_circuitbreaker_state{name="og-renderer-cb"} == "OPEN" for 1m
+  Severity: P2
+  Notification: #discovery-eng Slack, PagerDuty (deepak.patel)
+  Runbook: https://runbooks.vantage.internal/og-renderer/circuit-breaker-open
+
+Alert: og-renderer-high-render-time
+  Condition: histogram_quantile(0.99, og_render_duration_seconds) > 5 for 5m
+  Severity: P3
+  Notification: #discovery-eng Slack
+
+Alert: og-renderer-error-rate
+  Condition: rate(og_render_errors_total[5m]) / rate(og_render_requests_total[5m]) > 0.05 for 5m
+  Severity: P2
+  Notification: #discovery-eng Slack, PagerDuty (deepak.patel)
+
+--- PostgreSQL Migration Log ---
+
+Migration: 048_add_wishlist_shares.sql
+Database: wishlist-prod
+Executed: 2025-09-16T20:00:00Z (maintenance window)
+Execution time: 0.34 seconds
+Lock wait time: 0ms
+Tables created: 1 (wishlist_shares)
+Indexes created: 3
+Backward compatible: yes (additive only)
+Rollback script: 048_rollback_drop_wishlist_shares.sql
+
+  Verification queries:
+    SELECT count(*) FROM wishlist_shares;  -- 0 rows (empty table, expected)
+    SELECT indexname FROM pg_indexes WHERE tablename = 'wishlist_shares';
+    -- idx_wishlist_shares_token
+    -- idx_wishlist_shares_wishlist_created
+    -- idx_wishlist_shares_created_by
+
+--- Detailed Kafka Topic Configuration ---
+
+Topic: wishlist.social.events
+  Broker cluster: kafka-prod-01 through kafka-prod-06
+  Partitions: 12
+  Replication factor: 3
+  Min in-sync replicas: 2
+  Retention: 30 days (720 hours)
+  Retention bytes: unlimited
+  Compression: lz4
+  Cleanup policy: delete
+  Max message size: 1 MB
+  Segment size: 1 GB
+
+  Consumer groups:
+    Group: analytics-pipeline-wishlist-social
+      Consumers: 4 instances
+      Lag target: <1000 messages
+      Processing: batch (every 60 seconds)
+      Destination: Looker data warehouse (BigQuery)
+
+    Group: recommendation-engine-social-signals
+      Consumers: 2 instances
+      Lag target: <500 messages
+      Processing: real-time
+      Destination: in-memory graph (Neo4j)
+
+    Group: notification-service-social-digest
+      Consumers: 2 instances
+      Lag target: <2000 messages
+      Processing: batch (daily at 09:00 local time)
+      Destination: notification queue (SQS)
+
+  Dead-letter topic: wishlist.social.events.dlq
+    Partitions: 3
+    Retention: 7 days
+    Monitoring: alert if message count > 0 for 15 minutes
+
+  Topic metrics (2025-09-16):
+    Messages produced: 1,247
+    Messages consumed (analytics): 1,247
+    Messages consumed (recommendations): 1,247
+    Messages consumed (notifications): 1,247
+    Producer throughput: ~52 messages/hour
+    Average message size: 892 bytes
+    Consumer lag (all groups): 0
+
+--- Cloudflare R2 Storage Configuration ---
+
+  Bucket: vantage-social-assets
+  Region: auto (Cloudflare edge)
+  Storage class: Standard
+  Access: private (presigned URLs for public access)
+
+  Directory structure:
+    /social/{share_token}/preview.png     (generated OG images)
+    /social/default/wishlist-share-preview.png  (fallback image)
+    /social/templates/wishlist-share.html  (Puppeteer template)
+
+  Lifecycle rules:
+    - Delete objects matching /social/*/preview.png after 30 days if view_count == 0
+    - Move objects to Infrequent Access after 90 days
+    - Delete expired share images 7 days after share token expires
+
+  Current storage usage:
+    Total objects: 3,421
+    Total size: 487 MB
+    Average object size: 142 KB
+    Bandwidth (egress) this month: 12.4 GB
+
+  Presigned URL configuration:
+    Expiry: 1 hour
+    Signature version: v4
+    Allowed HTTP methods: GET
+    Rate limit on presigned URL generation: none (internal only)
+
+--- Puppeteer Service (svc-og-renderer) Technical Details ---
+
+  Runtime: Node.js 20 LTS
+  Puppeteer version: v21.5.0
+  Chromium version: 119.0.6045.105 (bundled)
+  Browser pool size: 3 concurrent browser instances per pod
+  Page pool per browser: 2 concurrent pages
+  Max concurrent renders per pod: 6
+
+  Render pipeline:
+    1. Receive render request with template + data
+    2. Acquire browser from pool (wait up to 2s)
+    3. Create new page in browser
+    4. Navigate to template HTML with data injected via query params
+    5. Wait for page load + font rendering (DOMContentLoaded + 500ms)
+    6. Take screenshot (1200x630, 85% quality PNG)
+    7. Upload to R2 bucket
+    8. Return image URL and metadata
+    9. Release browser back to pool
+
+  Error handling:
+    - Browser crash: restart browser instance, retry render once
+    - Page timeout (>5s): return error, circuit breaker counts failure
+    - R2 upload failure: retry once, return error if still failing
+    - Pool exhaustion: queue request, timeout after 5s if no browser available
+
+  Memory profile:
+    - Base memory per pod: 180 MB (Node.js + Puppeteer)
+    - Per browser instance: ~110 MB (Chromium)
+    - Per active page: ~35 MB
+    - Peak memory with full pool: ~520 MB
+    - Pod memory limit: 512 MB (tight — may need to increase)
+
+  Resource monitoring:
+    Datadog metrics:
+      - og_renderer.browser_pool.available (gauge)
+      - og_renderer.browser_pool.busy (gauge)
+      - og_renderer.render_duration_ms (histogram)
+      - og_renderer.render_errors_total (counter)
+      - og_renderer.r2_upload_duration_ms (histogram)
+      - og_renderer.memory_usage_bytes (gauge)
+
+--- Looker Dashboard: Wishlist Social Analytics (Preview) ---
+
+Dashboard: Wishlist Social — SPEC-2025-089
+Status: draft (pending share feature launch)
+Owner: lisa.park
+Refresh schedule: hourly
+
+  Tile 1: Share Creation Funnel
+    Data source: Segment events (share_button_viewed -> share_initiated -> share_completed)
+    Visualization: funnel chart
+    Dimensions: date, platform (web/mobile), share_channel
+    Expected conversion: button_viewed -> initiated ~8%, initiated -> completed ~92%
+
+  Tile 2: Share Engagement Over Time
+    Data source: Kafka topic (wishlist.social.events -> BigQuery)
+    Visualization: time series (daily)
+    Metrics: shares_created, shares_viewed, items_added_from_shares
+    Breakdowns: by channel, by platform
+
+  Tile 3: Viral Coefficient
+    Data source: BigQuery materialized view
+    Visualization: single value + trend
+    Formula: (new wishlists created by share recipients) / (unique shares with views)
+    Target: >0.1 (each 10 shares creates 1 new wishlist)
+
+  Tile 4: Share Channel Distribution
+    Data source: Kafka topic -> BigQuery
+    Visualization: pie chart
+    Channels: copy_link, email, facebook, twitter, whatsapp
+    Expected distribution: copy_link 45%, whatsapp 25%, email 15%, facebook 10%, twitter 5%
+
+  Tile 5: Top Shared Products
+    Data source: join share events with product catalog
+    Visualization: table (top 20)
+    Columns: product_name, times_shared, times_added_from_share, conversion_rate
+
+  Tile 6: Geographic Distribution
+    Data source: share_viewed events with country metadata
+    Visualization: choropleth map
+    Metric: share views per 100K users by country
+
+--- API Documentation (Internal Wiki Excerpt) ---
+
+Endpoint: POST /api/v2/wishlists/{id}/share
+Authentication: Bearer token (JWT)
+Content-Type: application/json
+
+Request body:
+  {
+    "channel": "string (required, enum: copy_link|email|facebook|twitter|whatsapp)",
+    "expires_in_days": "integer (optional, enum: 7|30|null for never, default: 30)",
+    "hidden_items": "string[] (optional, list of wishlist item IDs to hide from shared view)",
+    "message": "string (optional, max 500 chars, personal message attached to share)"
+  }
+
+Response (201 Created):
+  {
+    "share_url": "string (the shareable URL)",
+    "share_token": "string (22-char base62 token)",
+    "preview_image_url": "string (OG image URL from R2)",
+    "expires_at": "string (ISO 8601 timestamp or null)",
+    "item_count": "integer (visible items in shared view)",
+    "hidden_items_count": "integer (items hidden from shared view)",
+    "share_id": "string (internal share record ID)"
+  }
+
+Error responses:
+  401 Unauthorized: missing or invalid authentication token
+  403 Forbidden: user does not own the wishlist
+  404 Not Found: wishlist does not exist
+  422 Unprocessable Entity: invalid request body (validation errors)
+  429 Too Many Requests: rate limit exceeded (20 shares/hour)
+  500 Internal Server Error: unexpected server error
+  503 Service Unavailable: OG renderer circuit breaker open (share created without preview)
+
+Rate limiting headers:
+  X-RateLimit-Limit: maximum requests per window
+  X-RateLimit-Remaining: remaining requests in current window
+  X-RateLimit-Reset: Unix timestamp when window resets
+  Retry-After: seconds until rate limit resets (on 429 only)
+
+--- Slack Thread: #discovery-eng Wishlist Sharing Architecture Discussion ---
+
+[2025-09-16T09:00:00Z] deepak.patel:
+  morning everyone. wanted to walk through the wishlist sharing architecture before
+  i finalize the PR. sharing a diagram in the thread.
+
+[2025-09-16T09:02:15Z] deepak.patel:
+  the flow is: user clicks share -> frontend calls POST /api/v2/wishlists/{id}/share
+  -> backend generates token, calls og-renderer for preview image, publishes kafka
+  event, returns share URL. when recipient clicks the link, we serve the shared
+  wishlist page with OG tags for rich link previews on social platforms.
+
+[2025-09-16T09:04:30Z] maya.chen:
+  can recipients add items from a shared wishlist to their own list?
+
+[2025-09-16T09:05:12Z] deepak.patel:
+  yes, if they're logged in they see an "add to my list" button next to each item.
+  clicking it creates a copy of the item in their own wishlist and fires a kafka
+  event so we can track viral adoption.
+
+[2025-09-16T09:06:45Z] lisa.park:
+  what happens if the shared wishlist has items that go out of stock after sharing?
+
+[2025-09-16T09:07:22Z] deepak.patel:
+  the shared view always shows current product data from svc-product-catalog. if an
+  item goes out of stock, it shows "out of stock" on the shared page. the OG preview
+  image is cached for 24h though, so it might show items that are now unavailable.
+  that's a known tradeoff for performance.
+
+[2025-09-16T09:08:55Z] angela.russo:
+  what about privacy? if someone shares a wishlist and then adds sensitive items to
+  it, do those appear in the shared view?
+
+[2025-09-16T09:09:40Z] deepak.patel:
+  the share is a snapshot of which items are visible at share time. new items added
+  after sharing are NOT visible in the shared view by default. the owner can go into
+  share settings and toggle visibility per item. we also support hiding specific
+  items at share creation time via the hidden_items parameter.
+
+[2025-09-16T09:11:15Z] maya.chen:
+  that's important for the gift use case. you don't want the recipient to see items
+  being added to the list in real time.
+
+[2025-09-16T09:12:00Z] deepak.patel:
+  actually wait, i need to double-check that. currently the implementation shows
+  all current items at view time, not a snapshot. let me rethink this.
+
+[2025-09-16T09:13:30Z] maya.chen:
+  for V1 let's keep it simple — show current items. we can add snapshot mode in V2
+  for the gift-specific use case. but definitely support hiding items at share time.
+
+[2025-09-16T09:14:45Z] deepak.patel:
+  agreed. V1: current items at view time, with per-item visibility toggle. V2:
+  snapshot mode. adding this to the spec as a known limitation.
+
+[2025-09-16T09:16:00Z] lisa.park:
+  for the analytics setup, i need the following events in Segment in addition to
+  the kafka topic: share_button_viewed (fired when the button becomes visible),
+  share_initiated (fired on click), share_completed (fired when URL is generated).
+  the kafka events cover the backend side but i need frontend events too.
+
+[2025-09-16T09:17:30Z] deepak.patel:
+  priya can add those Segment calls in the frontend component. they're independent
+  of the backend PR.
+
+[2025-09-16T09:18:45Z] lisa.park:
+  also need to make sure the A/B test variant is tagged on every event so we can
+  segment the data correctly. i'll write up the event spec and share it.
+
+[2025-09-16T09:20:00Z] kwame.asante:
+  quick question on the notification side. when someone views a shared wishlist,
+  should we notify the owner? and if so, in real time or as a daily digest?
+
+[2025-09-16T09:21:15Z] maya.chen:
+  daily digest for views. real-time only if someone adds an item from the shared
+  list to their own list — that's a high-signal action worth notifying immediately.
+
+[2025-09-16T09:22:30Z] kwame.asante:
+  makes sense. i'll set up the notification consumer to batch view events and send
+  a daily summary at 9am local time. for item-added events, real-time push
+  notification through FCM and APNs.
+
+[2025-09-16T09:24:00Z] deepak.patel:
+  sounds good. let's make sure all of this respects the new notification preferences
+  that kwame is building. users should be able to opt out of social notifications
+  without losing order notifications.
+
+--- Runbook: Wishlist Sharing Service Degradation ---
+
+Runbook ID: RB-DISC-018
+Owner: deepak.patel
+Last updated: 2025-09-16
+Severity: P2 to P3
+
+Symptoms:
+  - Share creation latency >3s (normal: <1s)
+  - OG renderer circuit breaker in OPEN state
+  - Kafka producer errors on wishlist.social.events topic
+  - Share link returning 404 for valid tokens
+  - Rate limiter returning 429 for users well under the 20/hour limit
+
+Diagnosis steps:
+  1. Check Grafana dashboard: og-renderer-health
+     - If circuit breaker is OPEN: renderer service is down, shares will use fallback image
+     - If render latency is high: check browser pool utilization, may need more pods
+  2. Check Kafka monitoring: wishlist.social.events topic
+     - If producer errors: check broker health, may be partition leader election
+     - If consumer lag high: check consumer group health
+  3. Check Redis rate limiter: rate-limiter-prod
+     - If false positive rate limits: check clock skew between application and Redis
+     - If rate limiter is down: shares will proceed without rate limiting (fail open)
+  4. Check PostgreSQL: wishlist-prod database
+     - If connection pool exhausted: check for long-running queries, increase pool size
+     - If migration issues: verify 048_add_wishlist_shares.sql applied successfully
+
+Remediation:
+  - OG renderer down: no action needed, circuit breaker handles gracefully with fallback image
+  - Kafka down: share creation continues without analytics events, events queued in DLQ
+  - Redis down: rate limiter fails open, shares work but without spam protection
+  - PostgreSQL down: share creation fails, return 503 to users
+
+Escalation:
+  - P2: OG renderer down for >1h, page deepak.patel
+  - P2: Kafka unavailable for >30m, page platform-oncall
+  - P1: PostgreSQL connection issues, page database-oncall
+  - P3: Rate limiter issues, investigate during business hours
+
+--- Performance Benchmarks (Share Flow End-to-End) ---
+
+  Test environment: staging (us-east-1)
+  Load generator: k6
+  Test duration: 30 minutes
+  Concurrency: 50 virtual users
+
+  Scenario 1: Share creation (POST /api/v2/wishlists/{id}/share)
+    Requests: 12,450
+    Success rate: 99.8%
+    p50 latency: 487ms
+    p90 latency: 812ms
+    p99 latency: 1,442ms
+    Max latency: 3,201ms
+    Errors: 25 (0.2%) — all 429 rate limit responses (expected)
+
+  Scenario 2: Share view (GET /wishlists/shared/{token})
+    Requests: 45,200
+    Success rate: 100%
+    p50 latency: 32ms
+    p90 latency: 78ms
+    p99 latency: 145ms
+    Max latency: 312ms
+    Errors: 0
+
+  Scenario 3: Add from shared (POST /api/v2/wishlists/my/items)
+    Requests: 8,900
+    Success rate: 100%
+    p50 latency: 28ms
+    p90 latency: 55ms
+    p99 latency: 112ms
+    Max latency: 234ms
+    Errors: 0
+
+  Scenario 4: OG renderer under load (POST /render)
+    Requests: 5,000
+    Success rate: 98.2%
+    p50 latency: 512ms
+    p90 latency: 1,834ms
+    p99 latency: 4,210ms
+    Max latency: 4,998ms (approaching 5s timeout)
+    Errors: 90 (1.8%) — browser pool exhaustion
+    Note: 2 pods with pool size 3 = 6 concurrent renders; at peak load, queue
+    wait time pushes some requests past the 5s timeout. Recommendation: increase
+    pod count to 4 for production launch or increase pool size to 4 per pod
+    with memory limit bump to 768Mi.
+
+================================================================================
+END OF LOG — 2025-09-16
+================================================================================

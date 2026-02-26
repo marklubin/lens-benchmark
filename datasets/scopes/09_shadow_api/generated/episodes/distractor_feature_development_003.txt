@@ -1,0 +1,1216 @@
+================================================================================
+VANTAGE COMMERCE — FEATURE DEVELOPMENT LOG
+Date: 2025-09-22
+Classification: INTERNAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Feature Flag Rollout — Dynamic Pricing v3
+────────────────────────────────────────────────────────────────────────────────
+
+Flag name: dynamic_pricing_v3
+Platform: LaunchDarkly
+Team: Pricing & Revenue
+Current rollout: 10%
+Target rollout: 50%
+Rollout date: 2025-09-22
+Owner: rafael.silva
+
+--- Affected Services ---
+
+- svc-pricing-engine v5.1.0
+- svc-product-catalog
+- svc-inventory-tracker
+- PostgreSQL pricing_rules table
+- Kafka topic: pricing.adjustments
+- Datadog dashboard: Dynamic Pricing v3 Rollout
+- Redis (pricing cache, rate limiter)
+
+--- Key Personnel ---
+
+  Name              | Role                | Responsibility
+  ------------------|---------------------|--------------------------------------
+  Rafael Silva      | Pricing team lead   | Rollout owner, monitoring, rollback
+  Noor Al-Rashid    | Data science        | ML model, training pipeline, eval
+
+--- Rollout Plan ---
+
+  Phase 1 (completed): 10% of product catalog, 2-week soak
+    Results: +2.3% revenue per session, no measurable abandonment increase
+    Duration: 2025-09-08 to 2025-09-22
+
+  Phase 2 (current): 50% of product catalog
+    Start: 2025-09-22
+    Monitoring period: 2 weeks (2025-09-22 to 2025-10-06)
+    Success criteria: revenue per session improvement maintained, cart abandonment rate
+    does not increase by more than 5% in any 1-hour window
+
+  Phase 3 (planned): 100% of product catalog
+    Tentative start: 2025-10-07
+    Prerequisites: Phase 2 metrics stable for 14 days
+
+rafael.silva: "At 10% we saw +2.3% revenue per session with no measurable increase in
+abandonment. Confident to push to 50%."
+
+--- Pricing Model Details ---
+
+  Model type: XGBoost ensemble
+  Training data: last 30 days of conversion data (retrained nightly at 02:00 UTC)
+  Feature set:
+    - inventory_level (current stock / max stock)
+    - competitor_price_delta (our price vs competitor median, %)
+    - time_of_day (hour bucket, 0-23)
+    - day_of_week (0=Monday, 6=Sunday)
+    - category_demand_index (rolling 7-day demand score, 0-100)
+    - session_conversion_rate_7d (category-level rolling conversion rate)
+    - price_elasticity_estimate (per-product, updated weekly)
+
+  Model performance (offline evaluation):
+    - RMSE on held-out test set: 0.042
+    - Revenue lift prediction accuracy: +/- 0.5%
+    - False positive rate (predicted lift but actual decline): 3.2%
+
+noor.al-rashid: "The model is re-trained nightly on the last 30 days of conversion data.
+At 50% traffic we will get much better signal for the competitive pricing component."
+
+--- Price Adjustment Rules ---
+
+  Maximum price increase: +8% from base price per 24-hour window
+  Maximum price decrease: -8% from base price per 24-hour window
+  Update frequency: every 15 minutes for high-velocity categories (electronics, fashion),
+                    hourly for long-tail categories
+  Excluded categories: grocery, baby essentials, medical supplies (regulatory and brand
+                       sensitivity concerns, per legal review LR-2025-044)
+
+  Audit log schema (Kafka topic: pricing.adjustments):
+  {
+    "product_id": "string",
+    "sku": "string",
+    "old_price": "decimal",
+    "new_price": "decimal",
+    "adjustment_pct": "decimal (-8.0 to +8.0)",
+    "model_version": "string (e.g., xgb-v3.2-20250922)",
+    "features_snapshot": {
+      "inventory_level": "decimal",
+      "competitor_price_delta": "decimal",
+      "time_of_day": "integer",
+      "day_of_week": "integer",
+      "category_demand_index": "decimal"
+    },
+    "reason_code": "string (enum: demand_signal, inventory_low, competitor_match, time_decay)",
+    "timestamp": "string (ISO 8601)"
+  }
+
+  Customer-facing: prices display as "current price" with no indication of dynamic
+  adjustment (per legal review). No "was $X, now $Y" display for dynamic adjustments.
+  Price history page shows only manual merchant price changes, not algorithmic adjustments.
+
+--- Rollback Configuration ---
+
+rafael.silva: "Rollback is automated — if the Datadog monitor fires we revert to static
+pricing within 60 seconds via flag kill switch."
+
+  Automatic rollback triggers:
+    1. Cart abandonment rate increases >5% in any 1-hour window
+    2. Customer complaint rate (support tickets tagged "pricing") >2x baseline
+    3. Revenue per session drops >3% for 30 consecutive minutes
+
+  Rollback procedure:
+    1. Kill switch: set dynamic_pricing_v3 flag to OFF in LaunchDarkly
+    2. Pricing engine falls back to static base prices from product catalog
+    3. All in-flight price adjustments revert to base prices within 60 seconds
+    4. Kafka event: pricing.rollback published for audit trail
+    5. Page rafael.silva and noor.al-rashid via PagerDuty
+
+  Manual rollback escalation:
+    1. Any on-call engineer can disable the flag
+    2. Notification to #pricing-team Slack channel
+    3. Post-mortem within 48 hours
+
+--- HTTP Request/Response Samples (Pricing Engine API) ---
+
+[2025-09-22T06:15:00.112Z] Request:
+  POST /api/v1/prices/calculate HTTP/1.1
+  Host: svc-pricing-engine.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_catalog_8f9e
+  X-Request-ID: req_price_001
+  X-Trace-ID: trace_price_a1b2c3
+
+  {
+    "product_ids": ["prod_elec_001", "prod_elec_002", "prod_fash_001"],
+    "context": {
+      "timestamp": "2025-09-22T06:15:00Z",
+      "region": "us-east-1"
+    }
+  }
+
+[2025-09-22T06:15:00.234Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_price_001
+  X-Pricing-Model-Version: xgb-v3.2-20250922
+
+  {
+    "prices": [
+      {
+        "product_id": "prod_elec_001",
+        "base_price": 299.99,
+        "adjusted_price": 314.99,
+        "adjustment_pct": 5.0,
+        "reason_code": "demand_signal",
+        "model_version": "xgb-v3.2-20250922",
+        "dynamic_pricing_active": true
+      },
+      {
+        "product_id": "prod_elec_002",
+        "base_price": 149.99,
+        "adjusted_price": 142.49,
+        "adjustment_pct": -5.0,
+        "reason_code": "competitor_match",
+        "model_version": "xgb-v3.2-20250922",
+        "dynamic_pricing_active": true
+      },
+      {
+        "product_id": "prod_fash_001",
+        "base_price": 79.99,
+        "adjusted_price": 79.99,
+        "adjustment_pct": 0.0,
+        "reason_code": "no_adjustment",
+        "model_version": "xgb-v3.2-20250922",
+        "dynamic_pricing_active": true
+      }
+    ],
+    "cache_ttl_seconds": 900
+  }
+
+  Latency: 122ms
+
+[2025-09-22T06:30:15.001Z] Request:
+  POST /api/v1/prices/calculate HTTP/1.1
+  Host: svc-pricing-engine.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_catalog_8f9e
+  X-Request-ID: req_price_002
+
+  {
+    "product_ids": ["prod_baby_001", "prod_groc_001"],
+    "context": {
+      "timestamp": "2025-09-22T06:30:00Z",
+      "region": "us-east-1"
+    }
+  }
+
+[2025-09-22T06:30:15.045Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_price_002
+
+  {
+    "prices": [
+      {
+        "product_id": "prod_baby_001",
+        "base_price": 24.99,
+        "adjusted_price": 24.99,
+        "adjustment_pct": 0.0,
+        "reason_code": "excluded_category",
+        "dynamic_pricing_active": false,
+        "exclusion_reason": "baby_essentials"
+      },
+      {
+        "product_id": "prod_groc_001",
+        "base_price": 8.49,
+        "adjusted_price": 8.49,
+        "adjustment_pct": 0.0,
+        "reason_code": "excluded_category",
+        "dynamic_pricing_active": false,
+        "exclusion_reason": "grocery"
+      }
+    ],
+    "cache_ttl_seconds": 3600
+  }
+
+  Latency: 18ms
+
+[2025-09-22T07:00:00.001Z] Request (batch update cycle):
+  POST /api/v1/prices/batch-update HTTP/1.1
+  Host: svc-pricing-engine.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_pricing_cron
+  X-Request-ID: req_batch_price_001
+  X-Batch-Size: 5000
+
+  {
+    "trigger": "scheduled_15min",
+    "categories": ["electronics", "fashion", "home_garden"],
+    "model_version": "xgb-v3.2-20250922"
+  }
+
+[2025-09-22T07:00:04.887Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_batch_price_001
+
+  {
+    "products_evaluated": 4872,
+    "prices_adjusted": 1247,
+    "prices_unchanged": 3625,
+    "adjustments_up": 534,
+    "adjustments_down": 713,
+    "avg_adjustment_pct": 3.2,
+    "max_adjustment_pct": 7.8,
+    "kafka_events_published": 1247,
+    "execution_time_ms": 4886,
+    "model_version": "xgb-v3.2-20250922"
+  }
+
+  Latency: 4886ms
+
+[2025-09-22T07:15:00.002Z] Request (batch update cycle):
+  POST /api/v1/prices/batch-update HTTP/1.1
+  Host: svc-pricing-engine.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_pricing_cron
+  X-Request-ID: req_batch_price_002
+  X-Batch-Size: 5000
+
+  {
+    "trigger": "scheduled_15min",
+    "categories": ["electronics", "fashion", "home_garden"],
+    "model_version": "xgb-v3.2-20250922"
+  }
+
+[2025-09-22T07:15:03.112Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_batch_price_002
+
+  {
+    "products_evaluated": 4872,
+    "prices_adjusted": 312,
+    "prices_unchanged": 4560,
+    "adjustments_up": 145,
+    "adjustments_down": 167,
+    "avg_adjustment_pct": 1.8,
+    "max_adjustment_pct": 4.2,
+    "kafka_events_published": 312,
+    "execution_time_ms": 3110,
+    "model_version": "xgb-v3.2-20250922"
+  }
+
+  Latency: 3110ms
+
+--- Datadog Dashboard: Dynamic Pricing v3 Rollout ---
+
+Dashboard ID: pricing-dynamic-v3-rollout
+URL: https://app.datadoghq.com/dashboard/abc-def-ghi
+Owner: rafael.silva
+Refresh interval: 30s
+
+  Panel 1: Revenue Per Session (dynamic vs static pricing)
+    Query: avg:ecommerce.revenue_per_session{pricing_type:dynamic_v3} vs
+           avg:ecommerce.revenue_per_session{pricing_type:static}
+    Visualization: time series, 24h rolling average
+    Alert: if dynamic revenue_per_session < static for 30 consecutive minutes
+
+  Panel 2: Cart Abandonment Rate
+    Query: sum:checkout.abandoned{pricing_type:dynamic_v3} /
+           sum:checkout.started{pricing_type:dynamic_v3}
+    Visualization: time series, 1h rolling average
+    Alert: if rate > baseline + 5% for 1 hour
+
+  Panel 3: Price Adjustment Distribution
+    Query: histogram:pricing.adjustment_pct{model_version:xgb-v3.2*}
+    Visualization: histogram with buckets (-8 to +8 in 1% intervals)
+    Expected shape: bell curve centered near 0 with slight positive skew
+
+  Panel 4: Products Under Dynamic Pricing
+    Query: count:pricing.active{flag:dynamic_pricing_v3,status:active}
+    Visualization: single stat
+    Expected value at 50%: ~12,000 products
+
+  Panel 5: Model Inference Latency
+    Query: histogram_quantile(0.99, pricing.model_inference_seconds)
+    Visualization: time series (p50, p90, p99)
+    Alert: if p99 > 500ms for 5 minutes
+
+  Panel 6: Kafka Event Throughput
+    Query: rate:pricing.adjustments.published{topic:pricing.adjustments}
+    Visualization: time series
+    Expected: ~80 events/minute at 50% rollout during peak hours
+
+--- Datadog Monitors ---
+
+Monitor: dynamic-pricing-abandonment-spike
+  Query: avg(last_1h):sum:checkout.abandoned{pricing:dynamic_v3} /
+         sum:checkout.started{pricing:dynamic_v3} > 0.05 + baseline
+  Type: metric alert
+  Severity: P1
+  Notification: PagerDuty (rafael.silva), #pricing-team Slack
+  Auto-remediation: trigger LaunchDarkly flag kill switch via webhook
+  Runbook: https://runbooks.vantage.internal/pricing/dynamic-v3-abandonment
+
+Monitor: dynamic-pricing-revenue-decline
+  Query: avg(last_30m):avg:ecommerce.revenue_per_session{pricing:dynamic_v3} <
+         avg:ecommerce.revenue_per_session{pricing:static} * 0.97
+  Type: metric alert
+  Severity: P1
+  Notification: PagerDuty (rafael.silva, noor.al-rashid), #pricing-team Slack
+
+Monitor: pricing-model-latency
+  Query: avg(last_5m):p99:pricing.model_inference_seconds > 0.5
+  Type: metric alert
+  Severity: P2
+  Notification: #pricing-team Slack
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: API Versioning Discussion — Product Catalog API v3 Migration
+────────────────────────────────────────────────────────────────────────────────
+
+Channel: #platform-api-design
+Date: 2025-09-22
+Topic: Product Catalog API v3 migration timeline
+Participants: elena.volkov, james.wright, deepak.patel, sarah.kim
+
+--- Slack Thread ---
+
+[2025-09-22T10:00:00Z] elena.volkov:
+  kicking off the discussion on Product Catalog API v3 migration timeline. i've been
+  auditing v2 usage and have some data to share.
+
+[2025-09-22T10:01:30Z] elena.volkov:
+  "v2 has 847 endpoints but only 23 are actually used by more than 1 consumer. The
+  long tail is dead code we can drop in v3."
+
+[2025-09-22T10:03:00Z] elena.volkov:
+  proposal: deprecate Product Catalog API v2 with a 90-day sunset notice starting
+  2025-10-01. that gives everyone until 2025-12-31 to migrate. v3 changes are:
+  pagination switches from offset to cursor-based, response envelope standardized,
+  nested category objects flattened, timestamps switch from Unix epoch to ISO 8601,
+  and field names change from camelCase to snake_case.
+
+[2025-09-22T10:05:15Z] james.wright:
+  "Mobile can't ship a v3 migration in one sprint. We need at least the 6-month
+  sunset plus a compatibility shim during transition."
+
+[2025-09-22T10:06:00Z] james.wright:
+  specifically: mobile app releases go through App Store review which takes 5-7 days.
+  we can't hot-fix a broken API migration. if something goes wrong with v3, our users
+  are stuck on a broken app for a week minimum. we need the v2 compat shim as a safety
+  net during the transition.
+
+[2025-09-22T10:08:30Z] sarah.kim:
+  "Three of our top-10 partners are on v2 only. I need a migration guide and at
+  least 2 sprints of partner engineering support."
+
+[2025-09-22T10:09:45Z] sarah.kim:
+  the 12 external partner integrations still on v2 break down as follows: 3 top-10
+  partners (high revenue), 4 mid-tier partners, 5 long-tail partners. the top-3 will
+  need hands-on migration support. the rest can probably self-serve with good docs.
+
+[2025-09-22T10:11:00Z] elena.volkov:
+  fair points from both of you. let me revise the timeline.
+
+[2025-09-22T10:12:30Z] elena.volkov:
+  revised proposal: 6-month sunset, v2 deprecated 2025-10-01 with sunset date
+  2026-03-01. deprecation headers start immediately. compatibility shim in Kong
+  gateway for the transition period. migration guide published by friday.
+
+[2025-09-22T10:13:45Z] deepak.patel:
+  the shim in Kong is a good idea. it translates v2 requests to v3 format on the
+  fly so consumers don't notice the backend change. how complex is that to build?
+
+[2025-09-22T10:15:00Z] elena.volkov:
+  for the 23 endpoints actually in use, the translation is mostly mechanical:
+  rename fields (camelCase to snake_case), convert timestamps (epoch to ISO 8601),
+  translate offset pagination to cursor pagination. i estimate 2 sprints for the
+  shim plus testing.
+
+[2025-09-22T10:16:30Z] james.wright:
+  that works for us. we can start the mobile migration in sprint 42 and ship it in
+  phases. as long as the v2 shim is there, we have a fallback if anything breaks.
+
+[2025-09-22T10:18:00Z] sarah.kim:
+  i'll start reaching out to the top-3 partners this week to give them a heads up
+  on the migration timeline. can you share the v3 OpenAPI spec with me?
+
+[2025-09-22T10:19:15Z] elena.volkov:
+  "Agreed on 6 months. I will publish the v3 OpenAPI spec by Friday and schedule
+  migration office hours starting October."
+
+[2025-09-22T10:20:30Z] elena.volkov:
+  office hours: every Wednesday 2-3pm ET starting October 1. any team or partner
+  can join to ask migration questions. i'll record the sessions for async consumption.
+
+[2025-09-22T10:22:00Z] deepak.patel:
+  will the wishlist service need to update its catalog API calls? we're on v2
+  currently for product lookups in the share preview flow.
+
+[2025-09-22T10:23:15Z] elena.volkov:
+  yes, but you have 6 months. i'd suggest migrating in sprint 42 or 43 while the
+  shim is still active. that way if anything breaks you fall back to the shim.
+
+[2025-09-22T10:24:30Z] deepak.patel:
+  sounds good. i'll add it to our backlog as a P2.
+
+--- v3 Breaking Changes (Summary) ---
+
+  Change                          | v2 Behavior               | v3 Behavior
+  --------------------------------|---------------------------|----------------------------
+  Pagination                      | offset/limit params       | cursor-based (after/before)
+  Timestamps                      | Unix epoch (integer)      | ISO 8601 (string)
+  Field naming                    | camelCase                 | snake_case
+  Response envelope               | Varies per endpoint       | Standard {data, meta, errors}
+  Category nesting                | Nested objects (3 levels) | Flat with parent_id reference
+  Search endpoint                 | /products/search/legacy   | Removed (use /products?q=)
+  Null handling                   | Missing fields            | Explicit null values
+  Rate limiting                   | 1000/min per API key      | 500/min per API key (tiered)
+
+--- Kong Gateway Configuration ---
+
+  Route: product-catalog-v2-deprecated
+    Paths: /api/v2/products/*
+    Headers:
+      - Sunset: Tue, 01 Mar 2026 00:00:00 GMT
+      - Deprecation: true
+      - Link: </api/v3/products>; rel="successor-version"
+    Plugins:
+      - request-transformer (v2-to-v3 shim, future)
+      - response-transformer (v3-to-v2 shim, future)
+      - datadog (track v2 request volume per consumer)
+
+  Route: product-catalog-v3
+    Paths: /api/v3/products/*
+    Plugins:
+      - rate-limiting: 500/min per API key (tiered by partner level)
+      - cors: standard configuration
+      - datadog (track v3 adoption)
+
+--- Monitoring: v2 vs v3 Adoption ---
+
+  Datadog metric: api.request_count{service:svc-product-catalog} by {api_version, consumer}
+  Dashboard: "Product Catalog API Migration" (platform-api-migration)
+
+  Current v2 request volume (daily):
+    Total: 2,847,000 requests/day
+    Top consumers:
+      1. svc-search (search indexing): 1,200,000/day
+      2. svc-pricing-engine (price lookups): 480,000/day
+      3. mobile-app-ios (product pages): 340,000/day
+      4. mobile-app-android (product pages): 290,000/day
+      5. svc-wishlist (product details): 180,000/day
+      6. partner-megastore-api (catalog sync): 120,000/day
+      7. partner-shopfront-api (product feed): 95,000/day
+      8. partner-dealfinder-api (price comparison): 72,000/day
+
+  v3 request volume: 0 (not yet deployed)
+  Target: 80% of traffic on v3 by 2026-01-01, 100% by 2026-03-01
+
+--- HTTP Traces — Deprecation Headers ---
+
+[2025-09-22T10:30:00.001Z] Request:
+  GET /api/v2/products/prod_elec_001 HTTP/1.1
+  Host: api.vantage.com
+  Accept: application/json
+  X-API-Key: ak_svc_search_prod
+  X-Request-ID: req_cat_v2_001
+
+[2025-09-22T10:30:00.045Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_cat_v2_001
+  Sunset: Tue, 01 Mar 2026 00:00:00 GMT
+  Deprecation: true
+  Link: </api/v3/products/prod_elec_001>; rel="successor-version"
+
+  {
+    "productId": "prod_elec_001",
+    "productName": "Wireless Noise-Canceling Headphones Pro",
+    "price": 314.99,
+    "originalPrice": 299.99,
+    "categoryId": "cat_electronics",
+    "categoryName": "Electronics",
+    "parentCategory": {
+      "categoryId": "cat_tech",
+      "categoryName": "Technology",
+      "parentCategory": {
+        "categoryId": "cat_root",
+        "categoryName": "All Products"
+      }
+    },
+    "inStock": true,
+    "stockCount": 847,
+    "lastUpdated": 1727006400,
+    "createdAt": 1714780800
+  }
+
+  Latency: 44ms
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Pull Request #4671 — Typo-Tolerant Search
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/svc-search
+PR: #4671
+Branch: feature/typo-tolerant-search
+Author: omar.hassan
+Reviewers: elena.volkov, lisa.park
+Status: APPROVED
+Files changed: 18
+Insertions: 923
+Deletions: 201
+Created: 2025-09-20T09:00:00Z
+Merged: 2025-09-22T15:30:00Z
+
+--- Service Version ---
+
+svc-search v4.3.0
+
+--- Affected Infrastructure ---
+
+- Elasticsearch 8.11 cluster (search-prod-01 through search-prod-06)
+- 6 data nodes, 3 master nodes, 2 coordinating nodes
+- Index: products-v4 (alias: products-current)
+- Feature flag: typo_tolerant_search
+
+--- Changes Summary ---
+
+1. Implements typo-tolerant search using Elasticsearch fuzziness:AUTO with edit
+   distance tuning. The AUTO setting applies 0 edits for 1-2 character terms, 1 edit
+   for 3-5 character terms, and 2 edits for 6 or more character terms. This matches
+   user typo patterns observed in search-with-zero-results analysis.
+
+2. Adds phonetic analyzer (double_metaphone) as secondary match for brand names.
+   Brand names like "Nike", "Samsung", "Adidas" are commonly misspelled as "nikey",
+   "samsnug", "adiddas". The phonetic analyzer catches these even when edit distance
+   alone would miss them (e.g., "samsnug" has edit distance 2 from "samsung" but
+   phonetically matches well).
+
+3. New endpoint: GET /api/v2/search/suggest
+   Provides as-you-type suggestions with typo correction. Returns top 5 corrections
+   with scores, result counts, and the original query for comparison.
+
+4. Performance benchmark: p50 latency increases from 12ms to 18ms, p99 from 45ms to
+   72ms. All within the SLA of 100ms p99.
+
+5. A/B test configured: 20% of search traffic gets typo-tolerant results behind the
+   typo_tolerant_search feature flag.
+
+omar.hassan: "Analysis of search-with-zero-results shows 14% are typos (e.g., 'nikey'
+'samsnug' 'adiddas'). This should recover most of those."
+
+lisa.park: "The phonetic analyzer is a nice touch for brand names. Can we add it for
+category names too? People search for 'electronix' and 'furnature' constantly."
+
+elena.volkov: "Latency impact is acceptable. Make sure the Elasticsearch cluster can
+handle the extra query load at 100% rollout — check with SRE on capacity."
+
+--- Elasticsearch Configuration Changes ---
+
+  Fuzziness config: AUTO
+    0 edits for 1-2 characters
+    1 edit for 3-5 characters
+    2 edits for 6+ characters
+
+  Phonetic analyzer configuration (index settings):
+    analyzer: phonetic_brand
+      tokenizer: standard
+      filter: [lowercase, double_metaphone]
+    filter: double_metaphone
+      type: phonetic
+      encoder: double_metaphone
+
+  New subfields:
+    product_name.phonetic (text, analyzer: phonetic_brand)
+    brand_name.phonetic (text, analyzer: phonetic_brand)
+
+  Suggestion endpoint response format:
+  {
+    "original_query": "string",
+    "suggestions": [
+      {
+        "text": "string (corrected query)",
+        "score": "float (0-1, confidence)",
+        "result_count": "integer"
+      }
+    ]
+  }
+
+  Index mapping changes require zero-downtime reindex using Elasticsearch aliases:
+    1. Create new index products-v5 with updated mapping
+    2. Reindex from products-v4 to products-v5
+    3. Swap alias products-current from products-v4 to products-v5
+    4. Delete products-v4 after verification
+
+  Feature flag: typo_tolerant_search
+    Platform: LaunchDarkly
+    Kill switch: reverts to exact-match-only
+    Targeting: 20% of search traffic (random hash on session_id)
+
+--- HTTP Traces — Typo-Tolerant Search ---
+
+[2025-09-22T14:00:11.234Z] Request:
+  GET /api/v2/search?q=nikey+running+shoes&fuzzy=true HTTP/1.1
+  Host: api.vantage.com
+  Accept: application/json
+  X-Request-ID: req_search_typo_001
+  X-AB-Variant: typo_tolerant_search:enabled
+  X-Session-ID: sess_7f8e9d0a
+
+[2025-09-22T14:00:11.252Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_search_typo_001
+  X-Search-Engine: elasticsearch-8.11
+  X-Fuzzy-Applied: true
+  X-Phonetic-Match: true
+
+  {
+    "query": "nikey running shoes",
+    "corrected_query": "nike running shoes",
+    "results": [
+      {
+        "product_id": "prod_nike_001",
+        "name": "Nike Air Zoom Pegasus 41",
+        "brand": "Nike",
+        "price": 129.99,
+        "score": 12.45,
+        "match_type": "phonetic+fuzzy"
+      },
+      {
+        "product_id": "prod_nike_002",
+        "name": "Nike React Infinity Run 4",
+        "brand": "Nike",
+        "price": 159.99,
+        "score": 11.88,
+        "match_type": "phonetic+fuzzy"
+      }
+    ],
+    "total_results": 47,
+    "search_time_ms": 18,
+    "fuzzy_correction_applied": true,
+    "phonetic_match_used": true
+  }
+
+  Latency: 18ms
+
+[2025-09-22T14:05:22.001Z] Request:
+  GET /api/v2/search?q=samsnug+galaxy&fuzzy=true HTTP/1.1
+  Host: api.vantage.com
+  Accept: application/json
+  X-Request-ID: req_search_typo_002
+  X-AB-Variant: typo_tolerant_search:enabled
+
+[2025-09-22T14:05:22.019Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_search_typo_002
+  X-Fuzzy-Applied: true
+
+  {
+    "query": "samsnug galaxy",
+    "corrected_query": "samsung galaxy",
+    "results": [
+      {
+        "product_id": "prod_samsung_001",
+        "name": "Samsung Galaxy S24 Ultra",
+        "brand": "Samsung",
+        "price": 1199.99,
+        "score": 14.22,
+        "match_type": "phonetic"
+      }
+    ],
+    "total_results": 23,
+    "search_time_ms": 22,
+    "fuzzy_correction_applied": true,
+    "phonetic_match_used": true
+  }
+
+  Latency: 22ms
+
+[2025-09-22T14:10:33.445Z] Request:
+  GET /api/v2/search/suggest?q=adid&limit=5 HTTP/1.1
+  Host: api.vantage.com
+  Accept: application/json
+  X-Request-ID: req_search_suggest_001
+
+[2025-09-22T14:10:33.459Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_search_suggest_001
+
+  {
+    "original_query": "adid",
+    "suggestions": [
+      {"text": "adidas", "score": 0.95, "result_count": 312},
+      {"text": "adidas originals", "score": 0.88, "result_count": 87},
+      {"text": "adidas running", "score": 0.82, "result_count": 45},
+      {"text": "adidas ultraboost", "score": 0.78, "result_count": 23},
+      {"text": "adidas stan smith", "score": 0.72, "result_count": 12}
+    ]
+  }
+
+  Latency: 14ms
+
+[2025-09-22T14:15:00.112Z] Request:
+  GET /api/v2/search?q=exact+match+test HTTP/1.1
+  Host: api.vantage.com
+  Accept: application/json
+  X-Request-ID: req_search_exact_001
+  X-AB-Variant: typo_tolerant_search:disabled
+
+[2025-09-22T14:15:00.124Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_search_exact_001
+  X-Search-Engine: elasticsearch-8.11
+  X-Fuzzy-Applied: false
+
+  {
+    "query": "exact match test",
+    "results": [],
+    "total_results": 0,
+    "search_time_ms": 12,
+    "fuzzy_correction_applied": false
+  }
+
+  Latency: 12ms
+
+--- Elasticsearch Cluster Health ---
+
+  Cluster: search-prod
+  Status: green
+  Nodes: 11 (6 data, 3 master, 2 coordinating)
+  Indices: 14
+  Primary shards: 72
+  Replica shards: 72
+  Active shards: 144
+  Unassigned shards: 0
+
+  Index: products-v5 (alias: products-current)
+    Documents: 847,231
+    Size: 4.2 GB (primary)
+    Shards: 6 primary, 6 replica
+    Mapping fields: 47
+    Refresh interval: 30s
+
+  Cluster resource usage:
+    CPU (avg across data nodes): 34%
+    Heap (avg): 62% of 16 GB
+    Disk (avg): 41% of 500 GB per node
+    Search rate: 1,240 queries/sec
+    Index rate: 85 docs/sec
+
+  Capacity estimate at 100% typo-tolerant rollout:
+    Additional CPU: +15% (fuzzy + phonetic queries are more expensive)
+    Additional heap: +8% (phonetic token cache)
+    Recommendation: current capacity sufficient, monitor after 50% rollout
+
+--- Slack Thread: #search-team Typo-Tolerant Search Results ---
+
+[2025-09-22T15:00:00Z] omar.hassan:
+  PR #4671 is merged and deployed. typo-tolerant search is now live at 20%.
+  here are some interesting queries from the first hour of data.
+
+[2025-09-22T15:01:30Z] omar.hassan:
+  top recovered zero-result searches in the last hour:
+  - "nikey" -> "nike" (42 searches recovered)
+  - "adiddas" -> "adidas" (28 searches recovered)
+  - "samsnug" -> "samsung" (19 searches recovered)
+  - "iphone 16 pro max" -> exact match but "iphon" recovers (15 searches)
+  - "furnature" -> no phonetic match yet (lisa's request, need to add categories)
+
+[2025-09-22T15:03:00Z] lisa.park:
+  those numbers look great. 14% of zero-result searches are typos and we're already
+  recovering a good chunk. the phonetic analyzer for categories would catch "furnature"
+  and "electronix" — can you add that in a follow-up PR?
+
+[2025-09-22T15:04:15Z] omar.hassan:
+  already started on it. should have a PR up by thursday. the category phonetic index
+  is the same pattern — just add the double_metaphone subfield to category_name.
+
+[2025-09-22T15:05:30Z] elena.volkov:
+  latency looks good. p99 is at 68ms which is well within our 100ms SLA. i'll keep
+  an eye on it as we ramp the A/B test.
+
+[2025-09-22T15:07:00Z] omar.hassan:
+  one thing to note — the reindex took about 45 minutes for the full products index.
+  next time we need to reindex we should schedule it during the maintenance window.
+  there was no user-facing impact thanks to the alias swap but disk usage spiked
+  temporarily while both indices existed.
+
+[2025-09-22T15:08:30Z] lisa.park:
+  when will we have enough A/B test data to make a ship decision?
+
+[2025-09-22T15:09:45Z] omar.hassan:
+  at 20% of search traffic, we should have significance in about 10 days. primary
+  metric is zero-result rate — expecting a 10-14% reduction in the typo-tolerant arm.
+  secondary metric is click-through rate on corrected queries.
+
+--- Elasticsearch Reindex Log ---
+
+Reindex operation: products-v4 -> products-v5
+Started: 2025-09-22T13:00:00Z
+Completed: 2025-09-22T13:45:22Z
+Duration: 45 minutes 22 seconds
+
+  Phase 1: Create target index (products-v5)
+    Timestamp: 2025-09-22T13:00:00Z
+    Duration: 2 seconds
+    Shards: 6 primary, 6 replica
+    New mapping fields: product_name.phonetic, brand_name.phonetic
+    Analyzer: phonetic_brand (double_metaphone encoder)
+    Settings: refresh_interval=-1 (disabled during reindex for performance)
+
+  Phase 2: Reindex documents
+    Timestamp: 2025-09-22T13:00:02Z to 2025-09-22T13:42:15Z
+    Duration: 42 minutes 13 seconds
+    Documents processed: 847,231
+    Documents per second: 335
+    Batch size: 5,000 documents
+    Scroll timeout: 5 minutes
+    Parallel slices: 6 (one per primary shard)
+    Throttle: none (off-peak hours)
+
+    Progress log:
+      13:05:00 — 100,000 documents processed (11.8%)
+      13:10:00 — 200,000 documents processed (23.6%)
+      13:15:00 — 300,000 documents processed (35.4%)
+      13:20:00 — 400,000 documents processed (47.2%)
+      13:25:00 — 500,000 documents processed (59.0%)
+      13:30:00 — 600,000 documents processed (70.8%)
+      13:35:00 — 700,000 documents processed (82.6%)
+      13:40:00 — 800,000 documents processed (94.4%)
+      13:42:15 — 847,231 documents processed (100.0%)
+
+    Errors: 0
+    Retries: 0
+    Version conflicts: 0
+
+  Phase 3: Refresh target index
+    Timestamp: 2025-09-22T13:42:15Z
+    Duration: 18 seconds
+    Settings restored: refresh_interval=30s
+
+  Phase 4: Validate document count
+    Source (products-v4): 847,231 documents
+    Target (products-v5): 847,231 documents
+    Delta: 0 (exact match)
+
+  Phase 5: Swap alias
+    Timestamp: 2025-09-22T13:42:35Z
+    Action: atomic alias swap (remove products-v4 from products-current, add products-v5)
+    Duration: <1 second
+    User-facing impact: none (alias swap is atomic)
+    Verification: 10 sample queries returned identical results on new index
+
+  Phase 6: Cleanup
+    Timestamp: 2025-09-22T13:45:22Z
+    Action: delete products-v4 index (4.1 GB reclaimed)
+    Disk usage before cleanup: 8.3 GB (both indices)
+    Disk usage after cleanup: 4.2 GB (products-v5 only)
+
+--- Pricing Engine Model Training Pipeline ---
+
+Pipeline: pricing-model-nightly-retrain
+Schedule: daily at 02:00 UTC
+Infrastructure: AWS SageMaker (ml.m5.4xlarge)
+Last run: 2025-09-22T02:00:00Z
+
+  Step 1: Data extraction (02:00 - 02:12)
+    Source: BigQuery data warehouse
+    Query: last 30 days of conversion data
+    Rows extracted: 14,247,831
+    Features extracted: 7 per row
+    Output: s3://vantage-ml-data/pricing/training/2025-09-22/features.parquet
+    Size: 2.1 GB
+
+  Step 2: Feature engineering (02:12 - 02:18)
+    Computed features:
+      - category_demand_index: rolling 7-day sales volume normalized by category
+      - price_elasticity_estimate: coefficient from log-log regression of price vs quantity
+      - competitor_price_delta: median competitor price vs our base price, by product
+      - time_of_day_bucket: hour of day encoded as cyclical features (sin/cos)
+      - day_of_week_bucket: day of week encoded as one-hot
+    Feature validation:
+      - Null check: 0 null values in required features
+      - Range check: all features within expected bounds
+      - Correlation check: no unexpected multicollinearity (VIF < 5 for all features)
+    Output: s3://vantage-ml-data/pricing/training/2025-09-22/features_engineered.parquet
+
+  Step 3: Model training (02:18 - 02:35)
+    Algorithm: XGBoost
+    Hyperparameters:
+      max_depth: 8
+      learning_rate: 0.05
+      n_estimators: 500
+      subsample: 0.8
+      colsample_bytree: 0.8
+      reg_alpha: 0.1
+      reg_lambda: 1.0
+      objective: reg:squarederror
+    Training/validation split: 80/20 temporal split (last 6 days as validation)
+    Training time: 17 minutes
+    GPU: not used (CPU training sufficient for this dataset size)
+
+  Step 4: Model evaluation (02:35 - 02:38)
+    Metrics:
+      RMSE (validation): 0.042
+      MAE (validation): 0.031
+      R-squared (validation): 0.847
+      Revenue lift prediction accuracy: +/- 0.5%
+      False positive rate (predicted lift, actual decline): 3.2%
+    Comparison vs previous model (xgb-v3.1):
+      RMSE: 0.042 vs 0.044 (improved)
+      MAE: 0.031 vs 0.033 (improved)
+      Revenue lift accuracy: 0.5% vs 0.6% (improved)
+    Decision: new model accepted (all metrics improved or equal)
+
+  Step 5: Model deployment (02:38 - 02:40)
+    Model artifact: s3://vantage-ml-models/pricing/xgb-v3.2-20250922/model.xgb
+    Model version: xgb-v3.2-20250922
+    Deployed to: svc-pricing-engine (all pods, rolling restart)
+    Canary: first pod updated, 5-minute validation, then remaining pods
+    Rollback: revert to xgb-v3.1-20250921 if prediction latency >100ms or error rate >0.1%
+
+  Step 6: Monitoring (02:40 - 03:00)
+    Post-deployment checks:
+      - Model inference latency: p50=8ms, p99=32ms (within SLA of 50ms)
+      - Prediction distribution: mean adjustment +0.3%, std 2.1% (within expected range)
+      - Error rate: 0% (0 errors in first 20 minutes)
+    Status: HEALTHY, new model serving all traffic
+
+--- Competitive Pricing Data Source Configuration ---
+
+  Provider: PriceSpider Compete API
+  Update frequency: every 4 hours
+  Products tracked: 12,500 (top sellers by revenue)
+  Competitors monitored: 8 (Amazon, Walmart, Target, Best Buy, Costco, Macy's, Nordstrom, REI)
+
+  API integration:
+    Endpoint: https://api.pricespider.com/v2/compete/prices
+    Authentication: API key (stored in AWS Secrets Manager)
+    Rate limit: 10,000 requests/hour
+    Batch size: 100 products per request
+    Retry policy: 3 retries with exponential backoff on 429 and 5xx
+
+  Data pipeline:
+    1. Fetch competitor prices every 4 hours (cron job in Kubernetes)
+    2. Store raw response in S3 for audit trail
+    3. Parse and transform to internal format
+    4. Update competitor_prices table in PostgreSQL
+    5. Pricing engine reads competitor data during next adjustment cycle
+
+  Competitor price staleness:
+    Fresh (<4 hours): 92% of tracked products
+    Stale (4-8 hours): 6% (API failures, retried next cycle)
+    Very stale (>8 hours): 2% (products with no competitor listings)
+
+  Data quality checks:
+    - Price must be > $0 and < $100,000 (reject outliers)
+    - Price change >50% from previous value flagged for manual review
+    - Competitor must have product in stock (out-of-stock prices excluded)
+
+--- Kong API Gateway: Search Service Routes ---
+
+Service: svc-search-v4
+  URL: http://svc-search.vantage-prod.svc.cluster.local:8080
+  Protocol: http
+  Connect timeout: 3000ms
+  Write timeout: 10000ms
+  Read timeout: 10000ms
+
+Route: search-main
+  Paths: /api/v2/search
+  Methods: GET
+  Plugins:
+    - rate-limiting:
+        second: 50
+        minute: 1000
+        policy: redis
+    - cors:
+        origins: ["https://www.vantage.com", "https://m.vantage.com"]
+        methods: ["GET", "OPTIONS"]
+    - response-cache:
+        cache_ttl: 60
+        strategy: memory
+        vary_headers: ["X-AB-Variant"]
+    - datadog:
+        service_name: svc-search
+        resource_name_tag: search_query
+
+Route: search-suggest
+  Paths: /api/v2/search/suggest
+  Methods: GET
+  Plugins:
+    - rate-limiting:
+        second: 20
+        minute: 500
+        policy: redis
+    - cors:
+        origins: ["https://www.vantage.com", "https://m.vantage.com"]
+    - response-cache:
+        cache_ttl: 300
+        strategy: memory
+
+--- Performance Comparison: Exact Match vs Typo-Tolerant ---
+
+  Test methodology: shadow traffic replay (24 hours of production search queries)
+  Total queries replayed: 1,247,000
+  Date range: 2025-09-21 00:00 to 2025-09-21 23:59
+
+  Results:
+
+  Metric                         | Exact Match    | Typo-Tolerant  | Delta
+  -------------------------------|----------------|----------------|-------
+  p50 latency                    | 12ms           | 18ms           | +6ms
+  p90 latency                    | 28ms           | 42ms           | +14ms
+  p99 latency                    | 45ms           | 72ms           | +27ms
+  Zero-result rate               | 8.4%           | 7.2%           | -1.2%
+  Zero-result rate (typo subset) | 100%           | 14.2%          | -85.8%
+  Queries with corrections       | 0              | 17,412 (1.4%)  | n/a
+  Avg results per query          | 42.3           | 44.8           | +2.5
+  CPU usage (per query, avg)     | 2.1ms          | 3.4ms          | +1.3ms
+  Heap impact (per query)        | 12 KB          | 18 KB          | +6 KB
+
+  Capacity planning:
+    At 100% rollout, search cluster CPU usage will increase by approximately 15%.
+    Current cluster utilization is 34%, projected at 100%: 39%.
+    No additional nodes required.
+    Heap usage will increase by approximately 8%, projected: 67% (safe zone).
+
+--- Grafana Alert Configuration: Search Service ---
+
+Alert: search-zero-result-rate-high
+  Condition: avg(search_zero_result_rate[15m]) > 0.12
+  Description: Zero-result search rate exceeds 12 percent over the last 15 minutes.
+  Severity: P3
+  Notification: send to the search-team Slack channel
+  Runbook: see search zero result rate runbook on internal wiki
+  Evaluation interval: every 5 minutes
+  Silence window: none configured
+  Dashboard link: search performance overview in Grafana
+
+Alert: search-latency-p99-high
+  Condition: the 99th percentile of search query duration exceeds 100 milliseconds for 5 consecutive minutes
+  Description: Search latency is breaching our SLA of 100 milliseconds at the 99th percentile.
+  Severity: P2
+  Notification: send to the search-team Slack channel and page the search on-call engineer via PagerDuty
+  Runbook: see search latency runbook on internal wiki
+  Evaluation interval: every 1 minute
+
+Alert: elasticsearch-cluster-health-yellow
+  Condition: Elasticsearch cluster status changes from green to yellow
+  Description: One or more replica shards are unassigned in the Elasticsearch cluster.
+  Severity: P2
+  Notification: send to the platform-infra Slack channel and PagerDuty for the infrastructure on-call
+  Runbook: see Elasticsearch cluster health runbook on internal wiki
+  Evaluation interval: every 30 seconds
+
+Alert: elasticsearch-cluster-health-red
+  Condition: Elasticsearch cluster status changes to red
+  Description: One or more primary shards are unassigned in the Elasticsearch cluster. Search functionality is degraded.
+  Severity: P1
+  Notification: send to the platform-infra Slack channel, PagerDuty infrastructure on-call, and PagerDuty search on-call
+  Runbook: see Elasticsearch cluster recovery runbook on internal wiki
+  Evaluation interval: every 15 seconds
+
+--- Runbook: Dynamic Pricing v3 Rollback Procedure ---
+
+Runbook identifier: RB-PRICING-007
+Owner: rafael.silva
+Last updated: 2025-09-22
+Applies to: svc-pricing-engine v5.1.0 with dynamic_pricing_v3 feature flag
+
+Overview:
+  This runbook describes the procedure for rolling back the dynamic pricing v3 feature
+  if metrics indicate a problem. The rollback is designed to be fast and safe, with no
+  data loss and minimal customer impact.
+
+When to trigger:
+  Automatic triggers are configured in Datadog. The following conditions will automatically
+  disable the dynamic_pricing_v3 feature flag via a webhook to LaunchDarkly:
+  One: cart abandonment rate increases by more than 5 percentage points above baseline in
+  any single one-hour window.
+  Two: revenue per session drops by more than 3 percent compared to static pricing for 30
+  consecutive minutes.
+  Three: the pricing model inference latency at the 99th percentile exceeds 500 milliseconds
+  for 5 consecutive minutes.
+
+Manual trigger:
+  Any on-call engineer can manually disable the feature flag by navigating to LaunchDarkly,
+  selecting the vantage-web project, finding the dynamic_pricing_v3 flag, and toggling it
+  to OFF. This takes effect within 60 seconds for all pricing engine pods.
+
+Rollback steps:
+  Step one: Disable the dynamic_pricing_v3 flag in LaunchDarkly. The pricing engine will
+  immediately stop using the ML model for price adjustments and fall back to static base
+  prices from the product catalog.
+
+  Step two: Verify rollback by checking the Datadog dashboard for dynamic pricing. The
+  number of active dynamically priced products should drop to zero within 60 seconds.
+
+  Step three: Check for any in-flight orders that may have been placed at dynamically
+  adjusted prices during the rollback window. These orders should be honored at the price
+  the customer saw at checkout. No manual price corrections are needed.
+
+  Step four: Post a message in the pricing-team Slack channel confirming the rollback and
+  the reason for triggering it. Include a link to the relevant Datadog dashboard showing
+  the metric that triggered the rollback.
+
+  Step five: Create a post-incident review document within 48 hours. Include the timeline
+  of events, root cause analysis of why the pricing model underperformed, and recommended
+  changes before re-enabling the feature.
+
+Recovery procedure:
+  Before re-enabling dynamic pricing after a rollback, the following conditions must be met:
+  One: root cause identified and documented in the post-incident review.
+  Two: if the issue was model quality, the model must be retrained with updated data and
+  offline evaluation must show improved metrics compared to the version that caused the rollback.
+  Three: re-enablement must start at 5 percent and follow the standard ramp-up procedure
+  regardless of what percentage the flag was at before rollback.
+  Four: rafael.silva and noor.al-rashid must both approve the re-enablement plan.
+
+Contact information:
+  Primary: rafael.silva, available via PagerDuty and Slack
+  Secondary: noor.al-rashid, available via PagerDuty and Slack
+  Escalation: engineering manager via PagerDuty escalation policy
+
+--- PagerDuty On-Call Schedule (Pricing & Revenue Team) ---
+
+Schedule: pricing-revenue-oncall
+Week of 2025-09-22:
+  Primary on-call: rafael.silva (Monday through Friday, 09:00 to 18:00 Eastern Time)
+  Secondary on-call: noor.al-rashid (Monday through Friday, 09:00 to 18:00 Eastern Time)
+  After-hours on-call: rotating among team members (currently rafael.silva for weeknights and weekends)
+
+Escalation policy for dynamic pricing incidents:
+  Level one: primary on-call receives alert, has 5 minutes to acknowledge
+  Level two: secondary on-call receives alert if primary does not acknowledge within 5 minutes
+  Level three: engineering manager and VP of engineering are paged if neither primary nor secondary acknowledges within 15 minutes
+
+Active services monitored:
+  Service: svc-pricing-engine
+    Severity P1: response time 5 minutes, auto-escalation after 10 minutes
+    Severity P2: response time 15 minutes, auto-escalation after 30 minutes
+    Severity P3: response next business day, no auto-escalation
+
+  Service: pricing-model-training-pipeline
+    Severity P1: response time 15 minutes (model training failure)
+    Severity P2: response time 30 minutes (model degradation)
+
+  Service: competitor-price-feed
+    Severity P2: response time 30 minutes (data staleness)
+    Severity P3: response next business day
+
+Incident count this quarter:
+  P1 incidents: 0
+  P2 incidents: 2 (both resolved within 20 minutes, no customer impact)
+  P3 incidents: 5 (all data quality issues in competitor feed, resolved within 1 business day)
+
+Mean time to acknowledge: 3 minutes 22 seconds
+Mean time to resolve: 18 minutes 45 seconds
+
+================================================================================
+END OF LOG — 2025-09-22
+================================================================================

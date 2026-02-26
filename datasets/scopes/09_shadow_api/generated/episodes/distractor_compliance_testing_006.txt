@@ -1,0 +1,1092 @@
+================================================================================
+VANTAGE COMMERCE — COMPLIANCE & SECURITY TESTING LOG
+Date: 2025-10-15
+Classification: CONFIDENTIAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Web Application Penetration Test — API Gateway and Authentication Flows
+────────────────────────────────────────────────────────────────────────────────
+
+Title: Web Application Penetration Test — API Gateway and Authentication Flows
+Vendor: Ironclad Security Partners
+Lead Tester: Dara Okonkwo
+Engagement ID: ISP-VC-2025-APP-0044
+Scope: api-gateway v6.2.0, auth-service v3.9.1, user-profile-service v2.7.0
+Environment: staging-pentest
+Test Window: 2025-10-06 through 2025-10-13
+Classification: CONFIDENTIAL
+
+--- Scope Details ---
+
+Services tested:
+  1. api-gateway v6.2.0
+     Repository: git.vantage-internal.com/platform/api-gateway
+     Deployed image: vcr.io/api-gateway:v6.2.0-staging-pentest
+     Replicas: 4
+     Function: Central API gateway, request routing, rate limiting, authentication validation
+
+  2. auth-service v3.9.1
+     Repository: git.vantage-internal.com/platform/auth-service
+     Deployed image: vcr.io/auth-service:v3.9.1-staging-pentest
+     Replicas: 3
+     Function: OAuth 2.0/OIDC authentication, JWT issuance, session management
+
+  3. user-profile-service v2.7.0
+     Repository: git.vantage-internal.com/platform/user-profile-service
+     Deployed image: vcr.io/user-profile-service:v2.7.0-staging-pentest
+     Replicas: 2
+     Function: User profile data management, address book, preferences
+
+Environment: staging-pentest (isolated cluster)
+  Network: 10.42.16.0/24 (staging-ext)
+  Isolation: No production connectivity
+  DNS: staging-dns-01 (internal only)
+
+--- Test Summary ---
+
+Test Summary: 7-day engagement. Endpoints tested: 89. Unique attack vectors: 24. Findings: 0 Critical, 0 High, 1 Medium, 1 Low, 3 Informational. Previous test (Q1 2025): 0 Critical, 0 High, 0 Medium, 2 Low — slight regression on scope filtering.
+
+Total requests generated: 1,247,891
+  api-gateway: 487,291
+  auth-service: 412,847
+  user-profile-service: 347,753
+
+Duration:
+  Automated scanning: 2 days (Oct 6-7)
+  Manual testing: 3 days (Oct 8-10)
+  Verification and report: 2 days (Oct 11-13)
+
+Tools:
+  Burp Suite Professional v2025.8
+  Postman (OAuth flow testing)
+  jwt.io and jwt_tool (JWT manipulation)
+  Custom Ironclad OAuth redirect bypass scripts
+  Nuclei v3.2.1
+
+--- Authentication Flow Testing ---
+
+Dara tested authentication and authorization flows across API gateway, auth-service, and user-profile-service.
+
+OAuth 2.0/OIDC Flow Testing:
+  Authorization code flow: Tested with valid and manipulated parameters
+  PKCE challenge verification: Tested with mismatched code_verifier — correctly rejected
+  State parameter: Tested for CSRF via state omission and state replay — correctly enforced
+  Token exchange: Tested with expired and revoked authorization codes — correctly rejected
+
+JWT Token Manipulation Testing:
+  Tested JWT token manipulation: algorithm confusion, signature stripping, claim tampering — all blocked by auth-service validation.
+
+  Test 1: Algorithm confusion (alg: none)
+    Modified JWT header from {"alg":"RS256"} to {"alg":"none"}
+    Removed signature portion of JWT
+    Result: auth-service returned HTTP 401 Unauthorized
+    Error: "Invalid token: algorithm 'none' is not accepted"
+    Verdict: PASS
+
+  Test 2: Algorithm confusion (RS256 to HS256)
+    Modified JWT header from {"alg":"RS256"} to {"alg":"HS256"}
+    Signed with public key as HMAC secret
+    Result: auth-service returned HTTP 401 Unauthorized
+    Error: "Invalid token: algorithm mismatch"
+    Verdict: PASS
+
+  Test 3: Signature stripping
+    Removed signature from JWT, kept header and payload
+    Result: auth-service returned HTTP 401 Unauthorized
+    Error: "Invalid token: signature verification failed"
+    Verdict: PASS
+
+  Test 4: Claim tampering (user_id escalation)
+    Modified JWT payload user_id from "test-user-alpha" to "admin-user-001"
+    Re-signed with forged key
+    Result: auth-service returned HTTP 401 Unauthorized
+    Error: "Invalid token: signature verification failed"
+    Verdict: PASS
+
+  Test 5: Expired token replay
+    Used JWT with exp claim set to 1 hour in the past
+    Result: auth-service returned HTTP 401 Unauthorized
+    Error: "Token expired"
+    Verdict: PASS
+
+  JWT algorithms tested: HS256, RS256, none, ES256 — only RS256 accepted per auth-service config.
+
+OAuth Redirect URI Validation Testing:
+  Tested OAuth redirect URI validation: 4 open-redirect bypass attempts — all rejected by strict allowlist matching.
+
+  Test 1: Path traversal bypass
+    redirect_uri: https://vantage.com/callback/../../../attacker.com
+    Result: HTTP 400 Bad Request — "Invalid redirect_uri: does not match registered URIs"
+    Verdict: PASS
+
+  Test 2: Subdomain wildcard bypass
+    redirect_uri: https://attacker.vantage.com/callback
+    Result: HTTP 400 Bad Request — "Invalid redirect_uri: subdomain not in allowlist"
+    Verdict: PASS
+
+  Test 3: Unicode normalization bypass
+    redirect_uri: https://vantage.com%2F%2Fattacker.com/callback
+    Result: HTTP 400 Bad Request — "Invalid redirect_uri: URL encoding detected"
+    Verdict: PASS
+
+  Test 4: Parameter pollution bypass
+    redirect_uri: https://vantage.com/callback&redirect_uri=https://attacker.com
+    Result: HTTP 400 Bad Request — "Invalid redirect_uri: multiple parameters"
+    Verdict: PASS
+
+Rate Limiting Testing:
+  Tested rate limiting on /api/v2/auth/login: confirmed 5 attempts per minute per IP, lockout after 10 failures — PASS.
+
+  Test method: Sent 20 login attempts in 60 seconds from single IP with invalid credentials.
+    Requests 1-5: HTTP 401 Unauthorized (invalid credentials, normal response)
+    Requests 6-10: HTTP 429 Too Many Requests (rate limit hit, 5/min exceeded)
+      Response body: {"error":"Rate limit exceeded","retry_after":60,"limit":"5 per minute per IP"}
+    Requests 11-15: HTTP 429 (still rate limited)
+    After 10 total failures: HTTP 403 Forbidden
+      Response body: {"error":"Account temporarily locked","lockout_duration_minutes":15,"reason":"excessive_failures"}
+
+  Distributed rate limiting test:
+    Tested with 50 source IPs (simulated via proxy chain) — per-IP limits confirmed, no global bypass.
+    Each IP independently limited to 5 attempts per minute.
+    Total requests across 50 IPs: 250 in 60 seconds — all processed (no global rate limit, only per-IP).
+
+API Key Authentication Testing:
+  Tested API key authentication for service-to-service calls: keys properly scoped to declared permissions, no privilege escalation found.
+
+  Test: Used api-gateway service key to call user-profile-service admin endpoint
+    api-gateway key scope: ["routes:read", "routes:write", "health:read"]
+    Attempted: GET /api/v2/users/admin/list (requires scope "users:admin")
+    Result: HTTP 403 Forbidden — "Insufficient scope: required 'users:admin', have 'routes:read,routes:write,health:read'"
+    Verdict: PASS — API key scoping enforced correctly
+
+Session Token Security:
+  auth-service session tokens verified:
+    HttpOnly: true (not accessible via JavaScript)
+    Secure: true (sent only over HTTPS)
+    SameSite: Strict (no cross-origin cookie sending)
+    Max-Age: 3600 (1 hour session expiry)
+    Path: /
+  Verdict: PASS — session cookie attributes follow security best practices
+
+--- Findings ---
+
+Finding VC-APP-051 (MEDIUM):
+  Service: user-profile-service v2.7.0
+  Endpoint: /api/v2/users/me
+  Method: GET
+
+  Description: user-profile-service /api/v2/users/me returns full mailing address when OAuth scope is 'email openid'. Response should be filtered to match granted scopes. Severity: MEDIUM. CVSS 4.3. CWE-200 (Exposure of Sensitive Information).
+
+  Reproduction:
+    Step 1: Authenticate with OAuth scope "email openid" (no "address" scope)
+    Step 2: GET /api/v2/users/me with obtained access token
+    Step 3: Response includes full mailing address despite "address" scope not being granted
+
+  HTTP Request:
+    GET /api/v2/users/me HTTP/1.1
+    Host: api.staging-pentest.vc-internal.net
+    Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJ1c2VyX2lkIjoiYWxwaGEtdGVzdC0wMDEiLCJzY29wZSI6ImVtYWlsIG9wZW5pZCIsImlhdCI6MTcyODA5NzYwMH0...
+    Accept: application/json
+    X-Request-ID: pt-req-2025-10-09-00412
+
+  HTTP Response:
+    HTTP/1.1 200 OK
+    Content-Type: application/json
+
+    {
+      "user_id": "alpha-test-001",
+      "email": "alpha@test.vantage.com",
+      "email_verified": true,
+      "name": "Alpha Test User",
+      "address": {
+        "street": "123 Test Street",
+        "city": "Portland",
+        "state": "OR",
+        "zip": "97201",
+        "country": "US"
+      },
+      "phone": "+1-555-0100",
+      "created_at": "2025-01-15T10:00:00Z"
+    }
+
+  Expected behavior: With scope "email openid", response should only include user_id, email, email_verified, and name. Address and phone should be filtered out (require "address" and "phone" scopes respectively).
+
+  Remediation ticket: VC-SEC-1355 (scope filtering in user-profile-service response middleware)
+  Marcus Tran confirmed finding is ticketed for remediation in sprint 40.
+
+Finding VC-APP-052 (LOW):
+  Service: auth-service v3.9.1
+  Endpoint: /api/v2/auth/login
+  Method: POST
+
+  Description: auth-service /api/v2/auth/login returns 'User not found' for invalid username vs 'Invalid credentials' for valid username with wrong password. Enables username enumeration. Severity: LOW. CVSS 3.7. CWE-203 (Observable Discrepancy).
+
+  Reproduction:
+    Step 1: POST /api/v2/auth/login with invalid username
+    Step 2: Observe response: {"error": "User not found", "code": "AUTH_USER_NOT_FOUND"}
+    Step 3: POST /api/v2/auth/login with valid username but wrong password
+    Step 4: Observe response: {"error": "Invalid credentials", "code": "AUTH_INVALID_CREDENTIALS"}
+    Step 5: Different error messages confirm whether a username exists in the system
+
+  HTTP Request (invalid username):
+    POST /api/v2/auth/login HTTP/1.1
+    Host: api.staging-pentest.vc-internal.net
+    Content-Type: application/json
+    X-Request-ID: pt-req-2025-10-09-00501
+
+    {"username": "nonexistent-user@test.com", "password": "test123"}
+
+  HTTP Response:
+    HTTP/1.1 401 Unauthorized
+    Content-Type: application/json
+    {"error": "User not found", "code": "AUTH_USER_NOT_FOUND"}
+
+  HTTP Request (valid username, wrong password):
+    POST /api/v2/auth/login HTTP/1.1
+    Content-Type: application/json
+    X-Request-ID: pt-req-2025-10-09-00502
+
+    {"username": "alpha@test.vantage.com", "password": "wrong-password"}
+
+  HTTP Response:
+    HTTP/1.1 401 Unauthorized
+    Content-Type: application/json
+    {"error": "Invalid credentials", "code": "AUTH_INVALID_CREDENTIALS"}
+
+  Recommendation: Normalize error responses to always return "Invalid credentials" regardless of whether the username exists. This prevents username enumeration while maintaining the same HTTP 401 status code.
+
+  Remediation ticket: VC-SEC-1356 (error message normalization in auth-service)
+  Marcus Tran confirmed both findings are ticketed for remediation in sprint 40.
+
+Informational findings:
+  VC-APP-053 (INFO): api-gateway returns X-Powered-By header revealing framework version. Recommend stripping in production.
+  VC-APP-054 (INFO): auth-service CORS allows credentials from *.vantage.com. Acceptable per policy but should be documented.
+  VC-APP-055 (INFO): API gateway forwards X-Request-ID header for traceability — verified in all 89 endpoints. Good practice.
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: SOC 2 Type II Fieldwork Wrap-Up — Summary of Observations
+────────────────────────────────────────────────────────────────────────────────
+
+Title: SOC 2 Type II Fieldwork Wrap-Up — Summary of Observations
+Auditor: James Reiter (Thornton-Kiley Associates)
+Associate: Sarah Kim (Thornton-Kiley Associates)
+Date: 2025-10-15
+Audit Period: 2025-04-01 through 2025-09-30
+Status: Fieldwork Complete — Report Drafting
+
+--- Preliminary Results ---
+
+James Reiter concluded 5-day onsite fieldwork and presented preliminary findings to management.
+
+Total controls tested: 87 across CC1-CC9 trust service criteria.
+Controls with no exceptions: 82 (94.3%)
+Controls with observations (non-deficiency): 4 (4.6%)
+Controls with exceptions: 1 (1.1%) — contractor deprovisioning delay (CC6.1)
+
+Preliminary Results: 87 controls tested. 82 no exceptions (94.3%). 4 observations (4.6%): post-mortem completion rate, patch SLA for 2 non-critical services, evidence collector MFA report gap, ICMP segmentation leak. 1 exception (1.1%): contractor deprovisioning delay (3 instances, 19-36 day delays).
+
+--- Trust Service Criteria Coverage ---
+
+CC1 (Control Environment — COSO): 12 controls tested, 12 pass, 0 observations, 0 exceptions
+CC2 (Communication and Information): 8 controls tested, 8 pass, 0 observations, 0 exceptions
+CC3 (Risk Assessment): 4 controls tested, 4 pass, 0 observations, 0 exceptions
+CC4 (Monitoring Activities): 6 controls tested, 6 pass, 0 observations, 0 exceptions
+CC5 (Control Activities): 8 controls tested, 8 pass, 0 observations, 0 exceptions
+CC6 (Logical and Physical Access): 18 controls tested, 16 pass, 1 observation (ICMP leak), 1 exception (contractor deprovisioning)
+CC7 (System Operations): 14 controls tested, 12 pass, 2 observations (post-mortem rate, patch SLA)
+CC8 (Change Management): 10 controls tested, 9 pass, 1 observation (evidence collector gap)
+CC9 (Risk Mitigation): 7 controls tested, 7 pass, 0 observations, 0 exceptions
+
+--- Observations Detail ---
+
+Observation 1: Post-mortem completion rate (CC7.2)
+  Finding: 28/36 P1/P2 incidents have finalized post-mortems (77.8%). Target: 95%.
+  Management response: Nathan Osei closed 5 of 6 draft post-mortems by 2025-10-15. 1 remaining: INC-2025-0819 (Elasticsearch reindex incident). Expected completion: 2025-10-17.
+  Auditor assessment: Observation only. Not a deficiency. Will clear if completion rate reaches 95% before report issuance.
+
+Observation 2: Patch SLA for 2 non-critical services (CC7.1/CC8)
+  Finding: svc-catalog-search and svc-email-notifier had medium-severity patches overdue by 4 days at time of fieldwork (September 18).
+  Management response: Both patches applied by September 22. Patch SLA process review conducted. Root cause: patches were deprioritized during sprint planning.
+  Auditor assessment: Observation only. Patches were eventually applied. Recommend adding patch SLA tracking to sprint planning checklist.
+
+Observation 3: Evidence collector MFA report gap (CC8)
+  Finding: compliance-evidence-collector failed to pull MFA enrollment report from Okta due to HTTP 503 on September 17-18.
+  Management response: Okta service recovered and report was pulled on September 19. Evidence gap documented and no actual MFA enforcement lapse occurred.
+  Auditor assessment: Observation only. The gap was in evidence collection, not in the control itself.
+
+Observation 4: ICMP segmentation leak (CC6.6)
+  Finding: Staging to production ICMP echo requests allowed on 2 of 47 paths (finding VC-SEG-001).
+  Management response: Firewall rule removed on 2025-10-07 (CHG-2025-5489). Verified by Marcus Tran: all ICMP probes now blocked.
+  Auditor assessment: Observation only. Remediated during fieldwork. No data plane exposure (TCP/UDP fully blocked).
+
+--- Exception Detail ---
+
+Exception: Contractor deprovisioning delay (CC6.1)
+  Finding: 3 terminated contractors retained k8s-prod-readonly access for 19 to 55 days after termination. SLA is 24 hours.
+  Termination dates: 2025-08-14, 2025-09-02, 2025-09-19
+  Deprovisioning dates: 2025-10-08 (all three — discovered and remediated during quarterly access review)
+  Root cause: BambooHR termination feed for contractors runs weekly, not daily. Manual entry delay from staffing agencies compounds the issue.
+  Risk: Read-only access to production Kubernetes cluster. No write access, no CDE access, no sensitive data access.
+
+  James confirmed the contractor deprovisioning gap is the only likely exception in final report.
+
+  Management response drafted for CC6.1 exception:
+    "Management acknowledges the contractor deprovisioning gap. Root cause has been identified as the weekly synchronization frequency between BambooHR termination events and Okta identity provider. Remediation is in progress: ticket VC-SEC-1312 implements daily synchronization with target completion date of 2025-10-31. Additionally, management is exploring direct API integration with staffing agency HR systems to eliminate manual termination entry delays. Until daily sync is implemented, Marcus Tran (Security Lead) is conducting weekly manual contractor access reviews as an interim compensating control."
+
+  James Reiter: This is a strong result overall. The single exception on contractor deprovisioning is manageable — your management response shows the remediation is already underway. We'll need that daily sync implemented before we can clear it in next year's audit.
+
+  Sarah Kim: The PCI-DSS overlap is well-documented. 34 shared controls reduced our testing effort by approximately 20%. I'd recommend maintaining the mapping document as controls evolve.
+
+--- Report Timeline ---
+
+Expected report issuance: 2025-11-15
+Report type: SOC 2 Type II
+Expected opinion: Unqualified (clean opinion with one exception noted)
+Draft report review: Management will review draft by 2025-11-01
+Final management responses due: 2025-11-05
+
+Prior year comparison:
+  2024 SOC 2 Type II: 0 exceptions, 2 observations
+  2025 SOC 2 Type II: 1 exception, 4 observations — slight regression on CC6.1
+  Overall: Strong compliance posture maintained with one area for improvement
+
+--- Evidence Summary ---
+
+Evidence artifacts reviewed during fieldwork: 290 documents in audit vault
+Interviews conducted: 14
+  Engineering team: 4 interviews (Carla Mendes, Tom Nguyen, Rachel Kim, Kai Johannsen)
+  Security team: 3 interviews (Marcus Tran, Ben Okoro, Anna Petrov)
+  Audit team: 2 interviews (Nathan Osei, Lena Vasquez)
+  People Operations: 2 interviews (Priya Shankar, HR Director)
+  Legal: 1 interview (Elena Marchetti)
+  Executive: 2 interviews (Diana Flores VP Engineering, CFO)
+
+Auditor hours billed (estimated): 180 hours across 2 auditors
+  James Reiter: 100 hours (fieldwork prep 20h, onsite 50h, report drafting 30h est.)
+  Sarah Kim: 80 hours (fieldwork prep 15h, onsite 50h, evidence review 15h est.)
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: PCI-DSS Security Awareness Training — CDE Personnel Specialized Module
+────────────────────────────────────────────────────────────────────────────────
+
+Title: PCI-DSS Security Awareness Training — CDE Personnel Specialized Module
+Training Platform: KnowBe4
+Campaign: VC-PCI-SAT-2025
+Date: 2025-10-15
+Coordinator: Priya Shankar (People Operations)
+Content Owner: Marcus Tran (Security Lead)
+
+--- Completion Status ---
+
+PCI-specific training module deployed to 47 employees with CDE access.
+Completion as of 2025-10-15: 44/47 (93.6%).
+Outstanding: 3 (2 on travel, 1 new hire starting 2025-10-20).
+Assessment scores: average 92.1%, minimum passing: 80%, no failures.
+
+PCI CDE Training Results: 44/47 complete (93.6%). Avg score: 92.1%. Score distribution: 90-100%: 31 employees, 80-89%: 13 employees, Below 80%: 0. Outstanding: 3 (deadline extended to 2025-10-25).
+
+--- Module Content ---
+
+Module Topics:
+  1) What is cardholder data and where does it live at Vantage (15 min)
+     Topics: PAN, SAD, cardholder data definition, CDE scope at Vantage Commerce
+     Key systems covered: payment-gateway, tokenization-service, vault-kms-prod
+     Assessment questions: 4
+
+  2) Your responsibilities under PCI-DSS (10 min)
+     Topics: PCI-DSS overview, Requirement 12 highlights, individual responsibilities
+     Assessment questions: 3
+
+  3) Incident reporting — what to do if you suspect a data exposure (10 min)
+     Topics: Data breach indicators, reporting channels, 24-hour reporting SLA
+     Reporting channels: Slack #security-incidents, PagerDuty, direct call to Marcus Tran
+     Assessment questions: 3
+
+  4) Approved tools and prohibited actions in CDE (10 min)
+     Topics: Approved terminals, prohibited data handling, no PAN in email/Slack/logs
+     Approved tools: Teleport SSH, approved IDE with PCI-compliant plugins, vault CLI
+     Prohibited: copy PAN to clipboard, screenshot CDE screens, email cardholder data
+     Assessment questions: 4
+
+  Total duration: 45 minutes
+  Total assessment questions: 14
+  Passing score: 80% (11/14 correct)
+
+--- Score Breakdown ---
+
+Score distribution:
+  95-100%: 18 employees (40.9%)
+  90-94%: 13 employees (29.5%)
+  85-89%: 8 employees (18.2%)
+  80-84%: 5 employees (11.4%)
+  Below 80%: 0 employees (0%)
+
+Per-module average scores:
+  Module 1 (Cardholder data): 93.2%
+  Module 2 (Responsibilities): 90.8%
+  Module 3 (Incident reporting): 94.1%
+  Module 4 (Approved tools): 90.4%
+
+Most missed question: "Which of the following actions is prohibited in the CDE?" (Module 4, Question 3)
+  Correct answer: "Taking a screenshot of a terminal session showing transaction data"
+  Incorrect choice selected by 6 employees: "Using Teleport SSH to access a CDE host"
+  Note: Teleport SSH is an approved tool — the confusion suggests some employees may not fully distinguish between approved access methods and prohibited data handling actions
+
+--- Supplemental Module ---
+
+Marcus Tran added supplemental module on tokenization and encryption basics — available as optional course.
+
+Supplemental Module (optional): Tokenization and Encryption Fundamentals
+  Enrolled: 18/47 (38.3%)
+  Completed: 12
+  In progress: 6
+  Duration: 20 minutes
+  Topics: How tokenization works at Vantage, AES-256-GCM encryption overview, key rotation concepts, Vault basics
+  This is not required for compliance but recommended for all CDE personnel.
+
+Training evidence exported for PCI-DSS Requirement 12.6 and SOC 2 CC1.4 compliance.
+Evidence format: PDF completion report with individual scores, stored in audit vault under AV-2025-PCI-TRAIN-Q4.
+
+--- General Security Training Update ---
+
+General security awareness (VC-SAT-2025-Annual) completion now at 96.4% (239/248 employees).
+Deadline was September 30.
+Outstanding: 9 employees receiving escalation per policy VC-SEC-POL-004.
+  Escalation level: Department head notification sent 2025-10-01
+  Expected completion: All 9 by 2025-10-20
+
+Phishing simulation click rate trending down:
+  2024 annual: 8.2% click rate
+  September 2025: 5.6% click rate
+  October 2025 campaign: 4.9% click rate (new campaign sent 2025-10-10)
+  Target for 2026: below 4.0%
+
+October 2025 phishing campaign details:
+  Campaign: VC-PHISH-2025-10
+  Template: Fake shipping notification with tracking link
+  Sent: 248
+  Opened: 189 (76.2%)
+  Clicked link: 12 (4.9%)
+  Submitted information: 1 (0.4%)
+  Reported as phishing: 137 (55.2%)
+  Improvement: click rate decreased from 5.6% to 4.9% month-over-month
+
+New hire R. Pham (starting 2025-10-20) pre-assigned both general and PCI training modules — due within 10 business days of start date.
+
+--- Administrative ---
+
+KnowBe4 contract renewal approved through 2026-11-30 at $18,400 per year.
+  Approval received from Diana Flores (VP Engineering) on 2025-10-10.
+  Contract signed by Priya Shankar on behalf of Vantage Commerce.
+  License type: KnowBe4 Diamond — up to 300 users.
+  Current utilization: 248/300 (82.7%).
+  Budget line item: Security Operations — Training and Awareness.
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX A: HTTP Log Excerpts — Pentest Authentication Flow Traffic
+────────────────────────────────────────────────────────────────────────────────
+
+Source: staging-pentest gateway access log
+Date: 2025-10-09 (during Ironclad engagement ISP-VC-2025-APP-0044)
+
+--- JWT Algorithm Confusion Test (alg:none — BLOCKED) ---
+
+[2025-10-09 11:14:22.104 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/users/me
+  Host: api.staging-pentest.vc-internal.net
+  Authorization: Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJ1c2VyX2lkIjoiYWxwaGEtdGVzdC0wMDEiLCJzY29wZSI6ImVtYWlsIG9wZW5pZCJ9.
+  X-Request-ID: pt-req-2025-10-09-00101
+  User-Agent: IronScan/3.2
+  Note: JWT with alg:none and no signature
+
+[2025-10-09 11:14:22.118 UTC] RESPONSE
+  Status: 401 Unauthorized
+  Content-Type: application/json
+  Body: {"error":"Invalid token","detail":"algorithm 'none' is not accepted","code":"AUTH_INVALID_TOKEN"}
+  X-Response-Time: 3ms
+
+--- JWT Algorithm Confusion Test (RS256 to HS256 — BLOCKED) ---
+
+[2025-10-09 11:14:25.201 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/users/me
+  Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiYWxwaGEtdGVzdC0wMDEiLCJzY29wZSI6ImVtYWlsIG9wZW5pZCJ9.FAKE_HMAC_SIG
+  X-Request-ID: pt-req-2025-10-09-00102
+  Note: JWT with alg changed from RS256 to HS256, signed with public key
+
+[2025-10-09 11:14:25.214 UTC] RESPONSE
+  Status: 401 Unauthorized
+  Body: {"error":"Invalid token","detail":"algorithm mismatch: expected RS256, got HS256","code":"AUTH_INVALID_TOKEN"}
+  X-Response-Time: 2ms
+
+--- OAuth Redirect URI Bypass Attempts (All Rejected) ---
+
+[2025-10-09 14:02:17.501 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/auth/authorize?response_type=code&client_id=test-client&redirect_uri=https://attacker.vantage.com/callback&scope=email+openid&state=abc123
+  X-Request-ID: pt-req-2025-10-09-00201
+
+[2025-10-09 14:02:17.512 UTC] RESPONSE
+  Status: 400 Bad Request
+  Body: {"error":"invalid_request","error_description":"Invalid redirect_uri: subdomain not in allowlist","registered_uris":["https://app.vantage.com/callback","https://mobile.vantage.com/callback"]}
+  X-Response-Time: 4ms
+
+[2025-10-09 14:02:18.601 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/auth/authorize?response_type=code&client_id=test-client&redirect_uri=https://vantage.com/callback/../../../attacker.com&scope=email+openid&state=def456
+  X-Request-ID: pt-req-2025-10-09-00202
+
+[2025-10-09 14:02:18.614 UTC] RESPONSE
+  Status: 400 Bad Request
+  Body: {"error":"invalid_request","error_description":"Invalid redirect_uri: does not match registered URIs"}
+  X-Response-Time: 3ms
+
+[2025-10-09 14:02:19.701 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/auth/authorize?response_type=code&client_id=test-client&redirect_uri=https://vantage.com%2F%2Fattacker.com/callback&scope=email&state=ghi789
+  X-Request-ID: pt-req-2025-10-09-00203
+
+[2025-10-09 14:02:19.715 UTC] RESPONSE
+  Status: 400 Bad Request
+  Body: {"error":"invalid_request","error_description":"Invalid redirect_uri: URL encoding detected in domain portion"}
+
+--- Rate Limiting Test (/api/v2/auth/login) ---
+
+[2025-10-09 15:00:01.101 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/auth/login
+  Body: {"username":"rate-test@test.com","password":"test1"}
+  X-Request-ID: pt-req-2025-10-09-00301
+[2025-10-09 15:00:01.312 UTC] RESPONSE
+  Status: 401 Unauthorized
+  Headers: X-RateLimit-Remaining: 4, X-RateLimit-Reset: 1728918060
+
+[2025-10-09 15:00:02.101 UTC] REQUEST (attempt 2)
+  Path: /api/v2/auth/login
+  Body: {"username":"rate-test@test.com","password":"test2"}
+  X-Request-ID: pt-req-2025-10-09-00302
+[2025-10-09 15:00:02.298 UTC] RESPONSE
+  Status: 401 Unauthorized
+  Headers: X-RateLimit-Remaining: 3
+
+[2025-10-09 15:00:03.101 UTC] REQUEST (attempt 3)
+  X-Request-ID: pt-req-2025-10-09-00303
+[2025-10-09 15:00:03.287 UTC] RESPONSE: 401, X-RateLimit-Remaining: 2
+
+[2025-10-09 15:00:04.101 UTC] REQUEST (attempt 4)
+  X-Request-ID: pt-req-2025-10-09-00304
+[2025-10-09 15:00:04.312 UTC] RESPONSE: 401, X-RateLimit-Remaining: 1
+
+[2025-10-09 15:00:05.101 UTC] REQUEST (attempt 5)
+  X-Request-ID: pt-req-2025-10-09-00305
+[2025-10-09 15:00:05.298 UTC] RESPONSE: 401, X-RateLimit-Remaining: 0
+
+[2025-10-09 15:00:06.101 UTC] REQUEST (attempt 6 — should be rate limited)
+  X-Request-ID: pt-req-2025-10-09-00306
+[2025-10-09 15:00:06.112 UTC] RESPONSE
+  Status: 429 Too Many Requests
+  Body: {"error":"Rate limit exceeded","retry_after":55,"limit":"5 per minute per IP"}
+  Note: Rate limiting active — requests 6 through 10 all received HTTP 429
+
+[2025-10-09 15:00:11.101 UTC] REQUEST (attempt 11 — account lockout threshold)
+  X-Request-ID: pt-req-2025-10-09-00311
+[2025-10-09 15:00:11.118 UTC] RESPONSE
+  Status: 403 Forbidden
+  Body: {"error":"Account temporarily locked","lockout_duration_minutes":15,"reason":"excessive_failures","total_failures":10}
+  Note: Account lockout triggered after 10 total failed attempts
+
+--- Over-scoped Response Test (Finding VC-APP-051) ---
+
+[2025-10-09 16:14:22.401 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/users/me
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJ1c2VyX2lkIjoiYWxwaGEtdGVzdC0wMDEiLCJzY29wZSI6ImVtYWlsIG9wZW5pZCIsImlhdCI6MTcyODA5NzYwMH0.VALID_SIG...
+  X-Request-ID: pt-req-2025-10-09-00412
+  Note: Valid JWT with scope "email openid" — should NOT return address
+
+[2025-10-09 16:14:22.512 UTC] RESPONSE
+  Status: 200 OK
+  Content-Type: application/json
+  Body: {"user_id":"alpha-test-001","email":"alpha@test.vantage.com","email_verified":true,"name":"Alpha Test User","address":{"street":"123 Test Street","city":"Portland","state":"OR","zip":"97201","country":"US"},"phone":"+1-555-0100"}
+  Note: Address and phone fields present despite scope being "email openid" only — FINDING VC-APP-051
+
+--- Username Enumeration Test (Finding VC-APP-052) ---
+
+[2025-10-09 16:30:01.201 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/auth/login
+  Body: {"username":"nonexistent-user@test.com","password":"test123"}
+  X-Request-ID: pt-req-2025-10-09-00501
+
+[2025-10-09 16:30:01.312 UTC] RESPONSE
+  Status: 401 Unauthorized
+  Body: {"error":"User not found","code":"AUTH_USER_NOT_FOUND"}
+  Note: Reveals that this username does NOT exist in the system
+
+[2025-10-09 16:30:02.301 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/auth/login
+  Body: {"username":"alpha@test.vantage.com","password":"wrong-password"}
+  X-Request-ID: pt-req-2025-10-09-00502
+
+[2025-10-09 16:30:02.418 UTC] RESPONSE
+  Status: 401 Unauthorized
+  Body: {"error":"Invalid credentials","code":"AUTH_INVALID_CREDENTIALS"}
+  Note: Different error message reveals this username DOES exist — FINDING VC-APP-052
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX B: PCI-DSS Training — Individual Completion Records (Sample)
+────────────────────────────────────────────────────────────────────────────────
+
+Source: KnowBe4 training platform export
+Campaign: VC-PCI-SAT-2025
+Export date: 2025-10-15
+
+Employee                    | Department    | Completion Date     | Score | Status
+----------------------------|---------------|---------------------|-------|--------
+marcus.tran@vantage.com     | Security      | 2025-10-02 09:14    | 100%  | PASS
+anna.petrov@vantage.com     | SRE           | 2025-10-03 14:22    | 93%   | PASS
+rachel.kim@vantage.com      | Platform      | 2025-10-02 11:45    | 100%  | PASS
+tom.nguyen@vantage.com      | DevOps        | 2025-10-03 08:30    | 86%   | PASS
+carla.mendes@vantage.com    | DevOps        | 2025-10-02 10:00    | 93%   | PASS
+sara.johnson@vantage.com    | DevOps        | 2025-10-04 09:15    | 86%   | PASS
+mike.chen@vantage.com       | DevOps        | 2025-10-03 16:42    | 93%   | PASS
+ben.okoro@vantage.com       | SRE           | 2025-10-05 07:30    | 100%  | PASS
+david.okafor@vantage.com    | Platform      | 2025-10-04 14:55    | 86%   | PASS
+james.wu@vantage.com        | SRE           | 2025-10-06 13:08    | 93%   | PASS
+alex.rivera@vantage.com     | Backend Eng   | 2025-10-07 08:45    | 86%   | PASS
+maria.gonzalez@vantage.com  | Backend Eng   | 2025-10-05 15:30    | 93%   | PASS
+kevin.zhao@vantage.com      | Data Eng      | 2025-10-08 10:22    | 80%   | PASS
+[... 31 additional employees, all PASS ...]
+r.pham@vantage.com          | Engineering   | —                   | —     | NOT STARTED (starts 2025-10-20)
+travel-user-1@vantage.com   | Security      | —                   | —     | OUTSTANDING (on travel)
+travel-user-2@vantage.com   | DevOps        | —                   | —     | OUTSTANDING (on travel)
+
+Summary: 44/47 complete. 3 outstanding with deadline extension to 2025-10-25.
+All 44 completed employees achieved passing score (80% or above).
+No employees failed or scored below 80%.
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX C: Pentest Scope — Deploy Manifest (staging-pentest)
+────────────────────────────────────────────────────────────────────────────────
+
+Source: ArgoCD application manifest for staging-pentest cluster
+Exported: 2025-10-06 (pre-engagement snapshot)
+Cluster: staging-pentest-01.vc-internal.net
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: staging-pentest
+  labels:
+    app: api-gateway
+    version: v6.2.0
+    environment: staging-pentest
+    engagement: ISP-VC-2025-APP-0044
+    managed-by: argocd
+annotations:
+    ironclad.io/pentest-window-start: "2025-10-06T00:00:00Z"
+    ironclad.io/pentest-window-end: "2025-10-13T23:59:59Z"
+    ironclad.io/lead-tester: "dara.okonkwo@ironcladsp.com"
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        version: v6.2.0
+    spec:
+      serviceAccountName: api-gateway-sa
+      containers:
+      - name: api-gateway
+        image: vcr.io/api-gateway:v6.2.0-staging-pentest
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "2000m"
+            memory: "2048Mi"
+        env:
+        - name: AUTH_SERVICE_URL
+          value: "http://auth-service.staging-pentest.svc:8080"
+        - name: USER_PROFILE_SERVICE_URL
+          value: "http://user-profile-service.staging-pentest.svc:8080"
+        - name: RATE_LIMIT_ENABLED
+          value: "true"
+        - name: RATE_LIMIT_REQUESTS_PER_MINUTE
+          value: "5"
+        - name: JWT_ALGORITHM
+          value: "RS256"
+        - name: JWT_PUBLIC_KEY_PATH
+          value: "/etc/jwt-keys/public.pem"
+        - name: LOG_LEVEL
+          value: "DEBUG"
+        - name: TRACING_ENABLED
+          value: "true"
+        - name: TRACING_SAMPLE_RATE
+          value: "1.0"
+        volumeMounts:
+        - name: jwt-keys
+          mountPath: /etc/jwt-keys
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: jwt-keys
+        secret:
+          secretName: jwt-signing-keys-staging
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: staging-pentest
+  labels:
+    app: auth-service
+    version: v3.9.1
+    environment: staging-pentest
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    spec:
+      containers:
+      - name: auth-service
+        image: vcr.io/auth-service:v3.9.1-staging-pentest
+        ports:
+        - containerPort: 8080
+          name: http
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1024Mi"
+          limits:
+            cpu: "2000m"
+            memory: "2048Mi"
+        env:
+        - name: OAUTH_REDIRECT_ALLOWLIST
+          value: "https://app.vantage.com/callback,https://mobile.vantage.com/callback"
+        - name: SESSION_MAX_AGE
+          value: "3600"
+        - name: SESSION_COOKIE_SECURE
+          value: "true"
+        - name: SESSION_COOKIE_HTTPONLY
+          value: "true"
+        - name: SESSION_COOKIE_SAMESITE
+          value: "Strict"
+        - name: ACCOUNT_LOCKOUT_THRESHOLD
+          value: "10"
+        - name: ACCOUNT_LOCKOUT_DURATION_MINUTES
+          value: "15"
+        - name: DB_HOST
+          value: "auth-db.staging-pentest.svc"
+        - name: DB_NAME
+          value: "auth_staging"
+        - name: REDIS_URL
+          value: "redis://redis-sessions.staging-pentest.svc:6379/0"
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-profile-service
+  namespace: staging-pentest
+  labels:
+    app: user-profile-service
+    version: v2.7.0
+    environment: staging-pentest
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-profile-service
+  template:
+    spec:
+      containers:
+      - name: user-profile-service
+        image: vcr.io/user-profile-service:v2.7.0-staging-pentest
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1024Mi"
+        env:
+        - name: DB_HOST
+          value: "profile-db.staging-pentest.svc"
+        - name: SCOPE_FILTERING_ENABLED
+          value: "true"
+        - name: LOG_LEVEL
+          value: "DEBUG"
+
+---
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: staging-pentest-isolation
+  namespace: staging-pentest
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: staging-pentest
+    - ipBlock:
+        cidr: 10.42.16.0/24
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: staging-pentest
+    - ipBlock:
+        cidr: 10.42.16.0/24
+  - to:
+    - ipBlock:
+        cidr: 10.42.0.0/16
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX D: SOC 2 — Control-by-Control Test Summary (CC6 and CC7)
+────────────────────────────────────────────────────────────────────────────────
+
+Source: Thornton-Kiley Associates fieldwork working papers
+Auditor: James Reiter
+Date: 2025-10-15
+
+--- CC6: Logical and Physical Access Controls ---
+
+Control ID  | Description                                       | Result       | Notes
+------------|---------------------------------------------------|--------------|--------------------------------------
+CC6.1-01    | New employee provisioning workflow (Okta)          | Pass         | Tested 15 new hires — all provisioned within SLA
+CC6.1-02    | Employee termination deprovisioning (Okta)         | Pass         | Tested 12 terminations — all within 24h
+CC6.1-03    | Contractor provisioning workflow                   | Pass         | Tested 8 contractor onboardings — proper approval chain
+CC6.1-04    | Contractor deprovisioning workflow                 | EXCEPTION    | 3 of 11 contractors deprovisioned 19-55 days late
+CC6.2-01    | MFA enforcement — all production systems           | Pass         | 100% MFA coverage confirmed via Okta admin console
+CC6.2-02    | MFA enforcement — VPN access                       | Pass         | Duo push verification required for all VPN sessions
+CC6.2-03    | MFA enforcement — AWS console                      | Pass         | AWS SSO with Okta MFA gate confirmed
+CC6.3-01    | Role-based access control — Kubernetes             | Pass         | RBAC policies audited, no overprivileged service accounts
+CC6.3-02    | Role-based access control — database               | Pass         | DB users follow least privilege — tested 20 accounts
+CC6.3-03    | Role-based access control — CI/CD                  | Pass         | Jenkins/ArgoCD roles match org chart — no drift
+CC6.4-01    | Physical access — data center badge logs           | Pass         | Badge logs reviewed for 6-month period — all authorized
+CC6.4-02    | Physical access — visitor management               | Pass         | Visitor logs cross-referenced with badge swipes
+CC6.5-01    | Encryption at rest — production databases          | Pass         | AES-256 confirmed for all RDS instances
+CC6.5-02    | Encryption in transit — TLS enforcement            | Pass         | TLS 1.2+ enforced on all external endpoints
+CC6.6-01    | Network segmentation — prod/staging isolation      | Observation  | ICMP leak on 2 of 47 paths (remediated Oct 7)
+CC6.6-02    | Network segmentation — CDE isolation               | Pass         | CDE network fully isolated — verified with packet captures
+CC6.7-01    | Privileged access management — break-glass         | Pass         | Break-glass procedure tested — proper approval and logging
+CC6.7-02    | Privileged access management — root account        | Pass         | AWS root account MFA + no programmatic access confirmed
+
+--- CC7: System Operations ---
+
+Control ID  | Description                                       | Result       | Notes
+------------|---------------------------------------------------|--------------|--------------------------------------
+CC7.1-01    | Vulnerability scanning — weekly cadence            | Pass         | Nessus scans run weekly — no critical vulns unpatched >7d
+CC7.1-02    | Patch management SLA — critical patches            | Pass         | All critical patches applied within 7-day SLA
+CC7.1-03    | Patch management SLA — medium patches              | Observation  | 2 services (catalog-search, email-notifier) 4 days late
+CC7.1-04    | Patch management SLA — low patches                 | Pass         | All low patches within 30-day SLA
+CC7.2-01    | Incident response — P1 SLA (15 min response)       | Pass         | 8 P1 incidents reviewed — all responded within SLA
+CC7.2-02    | Incident response — P2 SLA (1 hour response)       | Pass         | 28 P2 incidents reviewed — all responded within SLA
+CC7.2-03    | Post-mortem completion — P1/P2 incidents            | Observation  | 28 of 36 complete (77.8%) — target 95%
+CC7.3-01    | Backup verification — daily database backups       | Pass         | Backups verified via automated restore test — daily
+CC7.3-02    | Backup verification — weekly application backups   | Pass         | Weekly app-level backups confirmed for all services
+CC7.4-01    | Disaster recovery — annual DR test                 | Pass         | DR test completed 2025-07-15 — RTO 4h, RPO 1h met
+CC7.4-02    | Disaster recovery — failover documentation         | Pass         | Failover runbooks reviewed — last updated 2025-09-01
+CC7.5-01    | Monitoring and alerting — uptime SLA tracking      | Pass         | 99.97% uptime across critical services — SLA is 99.9%
+CC7.5-02    | Monitoring and alerting — alert routing            | Pass         | PagerDuty routing rules verified for all P1 alerts
+CC7.6-01    | Capacity planning — quarterly review               | Pass         | Q3 capacity review completed — no services at >80% utilization
+CC7.6-02    | Capacity planning — auto-scaling                   | Pass         | HPA configured on all externally-facing services
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX E: Pentest — Nuclei Scan Summary and Informational Findings
+────────────────────────────────────────────────────────────────────────────────
+
+Source: Ironclad Security Partners — Nuclei v3.2.1 automated scan output
+Date: 2025-10-07 (automated scanning phase)
+Target: staging-pentest cluster endpoints
+
+Nuclei Template Results Summary:
+  Templates loaded: 8,412
+  Templates matched: 12
+  Total requests sent: 247,891
+  Duration: 6h 42m
+  Threads: 25
+
+Matched Templates:
+
+Template ID                          | Severity  | Target                           | Result
+-------------------------------------|-----------|----------------------------------|--------------------------------
+tech-detect/api-gateway/express      | INFO      | api-gateway:8080                 | Express.js framework detected
+http/headers/x-powered-by            | INFO      | api-gateway:8080                 | X-Powered-By: Express (VC-APP-053)
+http/cors/cors-misconfig             | INFO      | auth-service:8080                | CORS allows *.vantage.com with credentials (VC-APP-054)
+http/headers/x-request-id            | INFO      | api-gateway:8080                 | X-Request-ID forwarded (VC-APP-055)
+http/security-headers/csp            | INFO      | api-gateway:8080                 | CSP header present and restrictive
+http/security-headers/hsts           | INFO      | api-gateway:8080                 | HSTS max-age=31536000, includeSubDomains
+http/security-headers/x-frame        | INFO      | api-gateway:8080                 | X-Frame-Options: DENY
+http/security-headers/x-content-type | INFO      | api-gateway:8080                 | X-Content-Type-Options: nosniff
+http/security-headers/referrer       | INFO      | api-gateway:8080                 | Referrer-Policy: strict-origin-when-cross-origin
+ssl/tls-version                      | INFO      | api-gateway:8080                 | TLS 1.2 and 1.3 supported, TLS 1.0/1.1 rejected
+ssl/weak-cipher                      | INFO      | api-gateway:8080                 | No weak ciphers detected
+http/token/jwt-alg-none              | INFO      | auth-service:8080                | alg:none rejected (verified)
+
+Notable Negative Results (templates that did NOT match — good):
+  - http/vulnerabilities/sqli-*: 0 matches across 89 endpoints (342 SQLi templates tested)
+  - http/vulnerabilities/xss-*: 0 matches across 89 endpoints (287 XSS templates tested)
+  - http/vulnerabilities/ssrf-*: 0 matches across 89 endpoints (94 SSRF templates tested)
+  - http/vulnerabilities/rce-*: 0 matches across 89 endpoints (156 RCE templates tested)
+  - http/vulnerabilities/lfi-*: 0 matches (73 LFI templates tested)
+  - http/vulnerabilities/xxe-*: 0 matches (41 XXE templates tested)
+  - http/default-logins/*: 0 matches (no default credentials found)
+  - http/exposed-panels/*: 0 matches (no admin panels exposed)
+  - http/misconfiguration/directory-listing: 0 matches
+
+Scan performance metrics:
+  Average response time: 12ms
+  Max response time: 487ms (during fuzzing of /api/v2/checkout/cart endpoint)
+  Errors/timeouts: 14 (0.006% of total requests)
+  WAF blocks during scan: 2,891 (Cloudflare rules triggered on automated payloads)
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX F: SOC 2 / PCI-DSS Shared Control Mapping (Excerpt)
+────────────────────────────────────────────────────────────────────────────────
+
+Source: Vantage Commerce Compliance Team — control mapping document
+Maintained by: Nathan Osei and Lena Vasquez
+Last updated: 2025-10-01
+
+SOC 2 Control     | PCI-DSS Requirement | Shared Evidence                                    | Tested By
+------------------|---------------------|----------------------------------------------------|-------------------
+CC6.1 (Access)    | Req 7.1, 7.2        | Okta provisioning/deprovisioning logs               | Both frameworks
+CC6.2 (MFA)       | Req 8.3.1, 8.3.2    | Okta MFA enrollment report, Duo push logs           | Both frameworks
+CC6.5 (Encrypt)   | Req 3.4, 3.5, 4.1   | RDS encryption config, TLS certificate inventory    | Both frameworks
+CC6.6 (Network)   | Req 1.2, 1.3        | Firewall rules, network segmentation test results   | Both frameworks
+CC7.1 (Vuln Mgmt) | Req 6.1, 6.2        | Nessus scan reports, patch management tickets        | Both frameworks
+CC7.2 (Incident)  | Req 12.10           | PagerDuty incident exports, post-mortem documents   | Both frameworks
+CC7.3 (Backup)    | Req 9.5.1           | Backup verification logs, restore test results      | Both frameworks
+CC7.4 (DR)        | Req 12.10.2         | DR test report, failover runbook                    | Both frameworks
+CC8.1 (Change)    | Req 6.4, 6.5        | Change management tickets, code review evidence     | Both frameworks
+CC1.4 (Training)  | Req 12.6            | KnowBe4 training completion reports                 | Both frameworks
+
+Total shared controls: 34 of 87 SOC 2 controls map to PCI-DSS requirements
+Testing effort reduction: approximately 20% (per Sarah Kim, Thornton-Kiley Associates)
+
+34 shared controls were tested once with evidence accepted by both frameworks:
+  SOC 2 Type II audit (Thornton-Kiley): accepted shared evidence for 34 controls
+  PCI-DSS SAQ-D assessment (internal): referenced SOC 2 evidence vault artifacts
+
+Cross-framework evidence artifacts stored in audit vault:
+  Total shared artifacts: 142 documents
+  Artifact types: configuration screenshots, log exports, policy documents, training records
+  Storage: audit-vault.vc-internal.net (encrypted at rest, access-controlled)
+  Retention: 7 years per PCI-DSS Requirement 10.7 and SOC 2 policy
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX G: October 2025 Phishing Simulation — Detailed Click Analysis
+────────────────────────────────────────────────────────────────────────────────
+
+Source: KnowBe4 phishing simulation platform
+Campaign: VC-PHISH-2025-10
+Template: Fake shipping notification with tracking link
+Sent: 2025-10-10
+Analysis date: 2025-10-15
+
+Click timeline (12 employees who clicked the simulated phishing link):
+
+Timestamp (UTC)          | Employee ID     | Department     | Action              | Time After Send
+-------------------------|-----------------|----------------|---------------------|----------------
+2025-10-10 09:03:12      | EMP-0147        | Marketing      | Clicked link        | 3 min
+2025-10-10 09:05:44      | EMP-0203        | Sales           | Clicked link        | 5 min
+2025-10-10 09:08:31      | EMP-0089        | Customer Svc   | Clicked link        | 8 min
+2025-10-10 09:12:17      | EMP-0311        | Finance        | Clicked link        | 12 min
+2025-10-10 09:14:55      | EMP-0178        | Marketing      | Clicked link        | 14 min
+2025-10-10 09:22:08      | EMP-0421        | Sales           | Clicked link        | 22 min
+2025-10-10 09:31:42      | EMP-0256        | Legal           | Clicked link        | 31 min
+2025-10-10 09:45:19      | EMP-0099        | Customer Svc   | Clicked + submitted | 45 min
+2025-10-10 10:11:33      | EMP-0334        | HR              | Clicked link        | 1h 11min
+2025-10-10 11:24:07      | EMP-0192        | Engineering    | Clicked link        | 2h 24min
+2025-10-10 13:55:41      | EMP-0405        | Operations     | Clicked link        | 4h 55min
+2025-10-10 16:02:18      | EMP-0267        | Finance        | Clicked link        | 7h 2min
+
+Submitted credentials: 1 employee (EMP-0099, Customer Service)
+  Redirected to KnowBe4 training landing page immediately after submission
+  Mandatory remedial phishing awareness module assigned — due 2025-10-17
+  Manager notified per policy VC-SEC-POL-004 Section 3.2
+
+Click rate by department:
+  Marketing: 2/31 (6.5%)
+  Sales: 2/28 (7.1%)
+  Customer Service: 2/22 (9.1%)
+  Finance: 2/18 (11.1%)
+  Legal: 1/12 (8.3%)
+  HR: 1/14 (7.1%)
+  Engineering: 1/87 (1.1%)
+  Operations: 1/36 (2.8%)
+  Security: 0/8 (0%)
+  SRE: 0/12 (0%)
+  DevOps: 0/10 (0%)
+
+Reported as phishing (employees who correctly identified and reported):
+  Total: 137/248 (55.2%)
+  Security team: 8/8 (100%)
+  SRE team: 11/12 (91.7%)
+  Engineering: 72/87 (82.8%)
+  DevOps: 9/10 (90%)
+  Other departments: 37/131 (28.2%)
+
+Trend analysis (click rate over 12 months):
+  November 2024: 7.8%
+  December 2024: 8.2% (holiday-themed template)
+  January 2025: 6.9%
+  February 2025: 7.1%
+  March 2025: 6.4%
+  April 2025: 6.0%
+  May 2025: 5.8%
+  June 2025: 5.5%
+  July 2025: 5.3%
+  August 2025: 5.4%
+  September 2025: 5.6%
+  October 2025: 4.9%
+
+================================================================================
+END OF DOCUMENT — 2025-10-15
+================================================================================

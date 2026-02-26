@@ -1,0 +1,1114 @@
+================================================================================
+INFRASTRUCTURE OPERATIONS LOG — VANTAGE COMMERCE PLATFORM
+Date: 2025-09-20
+Cluster: prod-us-east-1
+Classification: Internal — Operations Team Only
+================================================================================
+
+--- SECTION 1: KUBERNETES CONTROL PLANE UPGRADE ---
+
+Timestamp: 2025-09-20T02:00:00Z
+Service: kube-apiserver
+Environment: production
+Cluster: prod-us-east-1
+Operation: Kubernetes Control Plane Upgrade — 1.29.6 to 1.30.4
+Maintenance Window: Sunday 02:00-05:00 UTC
+Change Record: CHG-2025-09-20-001
+Implementer: drew.park
+Secondary: tanya.okonkwo
+
+PRE-UPGRADE CLUSTER STATE:
+
+  EKS Cluster: prod-us-east-1
+  Current Version: Kubernetes 1.29.6
+  Target Version: Kubernetes 1.30.4
+  Platform Version: eks.12
+  Service CIDR: 172.20.0.0/16
+  Cluster CIDR: 10.42.0.0/16
+  DNS: CoreDNS
+  CNI: Amazon VPC CNI
+  Authentication: OIDC + aws-iam-authenticator
+
+  Managed Node Groups:
+    1. worker-general-v5
+       Instance Type: m6i.4xlarge
+       Nodes: 18
+       AMI: amazon-eks-node-1.29-v20250901
+       Target AMI: amazon-eks-node-1.30-v20250915
+    2. worker-memory-v3
+       Instance Type: r6i.2xlarge
+       Nodes: 7
+       AMI: amazon-eks-node-1.29-v20250901
+       Target AMI: amazon-eks-node-1.30-v20250915
+    3. worker-spot-v2
+       Instance Type: m6i.2xlarge (mixed)
+       Nodes: 11
+       AMI: amazon-eks-node-1.29-v20250901
+       Target AMI: amazon-eks-node-1.30-v20250915
+
+  Add-ons:
+    VPC CNI: v1.18.3 (compatible with 1.30)
+    CoreDNS: v1.11.1 (target: v1.11.3)
+    kube-proxy: v1.29.6 (target: v1.30.4)
+    EBS CSI Driver: v1.32.0 (compatible with 1.30)
+    Metrics Server: v0.7.1 (compatible with 1.30)
+
+PRE-UPGRADE CHECKLIST:
+
+  [x] Staging cluster upgraded to 1.30.4 — completed 2025-09-13
+  [x] All workloads tested on staging 1.30 for 7 days — no issues
+  [x] Deprecated API check: no resources using removed APIs
+    - PodSecurityPolicy: Removed in 1.25 (migrated to Pod Security Standards in Q2)
+    - flowcontrol.apiserver.k8s.io/v1beta2: Removed in 1.29 (migrated to v1)
+    - No custom resources using deprecated API versions
+  [x] kubectl version compatible (v1.30.4 installed on CI runners)
+  [x] Helm charts verified compatible with 1.30 (42 charts tested)
+  [x] PodDisruptionBudgets reviewed — all critical services have PDBs
+  [x] Cluster backup taken via Velero — backup vantage-pre-k8s-upgrade-20250920
+  [x] Notification sent to #platform-infra and #engineering-all at 2025-09-19 16:00 UTC
+
+CONTROL PLANE UPGRADE EXECUTION:
+
+  [02:00:00Z] Control plane upgrade initiated via EKS API
+    Command: aws eks update-cluster-version --name prod-us-east-1 --kubernetes-version 1.30
+    Update ID: update-abc123def456
+    Expected Duration: 15-25 minutes
+
+  [02:00:15Z] API server rolling update started
+    Phase 1: New API server instances provisioned with Kubernetes 1.30.4
+    Phase 2: Old API server instances drained (in-flight requests allowed to complete)
+    Phase 3: Load balancer targets updated to new instances
+
+  [02:07:22Z] New API server responding on 1.30.4
+    Verification: kubectl version --short
+    Server Version: v1.30.4-eks-2d98532
+    Client requests during update: 0 rejected (dual-running API servers)
+
+  [02:14:00Z] Control plane upgrade completed
+    Duration: 14 minutes
+    Downtime: Zero (rolling update)
+    API Server Audit Log Rate During Upgrade: 340 events/sec
+    Rejected Requests During Upgrade: 0
+    etcd Health: All 3 members healthy, leader stable
+
+  API Server Metrics (post-upgrade snapshot at 02:15 UTC):
+    apiserver_request_total (5-min rate): 1,240 req/s
+    apiserver_request_duration_seconds p50: 2.1ms
+    apiserver_request_duration_seconds p99: 48ms
+    apiserver_current_inflight_requests: 12
+    apiserver_response_sizes_bytes p50: 2,048
+    apiserver_response_sizes_bytes p99: 124,000
+    etcd_request_duration_seconds p50: 1.8ms
+    etcd_request_duration_seconds p99: 8.2ms
+
+ADDON UPGRADES:
+
+  CoreDNS Upgrade (v1.11.1 to v1.11.3):
+    [02:18:00Z] CoreDNS DaemonSet image updated
+    [02:18:30Z] Rolling restart initiated — 2 replicas at a time
+    [02:20:15Z] All 3 CoreDNS pods running v1.11.3
+    Validation:
+      In-cluster dig test: avg 2.1ms response time
+      External resolution: avg 4.2ms response time
+      NXDOMAIN rate: 0.7% (normal baseline)
+      Query rate: 48,000 queries/min (normal)
+      Cache hit rate: 92.4%
+    CoreDNS Config:
+      Forward to: 169.254.169.253 (VPC DNS)
+      Cache TTL: 30 seconds
+      Negative Cache TTL: 5 seconds
+      Max Concurrent: 150
+      Autopath: Enabled (search domains optimization)
+
+  kube-proxy Upgrade (v1.29.6 to v1.30.4):
+    [02:22:00Z] kube-proxy DaemonSet image updated
+    [02:22:10Z] Rolling restart initiated across 36 nodes
+    [02:34:00Z] All 36 nodes running kube-proxy v1.30.4
+    Duration: 12 minutes (one node at a time, 20-second stabilization)
+    Validation:
+      iptables rules regenerated on each node
+      Service endpoint resolution tested: 100% success
+      ClusterIP connectivity: all 142 Services reachable
+      NodePort connectivity: all 8 NodePort Services reachable
+    kube-proxy Mode: iptables (IPVS evaluation planned for Q1 2026)
+
+  VPC CNI (no upgrade needed):
+    Current: v1.18.3
+    Compatibility: Verified with Kubernetes 1.30.4
+    ENI Allocation: Normal, no changes needed
+    Secondary IP Warm Pool: 2 per node (default)
+
+MANAGED NODE GROUP ROLLING UPDATES:
+
+  Strategy: maxUnavailable=1, maxSurge=2
+  This ensures at least N-1 nodes available at all times while provisioning
+  up to 2 replacement nodes simultaneously for faster rollout.
+
+  worker-general-v5 (18 nodes):
+    [02:40:00Z] Rolling update started
+    [02:40:05Z] Surge nodes provisioned: 2 new m6i.4xlarge with EKS 1.30 AMI
+    [02:41:22Z] Surge node 1 joined cluster (ip-10-42-19-91), Ready in 42 seconds
+    [02:41:38Z] Surge node 2 joined cluster (ip-10-42-19-92), Ready in 44 seconds
+    [02:42:00Z] Old node 1 (ip-10-42-17-201) cordoned and draining
+      Pods drained: 18 (all rescheduled to surge nodes and other existing nodes)
+      PodDisruptionBudgets: All respected
+      Drain duration: 3 minutes 14 seconds
+    [02:45:20Z] Old node 1 terminated, new replacement provisioned
+    [02:47:00Z] New replacement joined cluster
+    [02:47:30Z] Old node 2 (ip-10-42-17-203) cordoned and draining
+    ... [Process repeated for all 18 nodes]
+    [04:07:00Z] All 18 nodes replaced
+    Total Duration: 87 minutes
+    PodDisruptionBudgets Respected: 100%
+    Pod Rescheduling Failures: 0
+    Node Provisioning Failures: 0
+    Average Node Replacement Time: 4 minutes 50 seconds
+
+  worker-memory-v3 (7 nodes):
+    [04:10:00Z] Rolling update started
+    [04:42:00Z] All 7 nodes replaced
+    Duration: 32 minutes
+    PDBs Respected: 100%
+
+  worker-spot-v2 (11 nodes):
+    [04:45:00Z] Rolling update started
+    [05:12:00Z] All 11 nodes replaced
+    Duration: 27 minutes
+    Note: Spot nodes replaced faster due to fewer PDB-governed pods
+    Spot Interruptions During Upgrade: 0
+
+POST-UPGRADE VALIDATION:
+
+  Cluster Version: v1.30.4
+  All Nodes: 36/36 Ready, running kubelet v1.30.4
+  All DaemonSets: 5/5 healthy (36/36 pods each)
+  All Deployments: 48/48 available
+  All StatefulSets: 12/12 ready
+  All CronJobs: 8/8 scheduled
+  Metrics Server: Healthy, node metrics reporting
+  Cluster Autoscaler: Healthy, API discovery updated
+  Custom Resource Definitions: 24 CRDs, all serving
+
+--- SLACK TRANSCRIPT: #platform-infra ---
+
+Timestamp Range: 2025-09-20T01:55:00Z — 2025-09-20T05:20:00Z
+Channel: #platform-infra
+
+[01:55:00] @drew.park: Starting K8s 1.30 upgrade in 5 min. Maintenance window is 02:00-05:00 UTC. Control plane first, then node groups. I'll post updates here
+[01:55:22] @tanya.okonkwo: I'm online as secondary. Monitoring dashboards are up
+[02:00:10] @drew.park: Control plane upgrade initiated. EKS is doing the rolling update now. Should take 15-25 min based on staging
+[02:14:15] @drew.park: control plane at 1.30.4 now. Starting managed node group rolling updates. worker-general-v5 first, 2-node surge. ~90 min for full rollout.
+[02:15:00] @tanya.okonkwo: FYI — deprecated PodSecurityPolicy resources removed in 1.30. We migrated to Pod Security Standards admission in Q2, so no impact.
+[02:15:30] @drew.park: yep, confirmed. No PSP resources in the cluster. We cleaned those up in the 1.25 upgrade
+[02:18:45] @drew.park: CoreDNS upgraded to v1.11.3. DNS resolution validated — 2.1ms average in-cluster
+[02:22:30] @drew.park: kube-proxy rolling out to all 36 nodes. This takes about 12 minutes
+[02:34:20] @drew.park: kube-proxy done, all 36 nodes on v1.30.4. iptables rules regenerated. Service connectivity verified
+[02:40:15] @drew.park: worker-general-v5 node group rolling update started. 18 nodes to replace, 2-node surge
+[02:41:45] @tanya.okonkwo: surge nodes are up and Ready. First old node draining now
+[02:55:00] @drew.park: 4 of 18 nodes replaced so far. Clean — all PDBs respected, no scheduling issues
+[03:30:00] @drew.park: 12 of 18 nodes done. ETA ~30 min for worker-general-v5
+[04:07:15] @drew.park: worker-general-v5 complete. All 18 nodes replaced. Starting worker-memory-v3 now
+[04:42:10] @drew.park: worker-memory-v3 complete. 7 nodes replaced. Starting worker-spot-v2
+[05:12:30] @drew.park: worker-spot-v2 complete. All node groups on 1.30. Cluster upgrade done!
+[05:13:00] @tanya.okonkwo: running full validation suite now
+[05:15:22] @tanya.okonkwo: validation passed. 36/36 nodes Ready, 48 deployments available, 12 statefulsets ready, all DaemonSets healthy. DNS, services, ingress all working
+[05:16:00] @drew.park: perfect. Total upgrade time: 3 hours 12 minutes. Zero downtime. Updating the change record now
+[05:16:30] @ravi.shankar: nice work team. I was monitoring from home — zero customer impact. No alerts fired during the entire window
+[05:17:00] @tanya.okonkwo: one thing to watch — I've seen some reports of kube-proxy memory usage being slightly higher on 1.30 with large iptables rulesets. We have ~2400 rules. I'll keep an eye on it this week
+[05:18:10] @drew.park: good call. I'll set up a Grafana alert for kube-proxy memory > 256Mi. Currently at 180Mi which is normal
+
+--- SECTION 2: CDN AND WAF OPERATIONS ---
+
+Timestamp: 2025-09-20T15:30:00Z
+Channel: #platform-infra (continued)
+Service: CloudFront / WAF
+Environment: production
+
+CDN CONFIGURATION:
+
+  CloudFront Distribution: E1A2B3C4D5E6F7
+  Domain: cdn.vantagecommerce.com, static.vantagecommerce.com
+  Origins:
+    1. S3 Origin: vantage-static-assets (static files, images, fonts)
+       Origin Path: /production
+       Origin Access Identity: OAI-E8F9G0H1I2J3
+    2. ALB Origin: alb-api-prod (dynamic API requests)
+       Origin Path: /api/v2
+       Protocol: HTTPS only
+       Connection Timeout: 10s
+       Read Timeout: 60s (increased for search paths)
+  Price Class: PriceClass_100 (US, Canada, Europe)
+  HTTP/2: Enabled
+  HTTP/3: Enabled (experimental)
+  Minimum TLS Version: TLSv1.2_2021
+  SSL Certificate: ACM cert for cdn.vantagecommerce.com
+
+  Cache Behaviors:
+    1. /static/* — TTL: 86400s (24h), compress: yes (gzip + brotli planned)
+    2. /images/* — TTL: 604800s (7 days), compress: yes
+    3. /api/v2/* — TTL: 0 (no caching, forward to ALB), compress: no
+    4. /api/v2/search/* — TTL: 0, origin timeout: 60s (extended)
+    5. Default (*) — TTL: 3600s (1h), compress: yes
+
+  WAF WebACL: vantage-prod-waf-v3
+  WAF Rules:
+    1. AWS Managed Rules — Common Rule Set
+    2. AWS Managed Rules — Known Bad Inputs
+    3. AWS Managed Rules — SQL Injection
+    4. AWS Managed Rules — Bot Control (targeted)
+    5. Custom Rate Limiting — 2000 req/5min per IP
+    6. Custom Geo Restriction — Block sanctioned countries
+    7. Custom IP Reputation — Block known malicious IPs (updated daily)
+
+CDN OPERATIONS PERFORMED:
+
+  [15:30:00Z] Cache Invalidation
+    Trigger: Frontend release v4.12.0 deployed
+    Path Pattern: /static/*
+    Objects Invalidated: 12,400
+    Invalidation ID: I3A4B5C6D7E8F9G0
+    Time to Complete: 4 minutes 18 seconds
+    Status: Completed
+    Cost: $0.005 per path (12,400 paths = $62)
+
+  [15:45:00Z] Origin Response Timeout Update
+    Path: /api/v2/search/*
+    Previous Timeout: 30 seconds
+    New Timeout: 60 seconds
+    Reason: Slow query reports from product search team — complex faceted searches timing out
+    Deployment Method: CloudFront behavior update via Terraform
+    Propagation Time: 8 minutes to all edge locations
+
+CDN MONTHLY METRICS (September 2025, through 2025-09-20):
+
+  Total Requests: 1.24 billion
+  Bandwidth Egress: 48.2 TB
+  Estimated Cost: $3,860
+  Cache Hit Ratio: 94.1%
+  Cache Miss Ratio: 5.9%
+  Error Rate: 0.02% (mostly 404s from broken client links)
+  Bytes Hit Ratio: 96.8%
+  HTTP/2 Requests: 78%
+  HTTP/3 Requests: 12%
+  HTTP/1.1 Requests: 10%
+
+  Geographic Distribution (top 10):
+    1. United States: 62.4%
+    2. United Kingdom: 8.2%
+    3. Canada: 7.1%
+    4. Germany: 4.8%
+    5. France: 3.2%
+    6. Australia: 2.8%
+    7. Japan: 2.4%
+    8. Netherlands: 1.9%
+    9. Brazil: 1.8%
+    10. India: 1.6%
+
+  Edge Location Latency (p50):
+    US East (Virginia): 8ms
+    US West (Oregon): 12ms
+    Europe (Frankfurt): 14ms
+    Europe (London): 11ms
+    Asia Pacific (Tokyo): 28ms
+
+WAF METRICS (past 24 hours):
+
+  Total Requests Evaluated: 14.2 million
+  Requests Blocked: 14,200 (0.1%)
+  Block Breakdown:
+    SQL Injection Patterns: 8,804 (62%)
+    Known Bot Signatures: 3,976 (28%)
+    Rate Limiting: 1,420 (10%)
+  Requests Counted (logged only): 2,100
+  Top Blocked Source IPs:
+    1. 185.220.101.x: 2,841 blocks (Tor exit node)
+    2. 45.155.205.x: 1,924 blocks (known scanner)
+    3. 194.163.x.x: 1,102 blocks (brute force attempts)
+    4. 104.248.x.x: 892 blocks (automated scraping)
+    5. 167.99.x.x: 744 blocks (SQL injection probes)
+
+--- SLACK TRANSCRIPT: #platform-infra (CDN discussion) ---
+
+Timestamp Range: 2025-09-20T15:25:00Z — 2025-09-20T16:10:00Z
+Channel: #platform-infra
+
+[15:25:14] @nina.patel: hey team, product wants to enable Brotli compression on CloudFront for the new SPA bundle. Currently serving gzip only. Any concerns?
+[15:26:00] @drew.park: no issues from infra side. Brotli gives ~15-20% better compression on JS bundles. I'll update the behavior policy.
+[15:26:30] @nina.patel: great. The new SPA bundle is 2.4MB gzipped. With brotli we should get it down to ~2.0MB
+[15:27:00] @drew.park: yeah, sounds about right. CloudFront supports brotli natively now, no origin changes needed. Just need to update the cache behavior to include br in the Accept-Encoding whitelist
+[15:27:45] @nina.patel: perfect. Can we do it with the next frontend deploy?
+[15:28:10] @drew.park: yep, I'll add it to the Terraform change. Should be a one-line update to the cache behavior compress setting
+[15:30:00] @drew.park: also just triggered cache invalidation for the v4.12.0 frontend release. 12,400 objects. Should complete in ~5 min
+[15:30:30] @ravi.shankar: I noticed the search timeout bump in the deploy diff. Is that temporary or permanent?
+[15:31:00] @drew.park: semi-permanent. Product search team is working on query optimization but the complex faceted searches legitimately take 30-45s. We'll revisit when they ship the new Elasticsearch query engine
+[15:31:40] @ravi.shankar: makes sense. I'll update the monitoring threshold to match
+[15:34:20] @drew.park: cache invalidation complete. v4.12.0 is live on all edge locations
+[15:35:00] @nina.patel: confirmed — new SPA loading correctly. Bundle hash changed as expected
+[15:45:15] @tanya.okonkwo: FYI, WAF blocked 14.2k requests in the last 24h. 62% SQL injection, 28% bot signatures, 10% rate limiting. All normal ranges. No legitimate traffic blocked based on my spot check of the last 100 blocks
+[15:46:00] @drew.park: thanks for checking. The SQL injection patterns are mostly probing /api/v2/products endpoint with UNION SELECT payloads. Standard noise
+[15:47:22] @nina.patel: should we add the brotli support to the CDN runbook?
+[15:47:45] @drew.park: good idea. I'll update the CDN operations runbook when I make the Terraform change
+
+--- SECTION 3: HTTP LOG EXCERPTS — UPGRADE OPERATIONS ---
+
+Timestamp Range: 2025-09-20T02:00:00Z — 2025-09-20T05:15:00Z
+Source: kube-apiserver audit log / kubectl operation traces
+
+[02:00:02Z] PUT /apis/eks.amazonaws.com/v1/clusters/prod-us-east-1 HTTP/2.0
+  Host: eks.us-east-1.amazonaws.com
+  User-Agent: aws-cli/2.17.14
+  Authorization: AWS4-HMAC-SHA256 [REDACTED]
+  X-Request-ID: eks-upgrade-init-7a8b9c
+  Status: 200 OK
+  Response-Time: 1842ms
+  Request-Body: {"kubernetesVersion": "1.30"}
+  Response-Body: {"update": {"id": "update-abc123def456", "status": "InProgress", "type": "VersionUpdate"}}
+
+[02:14:05Z] GET /version HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: kubectl/v1.30.4
+  X-Request-ID: version-check-post-upgrade
+  Status: 200 OK
+  Response-Time: 2ms
+  Response-Body: {
+    "major": "1",
+    "minor": "30",
+    "gitVersion": "v1.30.4-eks-2d98532",
+    "gitCommit": "2d985328e1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6",
+    "gitTreeState": "clean",
+    "buildDate": "2025-09-10T14:22:00Z",
+    "goVersion": "go1.22.6",
+    "compiler": "gc",
+    "platform": "linux/amd64"
+  }
+
+[02:18:10Z] PATCH /apis/apps/v1/namespaces/kube-system/deployments/coredns HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: aws-cli/2.17.14
+  Content-Type: application/strategic-merge-patch+json
+  X-Request-ID: coredns-upgrade-patch
+  Status: 200 OK
+  Response-Time: 18ms
+  Request-Body: {"spec":{"template":{"spec":{"containers":[{"name":"coredns","image":"602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/coredns:v1.11.3-eksbuild.1"}]}}}}
+
+[02:22:05Z] PATCH /apis/apps/v1/namespaces/kube-system/daemonsets/kube-proxy HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: aws-cli/2.17.14
+  Content-Type: application/strategic-merge-patch+json
+  X-Request-ID: kube-proxy-upgrade-patch
+  Status: 200 OK
+  Response-Time: 14ms
+  Request-Body: {"spec":{"template":{"spec":{"containers":[{"name":"kube-proxy","image":"602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/kube-proxy:v1.30.4-eksbuild.2"}]}}}}
+
+[02:40:08Z] POST /api/v1/namespaces/kube-system/events HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: kubelet/v1.30.4
+  X-Request-ID: node-update-event-01
+  Status: 201 Created
+  Response-Time: 4ms
+  Request-Body: {
+    "reason": "NodeGroupUpdate",
+    "message": "Node ip-10-42-19-91 joined cluster as part of managed node group rolling update",
+    "type": "Normal",
+    "involvedObject": {"kind": "Node", "name": "ip-10-42-19-91"}
+  }
+
+[02:42:01Z] POST /api/v1/namespaces/default/pods/eviction HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: eks-nodegroup-manager/v1.0
+  Content-Type: application/json
+  X-Request-ID: drain-node-17-201-evict-01
+  Status: 201 Created
+  Response-Time: 6ms
+  Request-Body: {
+    "apiVersion": "policy/v1",
+    "kind": "Eviction",
+    "metadata": {"name": "checkout-service-7a8b9c-x2k4m", "namespace": "checkout-prod"},
+    "deleteOptions": {"gracePeriodSeconds": 30}
+  }
+
+[04:07:02Z] GET /api/v1/nodes?labelSelector=eks.amazonaws.com/nodegroup=worker-general-v5 HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: eks-nodegroup-manager/v1.0
+  X-Request-ID: validate-nodegroup-update
+  Status: 200 OK
+  Response-Time: 22ms
+  Content-Length: 84291
+  Response-Body: [18 nodes listed, all kubelet v1.30.4, all Ready=True]
+
+[05:12:05Z] GET /api/v1/nodes HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: kubectl/v1.30.4
+  X-Request-ID: final-validation-nodes
+  Status: 200 OK
+  Response-Time: 28ms
+  Content-Length: 168422
+  Response-Body: [36 nodes listed, all kubelet v1.30.4, all Ready=True]
+
+--- SECTION 4: DEPLOY MANIFEST — COREDNS UPGRADE ---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    eks.amazonaws.com/component: coredns
+    k8s-app: kube-dns
+    kubernetes.io/name: CoreDNS
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  selector:
+    matchLabels:
+      k8s-app: kube-dns
+  template:
+    metadata:
+      labels:
+        k8s-app: kube-dns
+        eks.amazonaws.com/component: coredns
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9153"
+    spec:
+      serviceAccountName: coredns
+      priorityClassName: system-cluster-critical
+      dnsPolicy: Default
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: k8s-app
+                      operator: In
+                      values: ["kube-dns"]
+                topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: In
+                    values: ["linux"]
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: ["amd64", "arm64"]
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: coredns
+          image: 602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/coredns:v1.11.3-eksbuild.1
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              memory: 170Mi
+            requests:
+              cpu: 100m
+              memory: 70Mi
+          args: ["-conf", "/etc/coredns/Corefile"]
+          ports:
+            - containerPort: 53
+              name: dns
+              protocol: UDP
+            - containerPort: 53
+              name: dns-tcp
+              protocol: TCP
+            - containerPort: 9153
+              name: metrics
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 60
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8181
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/coredns
+              readOnly: true
+      volumes:
+        - name: config-volume
+          configMap:
+            name: coredns
+            items:
+              - key: Corefile
+                path: Corefile
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+            lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+            pods insecure
+            fallthrough in-addr.arpa ip6.arpa
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+            max_concurrent 150
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+        autopath @kubernetes
+    }
+
+--- SECTION 5: NODE GROUP UPGRADE DETAILED LOG ---
+
+NODE REPLACEMENT SEQUENCE — worker-general-v5 (first 6 of 18, remaining follow same pattern):
+
+  Node 1: ip-10-42-17-201 (us-east-1a)
+    [02:42:00] Cordoned — new pods no longer scheduled
+    [02:42:05] Drain started — 18 pods to evict
+    [02:42:08] Evicting checkout-service-7a8b9c-x2k4m (PDB: maxUnavailable=1, current unavailable=0, ALLOWED)
+    [02:42:10] Evicting inventory-service-4d2e1f-a3b4c (PDB: maxUnavailable=1, current unavailable=0, ALLOWED)
+    [02:42:12] Evicting catalog-search-8e9f0a-d5e6f (no PDB)
+    [02:42:14] Evicting catalog-search-8e9f0a-g7h8i (no PDB)
+    [02:42:16] Evicting notification-service-1b2c3d-j9k0l (PDB: maxUnavailable=1, ALLOWED)
+    [02:42:18] Evicting order-processor-5f6a7b-m1n2o (PDB: maxUnavailable=1, ALLOWED)
+    [02:42:20-02:44:40] Remaining 12 pods evicted (DaemonSet pods excluded from drain)
+    [02:45:00] All pods evicted, drain complete
+    [02:45:05] Node terminated (EC2 instance i-0a1b2c3d4e5f6789 shutting down)
+    [02:45:30] Replacement instance launched: i-0new1a2b3c4d5678
+    [02:46:12] New node ip-10-42-17-210 registered with API server
+    [02:46:50] New node Ready (kubelet v1.30.4)
+    Total Time: 4 minutes 50 seconds
+
+  Node 2: ip-10-42-17-203 (us-east-1a)
+    [02:47:00] Cordoned
+    [02:47:05] Drain started — 16 pods
+    [02:50:10] Drain complete
+    [02:50:15] Terminated
+    [02:51:48] Replacement Ready
+    Total Time: 4 minutes 48 seconds
+
+  Node 3: ip-10-42-18-105 (us-east-1b)
+    [02:52:00] Cordoned
+    [02:52:05] Drain started — 19 pods
+    [02:55:22] Drain complete (longer due to PDB waits on checkout-service)
+    [02:55:27] Terminated
+    [02:56:58] Replacement Ready
+    Total Time: 4 minutes 58 seconds
+
+  Node 4: ip-10-42-18-107 (us-east-1b)
+    [02:57:00] Cordoned
+    [02:57:05] Drain started — 14 pods
+    [02:59:45] Drain complete
+    [02:59:50] Terminated
+    [03:01:15] Replacement Ready
+    Total Time: 4 minutes 15 seconds
+
+  Node 5: ip-10-42-19-44 (us-east-1c)
+    [03:02:00] Cordoned
+    [03:02:05] Drain started — 17 pods
+    [03:05:40] Drain complete
+    [03:05:45] Terminated
+    [03:07:20] Replacement Ready
+    Total Time: 5 minutes 20 seconds
+
+  Node 6: ip-10-42-19-46 (us-east-1c)
+    [03:08:00] Cordoned
+    [03:08:05] Drain started — 15 pods
+    [03:10:50] Drain complete
+    [03:10:55] Terminated
+    [03:12:30] Replacement Ready
+    Total Time: 4 minutes 30 seconds
+
+  [Nodes 7-18: same pattern, completed by 04:07:00]
+
+  Aggregate Statistics:
+    Nodes Replaced: 18
+    Total Pods Evicted: 312
+    PDB Violations: 0
+    Failed Evictions: 0
+    Average Node Replacement: 4 min 50 sec
+    Fastest Replacement: 4 min 15 sec (ip-10-42-18-107)
+    Slowest Replacement: 5 min 20 sec (ip-10-42-19-44)
+    Surge Nodes Used: 2 (returned to pool after all replacements)
+
+--- SECTION 6: INFRASTRUCTURE METRICS SNAPSHOT ---
+
+Timestamp: 2025-09-20T00:00:00Z — 2025-09-20T23:59:59Z
+Source: Prometheus / Grafana Dashboard "Cluster Overview — prod-us-east-1"
+
+COMPUTE METRICS (24-hour summary, including upgrade window):
+
+  CPU:
+    Cluster Capacity: 312 vCPU (fluctuated during node rolling updates)
+    Average Usage: 62% (during upgrade window: 58% due to reduced workload scheduling)
+    Peak Usage: 74% (at 14:30 UTC, normal business hours)
+    Minimum Usage: 28% (at 04:45 UTC, during node group updates)
+
+  Memory:
+    Cluster Capacity: 1.18 TiB
+    Average Usage: 52%
+    Peak Usage: 58%
+
+  Node Provisioning During Upgrade:
+    New Nodes Provisioned: 38 (36 replacements + 2 surge)
+    Old Nodes Terminated: 38 (36 replaced + 2 surge returned)
+    Node Provisioning Latency (avg): 44 seconds (via managed node groups)
+    Node Drain Duration (avg): 3 minutes 20 seconds
+
+NETWORK METRICS (24-hour totals):
+
+  Ingress: 2.8 TB
+  Egress: 2.0 TB
+  Cross-AZ Transfer: 980 GB ($88.20)
+  DNS Queries (CoreDNS): 50.1M (99.8% success)
+  DNS Resolution Latency Post-Upgrade: p50 2.1ms, p99 5.2ms
+
+API SERVER AUDIT METRICS (upgrade window 02:00-05:12):
+
+  Total Audit Events: 612,000
+  Rate: 340 events/sec (average)
+  Peak Rate: 820 events/sec (during node group update surge)
+  Request Breakdown by Verb:
+    GET: 324,000 (52.9%)
+    LIST: 128,000 (20.9%)
+    WATCH: 84,000 (13.7%)
+    CREATE: 32,000 (5.2%)
+    UPDATE: 24,000 (3.9%)
+    DELETE: 12,000 (2.0%)
+    PATCH: 8,000 (1.3%)
+  Rejected Requests: 0
+  Throttled Requests: 0
+  Error Responses (5xx): 0
+  Latency p99: 48ms
+
+--- SECTION 4: CHANGE MANAGEMENT LOG ---
+
+Change Record: CHG-2025-09-20-001
+  Title: Kubernetes Control Plane and Node Group Upgrade to 1.30.4
+  Type: Standard Change (pre-approved for quarterly upgrades)
+  Risk Level: Medium
+  CAB Approval: Pre-approved per Standard Change Template SC-012
+  Implementer: drew.park
+  Secondary: tanya.okonkwo
+  Start Time: 2025-09-20T02:00:00Z
+  End Time: 2025-09-20T05:12:00Z
+  Duration: 3 hours 12 minutes
+  Result: Successful
+  Customer Impact: None (zero downtime)
+  Components Upgraded:
+    - Control plane: 1.29.6 to 1.30.4
+    - CoreDNS: v1.11.1 to v1.11.3
+    - kube-proxy: v1.29.6 to v1.30.4
+    - Node AMIs: 36 nodes replaced
+  Post-Implementation Monitoring: 7 days
+  Rollback Plan: EKS supports control plane downgrade within 24 hours
+
+Change Record: CHG-2025-09-20-002
+  Title: CloudFront Cache Invalidation — Frontend v4.12.0
+  Type: Automated Change
+  Risk Level: Low
+  Start Time: 2025-09-20T15:30:00Z
+  End Time: 2025-09-20T15:34:18Z
+  Duration: 4 minutes 18 seconds
+  Result: Successful
+  Objects Invalidated: 12,400
+
+Change Record: CHG-2025-09-20-003
+  Title: CloudFront Origin Timeout Increase for Search Paths
+  Type: Standard Change
+  Risk Level: Low
+  Start Time: 2025-09-20T15:45:00Z
+  End Time: 2025-09-20T15:53:00Z
+  Duration: 8 minutes (propagation to all edge locations)
+  Result: Successful
+  Detail: /api/v2/search/* origin read timeout changed from 30s to 60s
+
+--- SECTION 5: DAILY OPERATIONS CHECKLIST ---
+
+Date: 2025-09-20
+Completed By: @drew.park (upgrade window), @ravi.shankar (day shift)
+
+Post-Upgrade Checks (05:15 UTC):
+  [x] All 36 nodes Ready on kubelet v1.30.4
+  [x] All DaemonSets: 5/5 healthy, 36/36 desired
+  [x] All Deployments: 48/48 available
+  [x] All StatefulSets: 12/12 ready
+  [x] CoreDNS v1.11.3 resolving correctly (tested internal + external)
+  [x] kube-proxy v1.30.4 — iptables rules correct on all nodes
+  [x] VPC CNI v1.18.3 — pod networking functional
+  [x] Metrics Server — node/pod metrics reporting
+  [x] Cluster Autoscaler — API discovery updated for 1.30
+  [x] Velero backup — pre-upgrade backup verified, post-upgrade backup initiated
+  [x] No deprecated API warnings in audit logs
+  [x] Grafana dashboards — all panels rendering, no broken queries
+
+Day Shift Checks (12:00 UTC):
+  [x] Cluster health — 36/36 Ready, no pressure conditions
+  [x] Pod status — 491 running, 0 pending, 0 crashlooping
+  [x] Application error rates — all services < 0.1% (normal)
+  [x] Latency — p99 within SLO for all services
+  [x] kube-proxy memory usage — 180Mi avg (normal, monitoring for 1.30 regression)
+  [x] Node resource utilization — CPU 62%, memory 52% (normal)
+  [x] CDN cache invalidation completed — frontend v4.12.0 live
+  [x] WAF block rate — 0.1% (normal range)
+  [x] CDN origin response time — p50 12ms, p99 840ms (search paths pulling up the p99)
+  [x] Backup verification — pre-upgrade and post-upgrade Velero backups both Completed
+  [x] Cost anomaly — no anomalies, daily EC2 cost $426 (normal for 36 nodes)
+  [x] Security scanning — Trivy scan on 48 deployment images, 0 critical, 4 high (all known, patched in next sprint)
+  [x] etcd health — 3/3 members healthy, DB size 4.6 GB, compaction running on schedule
+  [x] Istio sidecar injection — all new pods injected successfully post-upgrade
+  [x] PersistentVolume health — 89/89 Bound, 0 pending, 0 lost
+  [x] Ingress controller — 3/3 nginx replicas healthy, SSL certificates valid
+  [x] Monitoring pipeline — Prometheus scrape targets 148/148 up, Grafana dashboards loading
+  [x] Kafka cluster — all brokers healthy, no under-replicated partitions
+  [x] Redis clusters — both redis-prod-main and redis-prod-sessions healthy, replication lag 0ms
+  [x] Elasticsearch cluster — es-prod-logs GREEN, 7/7 nodes, 0 unassigned shards
+  [x] RDS blue-green replication — orders-prod-green lag at 12ms, switchover still scheduled for 2025-09-22
+  [x] Node kernel versions — all 36 nodes on 6.1.102-111.182.amzn2023 (latest EKS AMI)
+  [x] DaemonSet pod anti-affinity — verified all 5 DaemonSets running exactly 1 pod per node
+  [x] HPA status — all 4 HPAs within target ranges, no thrashing observed post-upgrade
+
+--- SECTION 9: VELERO BACKUP REPORT ---
+
+Timestamp: 2025-09-20T01:30:00Z (pre-upgrade backup)
+Service: Velero v1.14.0
+Namespace: velero
+Backup Name: vantage-pre-k8s-upgrade-20250920
+
+BACKUP CONFIGURATION:
+
+  Storage Location: s3://vantage-velero-backups/prod-us-east-1
+  Backup Storage Location: default (BSL)
+  Volume Snapshot Location: aws-us-east-1
+  Schedule: On-demand (pre-upgrade)
+  TTL: 720h (30 days)
+  Include Namespaces: All
+  Exclude Namespaces: kube-system (restored separately)
+  Include Resources: All
+  Exclude Resources: events, events.events.k8s.io
+  Snapshot Volumes: true
+  Default Volumes To Restic: false
+
+BACKUP EXECUTION:
+
+  [01:30:00Z] Backup initiated
+  [01:30:05Z] Namespace discovery: 42 namespaces found
+  [01:30:10Z] Resource collection started
+    Custom Resource Definitions: 24
+    Namespaced Resources: 4,218 objects
+    Cluster-Scoped Resources: 312 objects
+  [01:32:00Z] PersistentVolume snapshots initiated
+    PVs to snapshot: 89
+    EBS snapshots created: 89
+    Snapshot creation time: 4 minutes 22 seconds
+  [01:36:30Z] Backup tarball uploaded to S3
+    Tarball size: 142 MB (compressed)
+    Upload duration: 8 seconds
+    S3 Object: s3://vantage-velero-backups/prod-us-east-1/backups/vantage-pre-k8s-upgrade-20250920/vantage-pre-k8s-upgrade-20250920.tar.gz
+  [01:36:38Z] Backup completed
+    Status: Completed
+    Errors: 0
+    Warnings: 2 (stale endpoints in legacy-integrations namespace — known, non-critical)
+    Items Backed Up: 4,530
+    Duration: 6 minutes 38 seconds
+
+POST-UPGRADE BACKUP:
+
+  Backup Name: vantage-post-k8s-upgrade-20250920
+  Initiated: 2025-09-20T05:20:00Z
+  Status: Completed at 05:27:14Z
+  Items Backed Up: 4,536 (+6 from new node objects)
+  Errors: 0
+  Warnings: 2 (same stale endpoints)
+
+BACKUP INVENTORY (recent):
+
+  1. vantage-post-k8s-upgrade-20250920 — 2025-09-20 05:20 — Completed — Expires 2025-10-20
+  2. vantage-pre-k8s-upgrade-20250920 — 2025-09-20 01:30 — Completed — Expires 2025-10-20
+  3. vantage-daily-20250919 — 2025-09-19 02:00 — Completed — Expires 2025-10-19
+  4. vantage-daily-20250918 — 2025-09-18 02:00 — Completed — Expires 2025-10-18
+  5. vantage-daily-20250917 — 2025-09-17 02:00 — Completed — Expires 2025-10-17
+
+--- SECTION 10: KUBE-PROXY UPGRADE DETAILED METRICS ---
+
+DaemonSet Rolling Update Trace:
+
+  Update Strategy: RollingUpdate
+  MaxUnavailable: 1
+  MinReadySeconds: 10
+
+  Per-Node kube-proxy Restart Timeline (first 12 of 36):
+
+    ip-10-42-17-210 (new node, already on v1.30.4): skipped
+    ip-10-42-17-212: [02:22:12Z] old pod terminated, [02:22:18Z] new pod running, [02:22:28Z] ready (16s)
+    ip-10-42-18-108: [02:22:45Z] terminated, [02:22:51Z] running, [02:23:01Z] ready (16s)
+    ip-10-42-18-110: [02:23:18Z] terminated, [02:23:24Z] running, [02:23:34Z] ready (16s)
+    ip-10-42-19-48: [02:23:51Z] terminated, [02:23:57Z] running, [02:24:07Z] ready (16s)
+    ip-10-42-19-50: [02:24:24Z] terminated, [02:24:30Z] running, [02:24:40Z] ready (16s)
+    ip-10-42-20-101: [02:24:57Z] terminated, [02:25:03Z] running, [02:25:13Z] ready (16s)
+    ip-10-42-20-103: [02:25:30Z] terminated, [02:25:36Z] running, [02:25:46Z] ready (16s)
+    ip-10-42-21-88: [02:26:03Z] terminated, [02:26:09Z] running, [02:26:19Z] ready (16s)
+    ip-10-42-21-90: [02:26:36Z] terminated, [02:26:42Z] running, [02:26:52Z] ready (16s)
+    ip-10-42-22-54: [02:27:09Z] terminated, [02:27:15Z] running, [02:27:25Z] ready (16s)
+    ip-10-42-22-58: [02:27:42Z] terminated, [02:27:48Z] running, [02:27:58Z] ready (16s)
+    [Remaining 24 nodes: same pattern, ~33 seconds per node including stabilization]
+
+  iptables Rules Post-Upgrade Validation:
+    Total iptables rules per node: ~2,400
+    nat table chains: 142 (one per Service)
+    filter table chains: 48
+    Rules regeneration time per node: 1.2 seconds
+    Service endpoint verification:
+      ClusterIP Services tested: 142/142 reachable
+      NodePort Services tested: 8/8 reachable
+      LoadBalancer Services tested: 12/12 reachable
+      ExternalName Services tested: 4/4 resolving
+
+  kube-proxy Resource Usage Post-Upgrade:
+    CPU (avg across 36 nodes): 12m (millicores)
+    Memory (avg across 36 nodes): 180Mi
+    Memory (max across 36 nodes): 196Mi
+    Request: 100m CPU, 128Mi memory
+    Limit: none (best-effort for system-critical pod)
+
+--- SECTION 11: COREDNS PERFORMANCE VALIDATION ---
+
+Test Suite: DNS Resolution Validation (post-upgrade)
+Executed At: 2025-09-20T02:20:15Z
+Tool: dnsperf + custom in-cluster test pod
+
+INTERNAL DNS RESOLUTION:
+
+  Test 1: Kubernetes Service DNS
+    Query: checkout-service.checkout-prod.svc.cluster.local
+    Repetitions: 10,000
+    Results:
+      Success Rate: 100%
+      Latency p50: 1.8ms
+      Latency p95: 3.2ms
+      Latency p99: 4.8ms
+      Average: 2.1ms
+      NXDOMAIN: 0
+      SERVFAIL: 0
+
+  Test 2: Headless Service DNS
+    Query: redis-prod-main.redis-prod.svc.cluster.local
+    Repetitions: 5,000
+    Results:
+      Success Rate: 100%
+      Records Returned: 6 A records (all Redis pods)
+      Latency p50: 2.0ms
+      Latency p99: 5.1ms
+
+  Test 3: External DNS Resolution
+    Query: api.stripe.com
+    Repetitions: 1,000
+    Results:
+      Success Rate: 100%
+      Latency p50: 4.2ms
+      Latency p99: 12.4ms (VPC DNS resolver + upstream)
+
+  Test 4: Pod DNS Resolution
+    Query: 10-42-5-201.redis-prod.pod.cluster.local
+    Repetitions: 1,000
+    Results:
+      Success Rate: 100%
+      Latency p50: 1.6ms
+      Latency p99: 3.8ms
+
+  Test 5: Autopath Optimization
+    Query: checkout-service (short name from checkout-prod namespace)
+    Expected Resolution: checkout-service.checkout-prod.svc.cluster.local
+    Repetitions: 5,000
+    Results:
+      Success Rate: 100%
+      Search Domains Tried: 1 (autopath optimization working)
+      Latency p50: 1.9ms (same as FQDN — autopath eliminating search domain iterations)
+
+  Aggregate DNS Metrics (first 6 hours post-upgrade):
+    Total Queries: 24.1M
+    Success Rate: 99.8%
+    Cache Hit Rate: 92.4%
+    Cache Size: 12,841 entries
+    Query Rate: 67,000 queries/min (peak during business hours)
+    Goroutines: 1,842 (healthy)
+    Process Memory: 48Mi per CoreDNS pod
+
+--- SECTION 12: UPGRADE ROLLBACK PLAN (NOT EXECUTED) ---
+
+Rollback Procedure: K8s Control Plane Downgrade
+Document: ROLL-K8S-001
+Status: Not Required (upgrade successful)
+Prepared By: drew.park, tanya.okonkwo
+
+TRIGGER CONDITIONS FOR ROLLBACK:
+  Any of the following within 24 hours of upgrade:
+  1. API server error rate > 1% sustained for 5 minutes
+  2. CoreDNS resolution failure rate > 0.5%
+  3. kube-proxy iptables rule corruption (services unreachable)
+  4. Node group update failure affecting > 3 nodes simultaneously
+  5. Application team reports widespread service degradation
+  6. Cluster autoscaler unable to provision new nodes
+
+ROLLBACK STEPS:
+  Step 1: Halt Node Group Updates
+    aws eks update-nodegroup-version --cluster-name prod-us-east-1 \
+      --nodegroup-name worker-general-v5 --force
+    Cancel any in-progress node replacements
+
+  Step 2: Control Plane Downgrade
+    aws eks update-cluster-version --name prod-us-east-1 --kubernetes-version 1.29
+    Duration: 15-25 minutes
+    Note: EKS supports downgrade within 24 hours of upgrade
+
+  Step 3: Addon Downgrade
+    Revert CoreDNS to v1.11.1, kube-proxy to v1.29.6
+    Re-apply previous DaemonSet manifests from Velero backup
+
+  Step 4: Node Group AMI Rollback
+    Update launch template to use previous AMI (amazon-eks-node-1.29-v20250901)
+    Initiate rolling replacement of nodes (same process as upgrade, in reverse)
+
+  Step 5: Validation
+    Run full cluster health check suite
+    Verify all services responding
+    Confirm metrics pipeline operational
+
+ROLLBACK TIME ESTIMATE: 3-4 hours (control plane + all node groups)
+DATA LOSS RISK: None (stateless infrastructure, data in RDS/S3)
+
+COMMUNICATION PLAN (if rollback needed):
+  T+0: Post in #incidents — "K8s upgrade rollback initiated due to [reason]"
+  T+5min: Page secondary on-call if not already engaged
+  T+10min: Post in #engineering-all — "Infrastructure maintenance extended, rollback in progress"
+  T+completion: Post all-clear in #engineering-all with duration and impact summary
+
+--- SECTION 13: CLUSTER ADDON VERSION MATRIX ---
+
+Post-Upgrade Compatibility Matrix:
+
+  Component                  | Installed | Min K8s | Max K8s | Status
+  Kubernetes Control Plane   | 1.30.4    | N/A     | N/A     | Current
+  kubelet                    | 1.30.4    | 1.28    | 1.30    | Current
+  CoreDNS                    | 1.11.3    | 1.28    | 1.30    | Current
+  kube-proxy                 | 1.30.4    | 1.30    | 1.30    | Current
+  VPC CNI                    | 1.18.3    | 1.25    | 1.30    | Compatible
+  EBS CSI Driver             | 1.32.0    | 1.25    | 1.30    | Compatible
+  Metrics Server             | 0.7.1     | 1.25    | 1.30    | Compatible
+  Cluster Autoscaler         | 1.28.2    | 1.28    | 1.30    | Compatible (upgrade planned Q4)
+  Velero                     | 1.14.0    | 1.26    | 1.30    | Compatible
+  cert-manager               | 1.15.1    | 1.25    | 1.30    | Compatible
+  Istio                      | 1.22.4    | 1.28    | 1.30    | Compatible
+  nginx-ingress-controller   | 1.10.1    | 1.25    | 1.30    | Compatible
+  redis-operator             | 2.4.1     | 1.24    | 1.30    | Compatible
+  Fluent Bit                 | 3.0.4     | 1.20    | 1.30    | Compatible
+  node-exporter              | 1.8.0     | 1.20    | 1.30    | Compatible
+  Prometheus                 | 2.51.0    | 1.25    | 1.30    | Compatible
+  Grafana                    | 10.4.1    | N/A     | N/A     | N/A (runs in monitoring namespace)
+
+  All components verified compatible with Kubernetes 1.30.4
+  Next planned addon upgrades:
+    - Cluster Autoscaler 1.28.2 to 1.30.x (Q4 2025)
+    - Istio 1.22.4 to 1.23.x (Q4 2025)
+    - nginx-ingress-controller 1.10.1 to 1.11.x (Q1 2026)
+
+--- SECTION 14: WAF DETAILED BLOCK LOG ---
+
+Timestamp: 2025-09-20T00:00:00Z — 2025-09-20T23:59:59Z
+WAF WebACL: vantage-prod-waf-v3
+Sample Size: Last 200 blocks (representative sample)
+
+BLOCK SAMPLES BY CATEGORY:
+
+  SQL Injection (top 5 samples):
+    1. [08:14:22Z] GET /api/v2/products?q=test%27%20UNION%20SELECT%201,username,password%20FROM%20users--
+       Source IP: 185.220.101.42
+       Rule: SQLi-Detection
+       Action: BLOCK
+       Country: Germany (Tor exit node)
+
+    2. [10:32:44Z] POST /api/v2/orders/search
+       Source IP: 45.155.205.18
+       Body: {"filter": "1' OR '1'='1"}
+       Rule: SQLi-Detection
+       Action: BLOCK
+       Country: Netherlands
+
+    3. [14:18:55Z] GET /api/v2/customers/1%20OR%201=1
+       Source IP: 194.163.44.12
+       Rule: SQLi-Detection
+       Action: BLOCK
+       Country: Germany
+
+    4. [17:42:10Z] POST /api/v2/auth/login
+       Source IP: 103.152.220.88
+       Body: {"username": "admin'--", "password": "x"}
+       Rule: SQLi-Detection
+       Action: BLOCK
+       Country: Indonesia
+
+    5. [21:08:33Z] GET /api/v2/products/search?category=electronics%27;DROP%20TABLE%20products;--
+       Source IP: 167.99.124.55
+       Rule: SQLi-Detection
+       Action: BLOCK
+       Country: United States (cloud provider)
+
+  Bot Signatures (top 3 samples):
+    1. [06:22:11Z] GET /api/v2/products (rapid enumeration, 400 req/min)
+       Source IP: 104.248.91.22
+       User-Agent: python-requests/2.31.0
+       Rule: Bot-Detection
+       Action: BLOCK
+
+    2. [12:44:30Z] GET /sitemap.xml (known scraper signature)
+       Source IP: 54.236.1.44
+       User-Agent: Mozilla/5.0 (compatible; AhrefsBot/7.0)
+       Rule: Bot-Detection
+       Action: BLOCK
+
+    3. [18:55:12Z] POST /api/v2/auth/login (credential stuffing attempt)
+       Source IP: 192.241.222.14
+       Rate: 120 attempts/min with different credentials
+       Rule: Bot-Detection + Rate-Limiting
+       Action: BLOCK
+
+  Rate Limiting (top 2 samples):
+    1. [09:12:00Z] Source IP 203.0.113.55 exceeded 2000 req/5min threshold
+       Total Requests: 2,841 in 5 minutes
+       Endpoint: /api/v2/products (catalog scraping)
+       Action: BLOCK (rate-limited for 5 minutes)
+
+    2. [16:38:00Z] Source IP 198.51.100.22 exceeded 2000 req/5min threshold
+       Total Requests: 3,102 in 5 minutes
+       Endpoint: /api/v2/search (automated search queries)
+       Action: BLOCK (rate-limited for 5 minutes)
+
+================================================================================
+END OF INFRASTRUCTURE OPERATIONS LOG — 2025-09-20
+================================================================================

@@ -1,0 +1,1424 @@
+================================================================================
+VANTAGE COMMERCE — FEATURE DEVELOPMENT LOG
+Date: 2025-09-10
+Classification: INTERNAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Pull Request #4602 — Guest Checkout Redesign
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/checkout-service
+Branch: feature/guest-checkout-redesign
+Author: priya.nakamura
+Reviewers: carlos.medina, janet.okoye
+Status: APPROVED
+Files changed: 34
+Insertions: 1847
+Deletions: 412
+Created: 2025-09-09T17:30:00Z
+Last updated: 2025-09-10T16:45:00Z
+Merge commit: sha-7f8e9d0a1b2c
+
+--- Affected Services ---
+
+- checkout-service v3.8.0
+- svc-cart-manager
+- svc-payment-gateway
+- Redis session store (checkout-sessions-prod)
+- Feature flag: guest_checkout_v2
+- CDN static assets (checkout bundle)
+- Cypress CI pipeline (extended)
+
+--- Changes Summary ---
+
+1. Replaces legacy guest checkout flow with single-page React component.
+   The old multi-step flow involved 6 redirects before reaching the payment
+   form. The redesigned flow reduces this to 2 page transitions total. The
+   GuestCheckoutPanel component encapsulates shipping address entry, payment
+   method selection, and order review into a single scrollable page with
+   collapsible sections. Each section validates independently and shows inline
+   error messaging. Tab order and focus management follow WCAG 2.1 AA standards.
+   The component uses React 18 concurrent features for non-blocking renders
+   during address validation lookups.
+
+2. Adds new endpoint: POST /api/v2/checkout/guest
+   Accepts: cart_id (string, required) and email (string, required)
+   Optional fields: shipping_address (object), payment_method_id (string)
+   Returns on success: HTTP 201 with body {order_id, confirmation_token}
+   Returns on failure: HTTP 422 with field-level validation errors
+   Authentication: none required (guest flow)
+   Rate limiting: 10 requests per minute per IP address via Kong rate limiter
+   Request body max size: 8 KB
+   Idempotency: supports Idempotency-Key header to prevent duplicate orders
+
+3. Migrates session handling from cookie-based to Redis-backed ephemeral tokens.
+   Redis key pattern: guest:sess:{uuid}
+   TTL: 900 seconds (15 minutes), configurable via GUEST_SESSION_TTL_SECONDS
+   environment variable.
+   Session data stored: cart snapshot, email, shipping address (if entered),
+   payment intent ID, session creation timestamp, last activity timestamp.
+   Concurrency model: optimistic locking via Redis WATCH/MULTI/EXEC to prevent
+   race conditions on concurrent tab submissions.
+   Session renewal: TTL resets on each activity (address entry, payment selection).
+
+4. Removes deprecated PaymentForm_v1 component (unused since Q2).
+   Component was still bundled but unreachable from any route. Removal reduces
+   checkout bundle by 34 KB gzipped. Associated CSS modules (payment-form-v1.css,
+   payment-legacy.css) also deleted. Test files for the deprecated component
+   removed: 8 Jest unit tests, 3 Cypress integration tests. ESLint config
+   updated to remove PaymentForm_v1 from the component whitelist.
+
+5. Adds Cypress E2E tests for guest-to-registered conversion funnel.
+   New test count: 12 Cypress specs
+   Coverage: guest checkout happy path, guest-to-registered conversion, session
+   expiry handling, validation error display, concurrent tab handling, payment
+   retry after gateway timeout, back button navigation, mobile viewport layout,
+   Apple Pay stub for future integration, accessibility keyboard navigation,
+   error boundary behavior, and analytics event firing.
+
+--- Feature Flag Configuration ---
+
+Flag: guest_checkout_v2
+  Platform: LaunchDarkly
+  Project: vantage-web
+  Environment: production
+  Current state: enabled for 5% of traffic in us-east-1
+  Targeting rules: user.region = 'us-east-1' AND random_percentage < 5
+  Kill switch: disable flag -> instant revert to legacy flow, no deploy needed
+  Fallback value: false (serve legacy flow)
+  Client-side availability: yes (JavaScript SDK)
+  Prerequisite flags: none
+
+Rollout plan:
+  Week 1 (2025-09-08):  5% — initial canary, us-east-1 only
+  Week 2 (2025-09-15): 25% — with conversion rate monitoring, both regions
+  Week 3 (2025-09-22): 50% — cross-region expansion, all user segments
+  Week 4 (2025-09-29): 100% — full rollout and legacy cleanup
+  Conversion rate gate: must be within 2% of existing flow at each step
+  Rollback plan: disable guest_checkout_v2 flag -> instant revert, no deploy needed
+
+--- Bundle Size Impact ---
+
+New checkout component (GuestCheckoutPanel):     +12 KB gzipped
+New address validation component:                 +3 KB gzipped
+New payment method selector:                      +4 KB gzipped
+Removed legacy code (PaymentForm_v1):            -34 KB gzipped
+Removed legacy CSS modules:                       -7 KB gzipped
+Net change: -22 KB gzipped
+
+Checkout page total bundle size:
+  Before: 284 KB gzipped
+  After:  262 KB gzipped
+
+JavaScript parse time (Chrome DevTools, Moto G Power):
+  Before: 342ms
+  After:  298ms
+
+--- HTTP Request/Response Samples (Production Trace, 5% Canary Traffic) ---
+
+[2025-09-10T08:14:22.341Z] Request:
+  POST /api/v2/checkout/guest HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  X-Request-ID: req_7f3a9bc2e1d4
+  X-Forwarded-For: 203.0.113.42
+  X-Forwarded-Proto: https
+  User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.62 Safari/537.36
+  Accept: application/json
+  Accept-Language: en-US,en;q=0.9
+  Accept-Encoding: gzip, deflate, br
+  Referer: https://www.vantage.com/checkout/guest
+  Origin: https://www.vantage.com
+  Content-Length: 247
+  Idempotency-Key: idk_8a2f1bc9_001
+
+  {
+    "cart_id": "cart_8a2f1bc9e3d7",
+    "email": "user4827@example.com",
+    "shipping_address": {
+      "line1": "742 Evergreen Terrace",
+      "line2": "",
+      "city": "Springfield",
+      "state": "IL",
+      "zip": "62704",
+      "country": "US"
+    },
+    "payment_method_id": "pm_stripe_4f9c2a1b"
+  }
+
+[2025-09-10T08:14:22.583Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_7f3a9bc2e1d4
+  X-Trace-ID: trace_b3c4d5e6f7a8
+  X-RateLimit-Limit: 10
+  X-RateLimit-Remaining: 9
+  X-RateLimit-Reset: 1694333722
+  Cache-Control: no-store, no-cache
+  Pragma: no-cache
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Content-Length: 189
+
+  {
+    "order_id": "ord_1a2b3c4d5e6f",
+    "confirmation_token": "cnf_9g8h7i6j5k4l",
+    "estimated_delivery": "2025-09-14T00:00:00Z",
+    "total_charged": 47.99,
+    "currency": "USD",
+    "checkout_flow": "guest_v2",
+    "session_id": "guest:sess:a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  }
+
+  Latency: 242ms
+  Upstream calls: svc-payment-gateway (381ms), svc-cart-manager (12ms), Redis (0.5ms)
+
+[2025-09-10T08:17:45.102Z] Request:
+  POST /api/v2/checkout/guest HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  X-Request-ID: req_2d4e6f8a0b1c
+  X-Forwarded-For: 198.51.100.73
+  X-Forwarded-Proto: https
+  User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1
+  Accept: application/json
+  Accept-Language: en-US
+  Accept-Encoding: gzip, deflate, br
+  Origin: https://www.vantage.com
+  Content-Length: 142
+
+  {
+    "cart_id": "cart_5e7f9a1b3c2d",
+    "email": "invalid-email-format"
+  }
+
+[2025-09-10T08:17:45.118Z] Response:
+  HTTP/1.1 422 Unprocessable Entity
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_2d4e6f8a0b1c
+  X-Trace-ID: trace_c4d5e6f7a8b9
+  X-RateLimit-Limit: 10
+  X-RateLimit-Remaining: 8
+  X-RateLimit-Reset: 1694333865
+  Content-Length: 247
+
+  {
+    "errors": [
+      {
+        "field": "email",
+        "code": "INVALID_FORMAT",
+        "message": "Email address is not valid",
+        "constraint": "RFC 5322 compliant email required"
+      },
+      {
+        "field": "shipping_address",
+        "code": "REQUIRED",
+        "message": "Shipping address is required",
+        "constraint": "Object with line1, city, state, zip, country required"
+      }
+    ],
+    "request_id": "req_2d4e6f8a0b1c"
+  }
+
+  Latency: 16ms
+
+[2025-09-10T08:22:09.887Z] Request:
+  POST /api/v2/checkout/guest HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  X-Request-ID: req_6a8b0c2d4e5f
+  X-Forwarded-For: 192.0.2.155
+  X-Forwarded-Proto: https
+  User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:118.0) Gecko/20100101 Firefox/118.0
+  Accept: application/json
+  Accept-Language: en-US,en;q=0.5
+  Accept-Encoding: gzip, deflate, br
+  Origin: https://www.vantage.com
+  Referer: https://www.vantage.com/checkout/guest
+  Content-Length: 289
+  Idempotency-Key: idk_3f5a7b9c_001
+
+  {
+    "cart_id": "cart_3f5a7b9c1d2e",
+    "email": "shopper.test@example.com",
+    "shipping_address": {
+      "line1": "1600 Pennsylvania Ave",
+      "line2": "Suite 200",
+      "city": "Washington",
+      "state": "DC",
+      "zip": "20500",
+      "country": "US"
+    },
+    "payment_method_id": "pm_stripe_8c7b6a5d"
+  }
+
+[2025-09-10T08:22:10.341Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_6a8b0c2d4e5f
+  X-Trace-ID: trace_d5e6f7a8b9c0
+  X-RateLimit-Limit: 10
+  X-RateLimit-Remaining: 7
+  X-RateLimit-Reset: 1694333930
+  Cache-Control: no-store
+  Content-Length: 201
+
+  {
+    "order_id": "ord_7g8h9i0j1k2l",
+    "confirmation_token": "cnf_3m4n5o6p7q8r",
+    "estimated_delivery": "2025-09-15T00:00:00Z",
+    "total_charged": 129.50,
+    "currency": "USD",
+    "checkout_flow": "guest_v2",
+    "session_id": "guest:sess:b2c3d4e5-f6a7-8901-bcde-f23456789012"
+  }
+
+  Latency: 454ms
+  Upstream calls: svc-payment-gateway (412ms), svc-cart-manager (18ms), Redis (0.6ms)
+
+[2025-09-10T08:25:33.441Z] Request:
+  POST /api/v2/checkout/guest HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  X-Request-ID: req_9c1d3e5f7a8b
+  X-Forwarded-For: 203.0.113.88
+  User-Agent: Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.60 Mobile Safari/537.36
+  Accept: application/json
+  Content-Length: 264
+
+  {
+    "cart_id": "cart_expired_session_4a",
+    "email": "mobile.user@example.com",
+    "shipping_address": {
+      "line1": "350 Fifth Avenue",
+      "city": "New York",
+      "state": "NY",
+      "zip": "10118",
+      "country": "US"
+    },
+    "payment_method_id": "pm_stripe_2f3e4d5c"
+  }
+
+[2025-09-10T08:25:33.458Z] Response:
+  HTTP/1.1 404 Not Found
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_9c1d3e5f7a8b
+  X-Trace-ID: trace_e6f7a8b9c0d1
+
+  {
+    "error": "CART_NOT_FOUND",
+    "message": "Cart cart_expired_session_4a does not exist or has expired",
+    "request_id": "req_9c1d3e5f7a8b"
+  }
+
+  Latency: 17ms
+
+[2025-09-10T08:31:12.773Z] Request:
+  GET /api/v2/checkout/guest/session/guest:sess:a1b2c3d4-e5f6-7890-abcd-ef1234567890 HTTP/1.1
+  Host: api.vantage.com
+  X-Request-ID: req_0d2e4f6a8b1c
+  Accept: application/json
+  Authorization: Bearer guest_session_tok_7f8e9d
+
+[2025-09-10T08:31:12.779Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_0d2e4f6a8b1c
+
+  {
+    "session_id": "guest:sess:a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "cart_id": "cart_8a2f1bc9e3d7",
+    "email": "user4827@example.com",
+    "ttl_remaining_seconds": 647,
+    "created_at": "2025-09-10T08:14:22Z",
+    "last_activity": "2025-09-10T08:20:25Z",
+    "status": "active",
+    "shipping_address_complete": true,
+    "payment_method_attached": true
+  }
+
+  Latency: 3ms
+
+[2025-09-10T08:35:01.224Z] Request:
+  POST /api/v2/checkout/guest HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  X-Request-ID: req_4f6a8b0c2d3e
+  X-Forwarded-For: 198.51.100.201
+  Accept: application/json
+  Content-Length: 271
+  Idempotency-Key: idk_9b3c5d7e_001
+
+  {
+    "cart_id": "cart_9b3c5d7e1f2a",
+    "email": "repeat.buyer@example.com",
+    "shipping_address": {
+      "line1": "221B Baker Street",
+      "city": "Portland",
+      "state": "OR",
+      "zip": "97201",
+      "country": "US"
+    },
+    "payment_method_id": "pm_stripe_1a2b3c4d"
+  }
+
+[2025-09-10T08:35:02.887Z] Response:
+  HTTP/1.1 502 Bad Gateway
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_4f6a8b0c2d3e
+  X-Trace-ID: trace_f7a8b9c0d1e2
+  Retry-After: 2
+
+  {
+    "error": "PAYMENT_GATEWAY_UNAVAILABLE",
+    "message": "Payment processing service temporarily unavailable. Please retry.",
+    "retry_after_seconds": 2,
+    "request_id": "req_4f6a8b0c2d3e"
+  }
+
+  Latency: 8003ms
+
+[2025-09-10T08:35:05.112Z] Request (automatic retry 1/3, backoff 1s):
+  POST /api/v2/checkout/guest HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  X-Request-ID: req_4f6a8b0c2d3e
+  X-Retry-Attempt: 1
+  Accept: application/json
+  Content-Length: 271
+  Idempotency-Key: idk_9b3c5d7e_001
+
+  (same body as above)
+
+[2025-09-10T08:35:05.498Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_4f6a8b0c2d3e
+  X-Trace-ID: trace_a8b9c0d1e2f3
+
+  {
+    "order_id": "ord_5s6t7u8v9w0x",
+    "confirmation_token": "cnf_1y2z3a4b5c6d",
+    "estimated_delivery": "2025-09-14T00:00:00Z",
+    "total_charged": 82.45,
+    "currency": "USD",
+    "checkout_flow": "guest_v2"
+  }
+
+  Latency: 386ms
+
+[2025-09-10T08:42:19.660Z] Request:
+  POST /api/v2/checkout/guest HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  X-Request-ID: req_8b0c2d4e6f7a
+  X-Forwarded-For: 203.0.113.112
+  User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15
+  Accept: application/json
+  Content-Length: 256
+
+  {
+    "cart_id": "cart_7c9d1e3f5a2b",
+    "email": "guest.checkout.test@example.com",
+    "shipping_address": {
+      "line1": "1 Infinite Loop",
+      "city": "Cupertino",
+      "state": "CA",
+      "zip": "95014",
+      "country": "US"
+    },
+    "payment_method_id": "pm_stripe_9e8d7c6b"
+  }
+
+[2025-09-10T08:42:19.903Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_8b0c2d4e6f7a
+  X-Trace-ID: trace_b9c0d1e2f3a4
+
+  {
+    "order_id": "ord_2a3b4c5d6e7f",
+    "confirmation_token": "cnf_8g9h0i1j2k3l",
+    "estimated_delivery": "2025-09-16T00:00:00Z",
+    "total_charged": 34.99,
+    "currency": "USD",
+    "checkout_flow": "guest_v2"
+  }
+
+  Latency: 198ms
+
+[2025-09-10T08:48:55.331Z] Request:
+  POST /api/v1/intents/create HTTP/1.1
+  Host: svc-payment-gateway.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_checkout_7f8e9d
+  X-Request-ID: req_1c3d5e7f9a0b
+  X-Trace-ID: trace_c0d1e2f3a4b5
+  X-Source-Service: checkout-service
+  X-Source-Version: v3.8.0
+
+  {
+    "amount": 67.25,
+    "currency": "USD",
+    "payment_method_id": "pm_stripe_5a4b3c2d",
+    "metadata": {
+      "cart_id": "cart_2e4f6a8b0c1d",
+      "checkout_type": "guest",
+      "session_id": "guest:sess:f1e2d3c4-b5a6-7890-1234-567890abcdef"
+    }
+  }
+
+[2025-09-10T08:48:55.712Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_1c3d5e7f9a0b
+  X-Stripe-Request-ID: req_stripe_8a7b6c5d
+
+  {
+    "intent_id": "pi_stripe_9a8b7c6d5e4f",
+    "status": "requires_confirmation",
+    "client_secret": "pi_stripe_9a8b7c6d5e4f_secret_1a2b3c",
+    "amount": 67.25,
+    "currency": "USD",
+    "payment_method_types": ["card"]
+  }
+
+  Latency: 381ms
+
+[2025-09-10T08:52:33.109Z] Request:
+  POST /api/v1/intents/confirm HTTP/1.1
+  Host: svc-payment-gateway.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_checkout_7f8e9d
+  X-Request-ID: req_3e5f7a9b1c2d
+  X-Trace-ID: trace_d1e2f3a4b5c6
+
+  {
+    "intent_id": "pi_stripe_9a8b7c6d5e4f",
+    "return_url": "https://www.vantage.com/checkout/confirm"
+  }
+
+[2025-09-10T08:52:33.887Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_3e5f7a9b1c2d
+
+  {
+    "intent_id": "pi_stripe_9a8b7c6d5e4f",
+    "status": "succeeded",
+    "amount_received": 67.25,
+    "currency": "USD",
+    "charge_id": "ch_stripe_4d5e6f7a8b9c"
+  }
+
+  Latency: 778ms
+
+[2025-09-10T09:01:44.220Z] Request:
+  GET /api/v2/checkout/guest/session/guest:sess:expired-session-uuid HTTP/1.1
+  Host: api.vantage.com
+  X-Request-ID: req_5f7a9b1c3d4e
+  Accept: application/json
+
+[2025-09-10T09:01:44.223Z] Response:
+  HTTP/1.1 404 Not Found
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_5f7a9b1c3d4e
+
+  {
+    "error": "SESSION_EXPIRED",
+    "message": "Guest session has expired. Please start a new checkout.",
+    "request_id": "req_5f7a9b1c3d4e"
+  }
+
+  Latency: 3ms
+
+[2025-09-10T09:15:08.881Z] Request:
+  POST /api/v2/checkout/guest HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  X-Request-ID: req_7a9b1c3d5e6f
+  X-Forwarded-For: 192.0.2.44
+  User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/117.0 Safari/537.36 Edg/117.0
+  Accept: application/json
+  Content-Length: 278
+
+  {
+    "cart_id": "cart_4d6e8f0a2b1c",
+    "email": "edge.browser.user@example.com",
+    "shipping_address": {
+      "line1": "456 Oak Avenue",
+      "line2": "Apt 12B",
+      "city": "Austin",
+      "state": "TX",
+      "zip": "78701",
+      "country": "US"
+    },
+    "payment_method_id": "pm_stripe_6c5b4a3d"
+  }
+
+[2025-09-10T09:15:09.114Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_7a9b1c3d5e6f
+  X-Trace-ID: trace_e2f3a4b5c6d7
+
+  {
+    "order_id": "ord_9k0l1m2n3o4p",
+    "confirmation_token": "cnf_5q6r7s8t9u0v",
+    "estimated_delivery": "2025-09-15T00:00:00Z",
+    "total_charged": 215.00,
+    "currency": "USD",
+    "checkout_flow": "guest_v2"
+  }
+
+  Latency: 267ms
+
+--- Redis Session Store Metrics (checkout-sessions-prod) ---
+
+Cluster: checkout-sessions-prod (3-node, Redis 7.2)
+Region: us-east-1
+Sampling period: 2025-09-10T08:00:00Z to 2025-09-10T20:00:00Z
+Collection interval: 60 seconds
+
+  Metric                        | Value
+  ------------------------------|------------------
+  Total keys (guest:sess:*)     | 4,217
+  Keys created (12h window)     | 12,841
+  Keys expired (TTL)            | 11,934
+  Keys manually deleted         | 22
+  Peak memory usage             | 1.4 GB / 8 GB
+  Average key size              | 2.1 KB
+  Largest key size              | 4.8 KB
+  p50 GET latency               | 0.4 ms
+  p90 GET latency               | 0.8 ms
+  p99 GET latency               | 1.1 ms
+  p50 SET latency               | 0.5 ms
+  p90 SET latency               | 0.9 ms
+  p99 SET latency               | 1.3 ms
+  Eviction count                | 0
+  Eviction policy               | noeviction
+  Connected clients (peak)      | 342
+  Connected clients (average)   | 198
+  Commands processed/sec (peak) | 8,412
+  Commands processed/sec (avg)  | 3,107
+  Hit rate                      | 99.7%
+  Miss rate                     | 0.3%
+  Network bandwidth in          | 4.2 MB/s (peak)
+  Network bandwidth out         | 6.8 MB/s (peak)
+  Replication lag               | < 1ms
+  Cluster state                 | ok
+
+  Node breakdown:
+    Node 1 (primary):   slots 0-5460,    memory 480 MB, clients 118
+    Node 2 (primary):   slots 5461-10922, memory 512 MB, clients 124
+    Node 3 (primary):   slots 10923-16383, memory 408 MB, clients 100
+
+--- Stripe Webhook Delivery Log ---
+
+Endpoint: https://api.vantage.com/webhooks/stripe/guest-checkout
+Secret: whsec_***************
+API version: 2023-10-16
+Events sampled: 2025-09-10T00:00:00Z to 2025-09-10T23:59:59Z
+
+  Event Type                    | Count | Avg Delivery (ms) | p99 Delivery (ms) | Success Rate
+  ------------------------------|-------|-------------------|--------------------|--------------
+  payment_intent.succeeded      | 1,247 | 412               | 1,203              | 100.0%
+  payment_intent.payment_failed | 18    | 389               | 998                | 100.0%
+  charge.refunded               | 3     | 445               | 445                | 100.0%
+  checkout.session.completed    | 1,247 | 401               | 1,178              | 100.0%
+  payment_method.attached       | 89    | 378               | 892                | 100.0%
+  payment_intent.created        | 1,265 | 356               | 877                | 100.0%
+
+  Total events received: 3,869
+  Webhook signature verification: HMAC-SHA256, all 3,869 signatures validated
+  Retry policy: Stripe retries failed deliveries up to 3 times with exponential backoff
+  Failed deliveries in period: 0
+  Average processing time (our handler): 23ms
+  Handler timeout: 30s
+
+  Webhook handler flow:
+    1. Verify signature (HMAC-SHA256)
+    2. Parse event payload
+    3. Route to handler by event type
+    4. For guest sessions: lookup by confirmation_token (not user_id)
+    5. Update order status in svc-order-service
+    6. Acknowledge with 200 OK
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: Code Review — Architecture Review of PR #4602
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/checkout-service
+PR: #4602
+Reviewer: carlos.medina
+Review type: Architecture
+Timestamp: 2025-09-10T14:23:00Z
+Review duration: 2h 22m
+Commits reviewed: 14
+
+--- Entities Under Review ---
+
+- GuestCheckoutPanel React component (src/components/checkout/GuestCheckoutPanel.tsx)
+- PaymentIntentService (src/services/PaymentIntentService.ts)
+- svc-payment-gateway /api/v1/intents/create
+- Stripe SDK v12.4.0
+- checkout-sessions-prod Redis cluster
+- GuestSessionManager (src/services/GuestSessionManager.ts)
+- CheckoutAnalytics (src/analytics/CheckoutAnalytics.ts)
+
+--- Review Comments (Inline, Chronological) ---
+
+File: src/services/PaymentIntentService.ts
+
+  carlos.medina [Line 247, 2025-09-10T14:23:00Z]:
+    "Line 247: if the payment gateway returns 502 we need to retry with backoff,
+    not return a generic 500. Users will just see a blank error page."
+
+    Severity: BLOCKING
+    Category: Error handling
+    Labels: bug, reliability
+    Suggestion: Implement exponential backoff with 3 retries. Surface a
+    user-friendly message for terminal failures. The payment gateway is known
+    to return transient 502s during Stripe maintenance windows. Without retry
+    logic, every Stripe blip will surface as a checkout failure for users.
+
+  carlos.medina [Line 262, 2025-09-10T14:28:00Z]:
+    Suggested adding distributed tracing span for guest-to-payment handoff.
+    Current code creates a single span for the entire checkout flow but does
+    not break out the payment gateway call as a child span, making it
+    difficult to diagnose latency in Datadog APM traces.
+
+    Severity: NON-BLOCKING
+    Category: Observability
+    Labels: tracing, monitoring
+    Suggestion: Add OTel span checkout.guest.payment_handoff with attributes
+    cart_id, payment_method_type, retry_count. This will allow us to see
+    payment gateway latency separately from checkout service processing time.
+
+  carlos.medina [Line 275, 2025-09-10T14:35:00Z]:
+    The Stripe client secret is logged at DEBUG level in the payment intent
+    creation path. This should be redacted even at DEBUG — client secrets
+    should never appear in logs.
+
+    Severity: BLOCKING
+    Category: Security
+    Labels: security, logging
+
+File: src/components/GuestCheckoutPanel.tsx
+
+  janet.okoye [Line 89, 2025-09-10T15:10:00Z]:
+    "Nit: the error boundary in GuestCheckoutPanel doesn't surface the actual
+    validation message, just a generic string."
+
+    Severity: NON-BLOCKING
+    Category: UX
+    Labels: ux, accessibility
+
+  janet.okoye [Line 134, 2025-09-10T15:15:00Z]:
+    Consider adding aria-live="polite" to the error summary region so screen
+    readers announce validation errors without requiring focus change. This
+    is a WCAG 2.1 AA requirement for dynamic error content.
+
+    Severity: NON-BLOCKING
+    Category: Accessibility
+    Labels: a11y, ux
+
+  janet.okoye [Line 201, 2025-09-10T15:22:00Z]:
+    The loading spinner during payment processing has no text alternative.
+    Add sr-only text like "Processing your payment, please wait" for screen
+    reader users.
+
+    Severity: NON-BLOCKING
+    Category: Accessibility
+
+File: src/services/GuestSessionManager.ts
+
+  carlos.medina [Line 45, 2025-09-10T14:42:00Z]:
+    The session creation doesn't validate that the cart exists before
+    creating the Redis key. If someone passes an invalid cart_id we create
+    an orphan session. Add a cart existence check first.
+
+    Severity: NON-BLOCKING
+    Category: Data integrity
+    Labels: validation
+
+File: src/services/PaymentIntentService.ts (second round)
+
+  priya.nakamura [Line 247, response, 2025-09-10T15:45:00Z]:
+    "Good catch — added exponential backoff with 3 retries and a user-facing
+    message for terminal failures. Also added the OTel span you wanted."
+
+    Changes made:
+    - Retry logic: 3 attempts at 1s / 2s / 4s intervals (exponential backoff)
+    - Payment gateway timeout set to 8000ms per attempt
+    - User-facing error message on terminal failure: "We're having trouble
+      processing your payment. Please try again in a moment."
+    - OpenTelemetry span: checkout.guest.payment_handoff
+      Attributes: {cart_id, payment_method_type, retry_count}
+    - Client secret redacted from all log levels (replaced with "cs_***")
+    - Cart existence validation added before session creation
+
+--- Payment Gateway Integration Details ---
+
+  Gateway timeout: 8000ms per request
+  Retry schedule: attempt 1 at T+0, attempt 2 at T+1000ms, attempt 3 at T+3000ms,
+                  attempt 4 at T+7000ms (1s/2s/4s exponential backoff)
+  Max total wait: 19s (worst case: 4 timeouts + 3 backoff intervals)
+  Circuit breaker: not implemented in this PR (tracked as CHKOUT-1915 for Sprint 38)
+
+  Stripe SDK version: v12.4.0
+  Stripe API version: 2023-10-16
+  Payment methods supported in guest flow: card, Apple Pay (pending CHKOUT-1901)
+  Webhook endpoint updated to handle new guest session format:
+    - confirmation_token used instead of user_id for guest sessions
+    - Webhook handler checks session type and routes to appropriate processor
+    - Guest session webhook events logged with checkout_type="guest" label
+
+--- OpenTelemetry Tracing Configuration ---
+
+  Span: checkout.guest.payment_handoff
+  Parent span: checkout.guest.complete
+  Kind: CLIENT
+  Attributes:
+    - cart_id: string
+    - payment_method_type: string (card, apple_pay)
+    - retry_count: integer (0-3)
+    - payment_gateway_response_time_ms: integer
+    - payment_intent_id: string (set after successful creation)
+    - stripe_request_id: string
+  Events:
+    - payment_attempt_start (at each retry)
+    - payment_attempt_result (success/failure with status code)
+    - payment_retry_backoff (with wait_duration_ms)
+  Status: OK on success, ERROR on terminal failure
+
+  Exporter: OTLP -> Datadog Agent -> Datadog APM
+  Sampling: 100% for guest checkout flow (AlwaysOn sampler)
+
+  Datadog APM dashboard: "Checkout Guest Flow" -> "Payment Handoff" panel
+  Alert: if p99 of checkout.guest.payment_handoff > 10s for 5 minutes, page on-call
+  Trace retention: 15 days
+
+--- HTTP Traces — Internal Service Communication During Review Testing ---
+
+[2025-09-10T14:30:01.112Z] Request:
+  GET /healthz HTTP/1.1
+  Host: checkout-sessions-prod.redis.internal:6379
+  X-Health-Check: true
+  User-Agent: kube-probe/1.28
+
+[2025-09-10T14:30:01.113Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+
+  {
+    "status": "healthy",
+    "cluster_mode": "enabled",
+    "nodes": 3,
+    "connected_clients": 287,
+    "used_memory_human": "1.3 GB",
+    "maxmemory_human": "8 GB",
+    "uptime_seconds": 1728000,
+    "redis_version": "7.2.3"
+  }
+
+  Latency: 1ms
+
+[2025-09-10T14:35:22.448Z] Request:
+  POST /api/v1/intents/create HTTP/1.1
+  Host: svc-payment-gateway.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_checkout_review
+  X-Request-ID: req_review_test_001
+  X-Trace-ID: trace_review_d1e2f3
+  X-Source-Service: checkout-service-review
+
+  {
+    "amount": 99.99,
+    "currency": "USD",
+    "payment_method_id": "pm_stripe_test_review",
+    "metadata": {
+      "cart_id": "cart_review_test_001",
+      "checkout_type": "guest",
+      "session_id": "guest:sess:review-test-uuid"
+    }
+  }
+
+[2025-09-10T14:35:22.892Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_review_test_001
+  X-Stripe-Request-ID: req_stripe_review_001
+
+  {
+    "intent_id": "pi_stripe_test_review_001",
+    "status": "requires_confirmation",
+    "client_secret": "pi_test_secret_***",
+    "amount": 99.99,
+    "currency": "USD"
+  }
+
+  Latency: 444ms
+
+[2025-09-10T14:38:11.009Z] Request:
+  POST /api/v1/intents/create HTTP/1.1
+  Host: svc-payment-gateway.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_checkout_review
+  X-Request-ID: req_review_test_502
+  X-Trace-ID: trace_review_e2f3a4
+
+  {
+    "amount": 149.50,
+    "currency": "USD",
+    "payment_method_id": "pm_stripe_test_flaky",
+    "metadata": {
+      "cart_id": "cart_review_test_502",
+      "checkout_type": "guest"
+    }
+  }
+
+[2025-09-10T14:38:19.015Z] Response:
+  HTTP/1.1 502 Bad Gateway
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_review_test_502
+  X-Upstream-Status: timeout
+
+  {
+    "error": "UPSTREAM_TIMEOUT",
+    "message": "Stripe API did not respond within 8000ms"
+  }
+
+  Latency: 8006ms
+
+[2025-09-10T14:38:20.018Z] Request (retry 1/3, backoff 1s):
+  POST /api/v1/intents/create HTTP/1.1
+  Host: svc-payment-gateway.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_checkout_review
+  X-Request-ID: req_review_test_502
+  X-Retry-Attempt: 1
+
+  (same body)
+
+[2025-09-10T14:38:20.412Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_review_test_502
+
+  {
+    "intent_id": "pi_stripe_test_retry_001",
+    "status": "requires_confirmation",
+    "amount": 149.50,
+    "currency": "USD"
+  }
+
+  Latency: 394ms
+
+[2025-09-10T14:45:55.330Z] Request:
+  POST /api/v1/intents/create HTTP/1.1
+  Host: svc-payment-gateway.internal
+  Content-Type: application/json
+  X-Service-Auth: Bearer svc_tok_checkout_review
+  X-Request-ID: req_review_test_003
+  X-Trace-ID: trace_review_f3a4b5
+
+  {
+    "amount": 24.99,
+    "currency": "USD",
+    "payment_method_id": "pm_stripe_test_success",
+    "metadata": {
+      "cart_id": "cart_review_test_003",
+      "checkout_type": "guest"
+    }
+  }
+
+[2025-09-10T14:45:55.714Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_review_test_003
+
+  {
+    "intent_id": "pi_stripe_test_003",
+    "status": "requires_confirmation",
+    "amount": 24.99,
+    "currency": "USD"
+  }
+
+  Latency: 384ms
+
+--- Final Review Status ---
+
+  Round 1: changes_requested (carlos.medina — error handling, tracing, security)
+  Round 2: approved (carlos.medina — all blocking issues fixed, verified in diff)
+  janet.okoye: approved (nits addressed in follow-up commit sha-b8c9d0e1)
+  CI status: all checks passing (87 unit tests, 12 Cypress E2E, lint, type-check)
+  Merge approved: 2025-09-10T16:45:00Z
+  Merge method: squash
+  Squash commit: sha-7f8e9d0a1b2c
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Sprint Plan — Sprint 2025-37
+────────────────────────────────────────────────────────────────────────────────
+
+Team: Checkout & Payments
+Sprint: Sprint 2025-37
+Dates: 2025-09-08 to 2025-09-19
+Sprint Goal: Ship guest checkout redesign to 25% traffic
+
+Velocity (last 3 sprints): 28 -> 31 -> 34
+Current sprint capacity: 38 points
+Carryover from Sprint 36: 14 points (Apple Pay blocked on Stripe sandbox issue)
+
+--- Team Roster ---
+
+  Engineer           | Role                | Availability     | Focus Area
+  -------------------|---------------------|------------------|------------------
+  Priya Nakamura     | Frontend platform   | Full sprint      | Guest checkout
+  Carlos Medina      | Checkout team lead  | Full sprint      | Analytics, review
+  Janet Okoye        | Payments engineer   | Full sprint      | Apple Pay
+  Tomás Rivera       | QA lead             | Full sprint      | Load testing
+
+--- Sprint Backlog ---
+
+  Ticket      | Title                                                    | Assignee       | Points | Priority | Status
+  ------------|----------------------------------------------------------|----------------|--------|----------|--------
+  CHKOUT-1892 | Guest checkout v2 — ramp to 25%                         | Priya Nakamura | 8      | P0       | In Progress
+  CHKOUT-1901 | Apple Pay integration for guest flow                    | Janet Okoye    | 5      | P1       | Blocked
+  CHKOUT-1905 | Cart abandonment webhook for analytics pipeline          | Carlos Medina  | 3      | P1       | To Do
+  CHKOUT-1910 | Load test guest checkout at 2x peak traffic             | Tomás Rivera   | 5      | P0       | To Do
+  CHKOUT-1912 | Fix intermittent 409 conflict on concurrent cart updates | Priya Nakamura | 3      | P2       | To Do
+
+  Total committed: 24 points (+ 14 carryover = 38)
+  Stretch goal: CHKOUT-1915 (circuit breaker for payment gateway, 5 pts)
+
+--- Sprint Risks ---
+
+  Risk                                  | Severity | Probability | Mitigation
+  --------------------------------------|----------|-------------|------------------------------------------
+  Redis TTL too aggressive              | High     | Medium      | Monitoring, configurable via env var
+  Apple Pay blocked on Stripe sandbox   | Medium   | High        | Carryover to Sprint 38 if unresolved
+  Concurrent cart update 409s           | Low      | Low         | CHKOUT-1912 fix planned this sprint
+  Load test reveals Redis sizing issue  | Medium   | Low         | Scale up Redis cluster before 25% ramp
+
+--- Definition of Done ---
+
+  - Guest checkout v2 at 25% traffic in us-east-1
+  - Conversion rate within 2% of existing flow at 25%
+  - Load test passes at 4000 concurrent sessions (2x peak)
+  - Redis session monitoring dashboard live in Datadog
+  - Cart abandonment webhook deployed and verified by analytics team
+  - All Cypress E2E tests passing in CI
+  - No P0/P1 bugs open against guest checkout v2
+
+--- Slack Thread: #checkout-team Sprint Planning ---
+
+[2025-09-08T09:15:00Z] carlos.medina:
+  alright everyone, sprint 37 kickoff. main goal is getting guest checkout v2 to
+  25%. priya you're driving that — what's the status?
+
+[2025-09-08T09:15:42Z] priya.nakamura:
+  PR #4602 is in review. once it merges, i'll update the LD flag targeting to 25%.
+  we need the load test results before ramping though.
+
+[2025-09-08T09:16:18Z] tomás.rivera:
+  I'll run the load test Wednesday — targeting 4000 concurrent guest sessions to
+  validate the Redis cluster sizing.
+
+[2025-09-08T09:17:05Z] carlos.medina:
+  Main risk is the Redis session migration. If TTL is too aggressive we'll lose
+  sessions mid-checkout. Monitoring is key.
+
+[2025-09-08T09:17:44Z] janet.okoye:
+  apple pay is still blocked on the stripe sandbox issue. i opened a support ticket
+  last week — ticket #SUP-88421. stripe says they're working on it. no ETA yet.
+
+[2025-09-08T09:18:22Z] carlos.medina:
+  ok, apple pay stays as carryover. if stripe fixes the sandbox by end of sprint
+  we'll pull it in, otherwise it moves to sprint 38.
+
+[2025-09-08T09:18:55Z] priya.nakamura:
+  also want to tackle CHKOUT-1912 — we're seeing 409s on concurrent cart updates
+  about 0.3% of the time. small but annoying for users.
+
+[2025-09-08T09:19:35Z] carlos.medina:
+  yeah that's a known issue. it's the optimistic locking on the cart object — two
+  tabs open, both try to update the cart at the same time, second one gets a 409.
+  add it to the sprint if you have bandwidth after the ramp.
+
+[2025-09-08T09:20:11Z] tomás.rivera:
+  for the load test i need access to the staging redis cluster. can someone bump
+  the staging cluster to match prod sizing? it's currently only 1 node with 2GB.
+
+[2025-09-08T09:20:48Z] carlos.medina:
+  i'll file an infra ticket right now. should be done by EOD tomorrow. INFRA-4421.
+
+[2025-09-08T09:21:30Z] priya.nakamura:
+  also flagging — the rollback plan for guest checkout is simple: disable the
+  guest_checkout_v2 flag and everything reverts instantly. no deploy needed.
+  i've tested the kill switch three times in staging.
+
+[2025-09-08T09:22:05Z] carlos.medina:
+  good. DoD for the 25% ramp: conversion rate within 2% of existing flow.
+  if we see a dip beyond that we pause and investigate before ramping further.
+
+[2025-09-08T09:22:40Z] janet.okoye:
+  what about cart abandonment tracking? marketing has been asking for that data
+  since last quarter.
+
+[2025-09-08T09:23:15Z] carlos.medina:
+  CHKOUT-1905 covers that — i'm building the webhook that fires when a guest
+  session expires without completing checkout. analytics team wants it in their
+  pipeline by end of sprint. format is a Kafka event to the cart.abandonment topic.
+
+[2025-09-08T09:24:00Z] tomás.rivera:
+  one more thing — do we want to test eu-west-1 separately? latency to redis
+  might be different cross-region since the redis cluster is in us-east-1.
+
+[2025-09-08T09:24:35Z] carlos.medina:
+  good point. include eu-west-1 in the load test. we want to validate both
+  regions before ramping. cross-region redis read latency should be under 5ms
+  but let's verify.
+
+[2025-09-08T09:25:10Z] priya.nakamura:
+  sounds good. i'll have the PR merged today, load test wednesday, ramp to 25%
+  thursday if all looks good. will keep everyone posted in this channel.
+
+[2025-09-08T09:25:45Z] tomás.rivera:
+  also planning to run a chaos test — kill one redis node during load test to
+  make sure failover works. cluster should handle that with zero downtime.
+
+[2025-09-08T09:26:20Z] carlos.medina:
+  love it. let's make sure we have the datadog dashboard up before the chaos test
+  so we can see the impact in real time. priya can you build that today?
+
+[2025-09-08T09:26:55Z] priya.nakamura:
+  already started. it'll have conversion rate, redis metrics, error rate, and
+  checkout completion time panels. should be ready by EOD.
+
+--- Grafana Dashboard: Guest Checkout v2 Monitoring ---
+
+Dashboard ID: checkout-guest-v2-rollout
+Dashboard URL: https://grafana.vantage.internal/d/checkout-guest-v2
+Owner: carlos.medina
+Created: 2025-09-08
+Refresh interval: 30s
+
+Panels:
+
+  1. Conversion Rate (guest v2 vs legacy)
+     Query: sum(rate(checkout_completed{flow="guest_v2"}[5m])) /
+            sum(rate(checkout_started{flow="guest_v2"}[5m]))
+     Compared against: same query with flow="guest_legacy"
+     Alert: if abs(delta) > 2% for 15 consecutive minutes
+     Visualization: time series, dual Y-axis
+     Time range: last 24h
+
+  2. Redis Session Metrics (checkout-sessions-prod)
+     Queries:
+       - redis_keys{pattern="guest:sess:*"} (active sessions)
+       - rate(redis_commands_total{cluster="checkout-sessions-prod",cmd="set"}[1m]) (creation rate)
+       - rate(redis_expired_keys_total{cluster="checkout-sessions-prod"}[1m]) (expiry rate)
+       - histogram_quantile(0.99, redis_command_duration_seconds{cluster="checkout-sessions-prod"})
+     Visualization: stat panel + time series
+     Alert: if evicted_keys > 0 for 1 minute
+
+  3. Payment Gateway Error Rate
+     Query: sum(rate(payment_intent_errors{checkout_type="guest"}[5m])) by (error_code)
+     Visualization: stacked bar chart by error code
+     Alert: if total error rate > 1% for 5 minutes
+     Error codes tracked: 502, 503, 504, timeout, network_error
+
+  4. Checkout Completion Time (percentiles)
+     Query: histogram_quantile({0.5,0.9,0.99}, checkout_completion_duration_seconds{flow="guest_v2"})
+     Visualization: time series with p50/p90/p99 lines
+     Alert: if p99 > 60s for 5 minutes
+     Comparison: overlay with flow="guest_legacy" for side-by-side
+
+  5. Feature Flag Distribution
+     Query: launchdarkly_flag_evaluation{flag="guest_checkout_v2"} by (variation)
+     Visualization: pie chart showing % traffic on v2 vs legacy
+     Refresh: real-time
+
+  6. Geographic Distribution
+     Query: checkout_completed{flow="guest_v2"} by (region)
+     Visualization: world map with request density
+     Regions: us-east-1, eu-west-1
+
+--- Grafana Alert Definitions ---
+
+Alert: guest-checkout-conversion-regression
+  Condition: abs(conversion_rate_v2 - conversion_rate_legacy) > 0.02 for 15m
+  Severity: P2
+  Notification channels: #checkout-team Slack, PagerDuty (carlos.medina)
+  Runbook: https://runbooks.vantage.internal/checkout/guest-v2-conversion-regression
+  Silence window: none
+  Evaluation interval: 1m
+
+Alert: redis-session-high-eviction
+  Condition: redis_evicted_keys{cluster="checkout-sessions-prod"} > 0 for 1m
+  Severity: P1
+  Notification channels: #checkout-team Slack, PagerDuty (on-call)
+  Runbook: https://runbooks.vantage.internal/redis/session-eviction
+  Silence window: none
+  Evaluation interval: 30s
+
+Alert: guest-checkout-error-rate
+  Condition: rate(checkout_errors{flow="guest_v2"}[5m]) > 0.01 for 5m
+  Severity: P2
+  Notification channels: #checkout-team Slack
+  Runbook: https://runbooks.vantage.internal/checkout/guest-v2-error-rate
+  Silence window: 00:00-06:00 UTC (low traffic)
+  Evaluation interval: 1m
+
+Alert: payment-gateway-latency
+  Condition: histogram_quantile(0.99, payment_gateway_duration_seconds{flow="guest_v2"}) > 10 for 5m
+  Severity: P2
+  Notification channels: #checkout-team Slack, PagerDuty (janet.okoye)
+  Runbook: https://runbooks.vantage.internal/checkout/payment-gateway-latency
+
+--- Runbook: Guest Checkout v2 Conversion Regression ---
+
+Runbook ID: RB-CHKOUT-042
+Owner: carlos.medina
+Last updated: 2025-09-10
+Severity: P2
+
+Symptoms:
+  - Grafana alert "guest-checkout-conversion-regression" firing
+  - Conversion rate for guest_v2 flow diverging from guest_legacy by >2%
+
+Diagnosis steps:
+  1. Open Grafana dashboard checkout-guest-v2-rollout
+  2. Check panel 3 (Payment Gateway Errors) — if error spike, likely payment issue
+  3. Check panel 4 (Completion Time) — if p99 spiked, likely latency causing drop-off
+  4. Check panel 2 (Redis Metrics) — if evictions or high latency, session storage issue
+  5. Check Datadog APM for checkout.guest.payment_handoff span errors
+  6. Check LaunchDarkly — confirm targeting rules haven't changed unexpectedly
+
+Remediation:
+  - If payment gateway errors: check Stripe status page, verify retry logic working
+  - If Redis latency: check cluster memory, consider scaling up or adjusting TTL
+  - If unclear root cause: disable guest_checkout_v2 flag (instant rollback)
+  - If conversion drop is within noise (<1%): monitor for another 30m before acting
+
+Escalation:
+  - After 30 minutes of sustained regression: page carlos.medina
+  - After 1 hour: rollback to legacy and create P1 incident
+  - After rollback: post-incident review within 24 hours
+
+--- Cypress E2E Test Results (CI Pipeline Run #8847) ---
+
+Pipeline: checkout-service / feature/guest-checkout-redesign
+Trigger: push to feature/guest-checkout-redesign (sha-7f8e9d0a1b2c)
+Runner: GitHub Actions (ubuntu-22.04, 4 vCPU, 16GB RAM)
+Browser: Chrome 117, Electron 27
+Started: 2025-09-10T16:50:00Z
+Completed: 2025-09-10T16:58:42Z
+Duration: 8m 42s
+
+  Test Suite                                    | Tests | Passed | Failed | Duration
+  ----------------------------------------------|-------|--------|--------|----------
+  guest-checkout-happy-path.cy.ts               | 4     | 4      | 0      | 1m 12s
+  guest-checkout-validation.cy.ts               | 3     | 3      | 0      | 0m 45s
+  guest-checkout-session-expiry.cy.ts           | 2     | 2      | 0      | 1m 30s
+  guest-checkout-payment-retry.cy.ts            | 2     | 2      | 0      | 2m 05s
+  guest-to-registered-conversion.cy.ts          | 3     | 3      | 0      | 1m 18s
+  guest-checkout-concurrent-tabs.cy.ts          | 1     | 1      | 0      | 0m 52s
+  guest-checkout-mobile-viewport.cy.ts          | 2     | 2      | 0      | 0m 38s
+  guest-checkout-accessibility.cy.ts            | 2     | 2      | 0      | 0m 22s
+  ----------------------------------------------|-------|--------|--------|----------
+  Total                                         | 19    | 19     | 0      | 8m 42s
+
+  Screenshots captured: 0 (all passing)
+  Videos recorded: 12 (one per spec file)
+  Artifacts stored: s3://vantage-ci-artifacts/checkout-service/8847/
+
+  Flaky test detection: none flagged (all tests passed on first attempt)
+  Previous pipeline run: #8846, 19/19 passed (sha-b8c9d0e1)
+
+--- CI Pipeline Summary ---
+
+  Step                          | Status  | Duration
+  ------------------------------|---------|----------
+  Checkout code                 | passed  | 8s
+  Install dependencies (npm ci) | passed  | 1m 22s
+  Lint (eslint)                 | passed  | 32s
+  Type check (tsc --noEmit)     | passed  | 45s
+  Unit tests (Jest, 87 tests)   | passed  | 1m 15s
+  Build (webpack prod)          | passed  | 2m 08s
+  Cypress E2E (19 tests)        | passed  | 8m 42s
+  Bundle size check             | passed  | 12s
+  SonarQube analysis            | passed  | 1m 30s
+  Docker image build            | passed  | 1m 45s
+  Push to GHCR                  | passed  | 28s
+  -------------------------------|---------|----------
+  Total pipeline                | passed  | 18m 47s
+
+  Bundle size check details:
+    Budget: 300 KB gzipped (checkout page)
+    Actual: 262 KB gzipped
+    Status: PASS (38 KB under budget)
+
+  SonarQube results:
+    Quality gate: PASSED
+    New bugs: 0
+    New vulnerabilities: 0
+    New code smells: 2 (minor — both are TODO comments)
+    New technical debt: 15 minutes
+    Test coverage: 84.2% (lines), 78.9% (branches)
+    Duplicated lines: 1.2%
+
+--- Deploy Manifest (checkout-service v3.8.0) ---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-service
+  namespace: vantage-prod
+  labels:
+    app: checkout-service
+    version: v3.8.0
+    team: checkout-payments
+spec:
+  replicas: 6
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: checkout-service
+  template:
+    metadata:
+      labels:
+        app: checkout-service
+        version: v3.8.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      containers:
+      - name: checkout-service
+        image: ghcr.io/vantage-commerce/checkout-service:v3.8.0-sha-7f8e9d0a
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: checkout-redis-credentials
+              key: url
+        - name: STRIPE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: stripe-credentials
+              key: secret-key
+        - name: GUEST_SESSION_TTL_SECONDS
+          value: "900"
+        - name: PAYMENT_GATEWAY_TIMEOUT_MS
+          value: "8000"
+        - name: PAYMENT_GATEWAY_MAX_RETRIES
+          value: "3"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://datadog-agent:4317"
+        - name: OTEL_SERVICE_NAME
+          value: "checkout-service"
+        - name: LAUNCHDARKLY_SDK_KEY
+          valueFrom:
+            secretKeyRef:
+              name: launchdarkly-credentials
+              key: sdk-key
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 15
+      nodeSelector:
+        topology.kubernetes.io/zone: us-east-1a
+
+--- Kong API Gateway Configuration (Guest Checkout Routes) ---
+
+Service: checkout-service-guest-v2
+  URL: http://checkout-service.vantage-prod.svc.cluster.local:8080
+  Protocol: http
+  Connect timeout: 5000ms
+  Write timeout: 60000ms
+  Read timeout: 60000ms
+
+Route: guest-checkout-v2-create
+  Paths: /api/v2/checkout/guest
+  Methods: POST
+  Strip path: false
+  Plugins:
+    - rate-limiting:
+        minute: 10
+        policy: redis
+        redis_host: kong-rate-limit.redis.internal
+        redis_port: 6379
+        redis_database: 0
+    - cors:
+        origins: ["https://www.vantage.com", "https://staging.vantage.com"]
+        methods: ["POST", "OPTIONS"]
+        headers: ["Content-Type", "X-Request-ID", "Idempotency-Key"]
+        max_age: 3600
+    - request-size-limiting:
+        allowed_payload_size: 8
+        size_unit: kilobytes
+    - request-transformer:
+        add:
+          headers: ["X-Gateway-Version:kong-3.4.2"]
+
+Route: guest-checkout-v2-session
+  Paths: /api/v2/checkout/guest/session
+  Methods: GET
+  Strip path: false
+  Plugins:
+    - rate-limiting:
+        minute: 30
+        policy: redis
+    - cors:
+        origins: ["https://www.vantage.com"]
+        methods: ["GET", "OPTIONS"]
+
+--- PagerDuty On-Call Schedule (Checkout & Payments) ---
+
+Schedule: checkout-payments-oncall
+Week of 2025-09-08:
+  Primary: carlos.medina (Mon-Fri 09:00-18:00 ET)
+  Secondary: priya.nakamura (Mon-Fri 09:00-18:00 ET)
+  After-hours: janet.okoye (Mon-Fri 18:00-09:00 ET, weekends)
+
+Escalation policy:
+  Level 1: on-call primary (5 min timeout)
+  Level 2: on-call secondary (10 min timeout)
+  Level 3: carlos.medina + engineering manager (15 min timeout)
+
+Active services:
+  - checkout-service (P1: 5 min, P2: 15 min, P3: next business day)
+  - svc-payment-gateway (P1: 5 min, P2: 15 min)
+  - checkout-sessions-prod Redis (P1: immediate, P2: 5 min)
+
+================================================================================
+END OF LOG — 2025-09-10
+================================================================================

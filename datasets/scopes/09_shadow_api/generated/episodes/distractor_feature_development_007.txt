@@ -1,0 +1,848 @@
+================================================================================
+VANTAGE COMMERCE — FEATURE DEVELOPMENT LOG
+Date: 2025-10-15
+Classification: INTERNAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Sprint Plan — Sprint 2025-41
+────────────────────────────────────────────────────────────────────────────────
+
+Team: Checkout & Payments
+Sprint: Sprint 2025-41
+Dates: 2025-10-13 to 2025-10-24
+Jira Board: CHKOUT
+Sprint Goal: Guest checkout 100% rollout + Apple Pay launch
+Velocity (last 3 sprints): 36 points
+Capacity: 40 points
+
+--- Sprint Backlog ---
+
+CHKOUT-1952: Guest checkout v2 — ramp to 100%
+  Assignee: Priya Nakamura
+  Story Points: 3
+  Priority: Critical
+  Description: The guest checkout v2 feature has been running at 50 percent for the last two
+  weeks. The conversion metrics across all customer segments are better than the legacy checkout
+  flow. Conversion is up 4.2 percent versus legacy, completion time is down 31 percent, and the
+  error rate is down 22 percent. This ticket covers ramping the feature flag from 50 percent to
+  100 percent, verifying that all metrics remain stable at full traffic, and monitoring for any
+  edge cases that might only appear at full volume. The ramp will be done in two stages: first
+  to 75 percent for 24 hours, then to 100 percent if metrics are stable.
+
+carlos.medina: "Guest checkout has been at 50% for two weeks with better conversion than legacy
+across all segments. Time to go to 100% and retire the old code."
+
+  Acceptance Criteria:
+    Feature flag guest_checkout_v2 set to 100 percent targeting all users
+    Conversion rate remains within 0.5 percent of the 50 percent ramp metrics
+    Error rate does not exceed the 50 percent ramp baseline by more than 0.1 percent
+    Monitoring dashboard confirms stable performance for 48 hours at 100 percent
+
+CHKOUT-1940: Apple Pay for guest + registered users
+  Assignee: Janet Okoye
+  Story Points: 8
+  Priority: High
+  Description: Integrate Apple Pay as a payment method for both guest and registered users. The
+  Apple Pay sandbox has been fully tested. The Stripe integration handles Apple Pay as just
+  another payment method, which means the code changes on our side are minimal. The primary
+  blocker was the Apple merchant identity certificate which was obtained last week. Apple Pay
+  is available on Safari on macOS and iOS, and on Chrome on macOS with Touch ID. Based on our
+  traffic analysis, approximately 38 percent of total checkout sessions are on eligible
+  browsers and devices, making this a significant payment option.
+
+janet.okoye: "Apple Pay sandbox is fully tested. Stripe integration handles Apple Pay as just
+another payment method — minimal code changes on our side. The blocker was the Apple merchant
+identity certificate which we finally got last week."
+
+  Acceptance Criteria:
+    Apple Pay button appears on checkout page for eligible browsers
+    Payment flow completes successfully for both guest and registered users
+    Stripe payment intent is created with payment_method_types including apple_pay
+    Order confirmation shows Apple Pay as the payment method
+    Analytics events fire correctly for Apple Pay transactions
+
+CHKOUT-1955: Remove legacy guest checkout code + feature flag cleanup
+  Assignee: Priya Nakamura
+  Story Points: 5
+  Priority: Medium
+  Description: Once the guest checkout v2 flag is at 100 percent and stable, remove the legacy
+  guest checkout code path. This involves approximately 4200 lines of code across 28 files,
+  3 unused API endpoints that only served the legacy flow, and 2 deprecated database columns
+  that stored legacy session state. The feature flag itself will be archived in LaunchDarkly.
+  This cleanup should only proceed after the 100 percent ramp has been stable for at least 48
+  hours.
+
+  Acceptance Criteria:
+    All legacy guest checkout code paths removed
+    Three unused API endpoints removed: POST /api/v1/checkout/legacy/init,
+    POST /api/v1/checkout/legacy/submit, GET /api/v1/checkout/legacy/session
+    Two deprecated database columns dropped: checkout_sessions.legacy_token,
+    checkout_sessions.legacy_cart_json
+    LaunchDarkly flag guest_checkout_v2 archived
+    All unit and integration tests pass without the legacy code
+
+CHKOUT-1960: Payment method analytics dashboard
+  Assignee: Carlos Medina
+  Story Points: 5
+  Priority: Medium
+  Description: Build a Looker dashboard that provides visibility into payment method usage and
+  performance. The dashboard will show metrics broken down by payment method including credit
+  card, debit card, Apple Pay, PayPal, and guest checkout. Metrics include transaction volume,
+  conversion funnel breakdown from cart to order confirmation, average order value, and error
+  rate per payment method. This dashboard is important for understanding the adoption of Apple
+  Pay after launch and for making data-driven decisions about which payment methods to invest
+  in further.
+
+  Acceptance Criteria:
+    Looker dashboard accessible to the Checkout and Payments team
+    Metrics available by payment method: card, Apple Pay, PayPal, guest
+    Conversion funnel visualization from cart to confirmation per method
+    Date range selector with daily, weekly, and monthly aggregation
+    Real-time data via Segment analytics pipeline
+
+CHKOUT-1963: Checkout error rate alerting refinement
+  Assignee: Tomás Rivera
+  Story Points: 3
+  Priority: Medium
+  Description: The current checkout error rate alerting fires too often because of transient
+  Stripe 502 errors that resolve automatically within seconds. These are typically load
+  balancer hiccups on the Stripe side that do not affect customer experience because our retry
+  logic handles them transparently. The goal of this ticket is to add a 3-minute suppression
+  window before paging the on-call engineer. Only if the error rate remains elevated for three
+  consecutive minutes should a page be sent. This will reduce false positive pages which
+  currently average about four per week.
+
+tomás.rivera: "Current checkout error alerting fires too often on transient Stripe 502s that
+auto-resolve. I want to add a 3-minute suppression window before paging."
+
+  Acceptance Criteria:
+    Datadog monitor updated with a 3-minute evaluation window
+    Transient Stripe 502 errors that resolve within 3 minutes no longer trigger pages
+    Persistent errors (lasting more than 3 minutes) still trigger pages
+    Historical analysis confirms the change would have prevented 3 of 4 false positive pages last week
+
+CHKOUT-1970: Express checkout one-click purchase for registered users with saved cards
+  Assignee: Janet Okoye
+  Story Points: 8
+  Priority: Low (stretch goal)
+  Description: Enable a one-click purchase flow for registered users who have a saved card and
+  a default shipping address. The customer can complete a purchase with a single tap or click.
+  After clicking the express checkout button, a 5-second confirmation window appears showing
+  the order summary, shipping address, and payment method. If the customer does not cancel
+  within 5 seconds, the order is placed automatically. This feature requires the user to have
+  at least one saved card and a default shipping address configured in their account settings.
+
+  Acceptance Criteria:
+    Express checkout button visible for eligible users on product and cart pages
+    5-second confirmation window with cancel option
+    Order placed automatically after confirmation window closes
+    Correct card and address used from saved defaults
+    Accessible via keyboard (Escape key cancels the confirmation window)
+
+--- Sprint Risks ---
+
+  Risk 1: Guest checkout 100 percent ramp may surface edge cases not seen at 50 percent. The
+  mitigation is a staged ramp (75 percent first) with immediate rollback capability.
+  Risk 2: Apple merchant identity certificate integration may have production-specific issues
+  not caught in sandbox. Janet will test against the production Stripe endpoint in a staging
+  environment before the production rollout.
+  Risk 3: Express checkout is a stretch goal and may not be completed this sprint given the
+  8-point estimate and Janet's Apple Pay work taking priority.
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: Pull Request #4788 — Low-Stock Alert System
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/svc-inventory-tracker
+PR: #4788
+Branch: feature/low-stock-alerts
+Author: rafael.silva
+Reviewers: elena.volkov, deepak.patel
+Status: APPROVED
+Files changed: 19
+Insertions: 987
+Deletions: 143
+Created: 2025-10-12T14:00:00Z
+Merged: 2025-10-15T10:30:00Z
+
+--- Affected Services ---
+
+- svc-inventory-tracker v3.7.0
+- svc-notification-hub (email digest delivery)
+- svc-product-catalog (product and category data for threshold defaults)
+- PostgreSQL inventory_thresholds table (new table)
+- Kafka topic: inventory.alerts (new topic)
+- Datadog monitor: inventory-low-stock (new monitor)
+
+--- Changes Summary ---
+
+rafael.silva: "We had 3 out-of-stock events last month on top-100 products that could have been
+avoided with earlier alerting. Current system only alerts at zero stock — too late for reorder
+lead times."
+
+This pull request implements a configurable low-stock alert system for merchants and internal
+operations. The existing inventory system only generates an alert when a product reaches zero
+stock, which is too late because reorder lead times for most suppliers range from three to
+fourteen days. By the time the zero-stock alert fires, the product has already been unavailable
+to customers for that entire lead time period. The new system allows thresholds to be configured
+per product or per category, using either an absolute stock count or a relative percentage of the
+30-day average daily sales volume multiplied by the reorder lead time in days.
+
+elena.volkov: "Clean implementation. One suggestion: add a webhook option for the alert channel
+so merchants can integrate with their own inventory management systems."
+
+rafael.silva: "Good idea — added webhook as a fourth channel option. Merchants configure their
+endpoint URL in the merchant portal, we POST the alert payload with HMAC signature for
+verification."
+
+--- Threshold Configuration ---
+
+  Threshold Type: Absolute
+  Description: triggers an alert when the current stock falls below a fixed number of units.
+  This is the simpler option, suitable for products with stable and predictable demand. For
+  example, a threshold of 50 units means an alert fires when stock drops below 50 regardless
+  of the product's sales velocity.
+
+  Threshold Type: Relative
+  Description: triggers an alert when the current stock falls below a percentage of the 30-day
+  average daily sales multiplied by the reorder lead time in days. This is the more intelligent
+  option because it adapts to the product's actual sales velocity. For a product that sells 100
+  units per day with a 7-day reorder lead time, a 100 percent relative threshold would alert
+  when stock falls below 700 units (100 units per day times 7 days). A 150 percent relative
+  threshold would alert at 1050 units, providing extra buffer.
+
+  Default thresholds by category:
+    General merchandise: 50 units absolute
+    Electronics: 20 units absolute
+    Consumables: 100 units absolute
+  These defaults can be overridden per individual SKU via the merchant portal or the inventory
+  management API.
+
+--- Alert Channels ---
+
+  Channel 1: Kafka event on topic inventory.alerts
+  The Kafka event is consumed by downstream systems including the analytics pipeline and the
+  notification hub. The event contains all relevant data about the low-stock condition including
+  the product identifier, SKU, current stock level, threshold value, threshold type, average
+  daily sales, and estimated stockout date.
+
+  Kafka event schema:
+    product_id: string (UUID)
+    sku: string
+    current_stock: integer
+    threshold: integer
+    threshold_type: string (absolute or relative)
+    avg_daily_sales: float
+    estimated_stockout_date: string (ISO 8601 date)
+    timestamp: string (ISO 8601 datetime)
+
+  Channel 2: PagerDuty for internal operations
+  Critical low-stock conditions (stock below 50 percent of threshold) trigger a PagerDuty
+  incident for the inventory operations team. This ensures that urgent restocking situations
+  receive immediate human attention.
+
+  Channel 3: Email digest for the merchandising team
+  A daily email digest is sent at 09:00 UTC summarizing all products that are currently below
+  their threshold. The digest is grouped by category and sorted by estimated stockout date,
+  with the most urgent items at the top. The merchandising team uses this digest to prioritize
+  their reorder activities.
+
+  Channel 4: Webhook for merchant integration
+  Merchants can configure a webhook endpoint URL in the merchant portal. When a low-stock
+  condition is detected for one of their products, the alert payload is POSTed to their
+  configured endpoint. The payload includes an HMAC-SHA256 signature in the X-Vantage-Signature
+  header. Merchants verify the signature against their shared secret to ensure the webhook
+  was sent by Vantage and not a third party. The webhook payload has the same structure as the
+  Kafka event schema.
+
+--- Deduplication Logic ---
+
+  Only one alert per product per 24-hour window. When an alert fires for a product, the system
+  records the alert timestamp in the inventory_thresholds table. Subsequent threshold checks for
+  the same product within the 24-hour window are suppressed to prevent alert fatigue. This is
+  important because the inventory check runs every 5 minutes, and without deduplication, a
+  product below threshold would generate 288 alerts per day.
+
+--- Inventory Check Process ---
+
+  The inventory check runs as a cron job every 5 minutes. The job scans all products where
+  the current stock is less than or equal to the threshold multiplied by 1.2 (the early
+  warning zone). Products in the early warning zone are logged for internal monitoring but
+  do not trigger customer-facing alerts. Products at or below the actual threshold trigger
+  the alert through all configured channels. The early warning zone provides visibility into
+  products that are approaching their threshold without creating unnecessary noise.
+
+--- Grafana Dashboard Panel ---
+
+  Dashboard: Inventory Operations
+  Panel: Products Below Threshold with Restock ETA
+  Description: a table panel showing all products currently below their configured threshold.
+  Each row displays the product name, SKU, current stock, threshold, percentage of threshold
+  remaining, average daily sales, estimated stockout date based on current sales velocity, and
+  the supplier name with their typical lead time. The table is sorted by estimated stockout
+  date with the most urgent items at the top. A color-coded urgency column uses red for
+  products with an estimated stockout within 3 days, yellow for 3 to 7 days, and green for
+  more than 7 days.
+
+--- HTTP Request/Response Samples ---
+
+[2025-10-15T10:45:12.001Z] Request:
+  POST /api/v1/inventory/thresholds HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_threshold_001
+  Accept: application/json
+
+  {
+    "product_id": "prod_monitor_32in",
+    "sku": "MON-32-4K-PRO",
+    "threshold_type": "relative",
+    "threshold_percentage": 150,
+    "reorder_lead_days": 7,
+    "alert_channels": ["kafka", "email_digest", "webhook"],
+    "webhook_url": "https://merchant.example.com/webhooks/inventory",
+    "webhook_secret": "whsec_abc123def456"
+  }
+
+[2025-10-15T10:45:12.187Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_threshold_001
+  X-Trace-ID: trace_inv_threshold_x7y8z9
+
+  {
+    "threshold_id": "thr_9a8b7c6d",
+    "product_id": "prod_monitor_32in",
+    "sku": "MON-32-4K-PRO",
+    "threshold_type": "relative",
+    "threshold_percentage": 150,
+    "reorder_lead_days": 7,
+    "computed_threshold_units": 315,
+    "avg_daily_sales": 30.0,
+    "alert_channels": ["kafka", "email_digest", "webhook"],
+    "created_at": "2025-10-15T10:45:12Z"
+  }
+
+  Latency: 186ms
+
+[2025-10-15T10:46:30.001Z] Request:
+  GET /api/v1/inventory/alerts?status=active&sort=stockout_eta HTTP/1.1
+  Host: api.vantage.com
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_alerts_list_001
+  Accept: application/json
+
+[2025-10-15T10:46:30.089Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_alerts_list_001
+
+  {
+    "alerts": [
+      {
+        "alert_id": "alt_001",
+        "product_id": "prod_headphones_nc",
+        "sku": "HP-NC-700-BLK",
+        "product_name": "Noise Cancelling Headphones 700",
+        "current_stock": 12,
+        "threshold": 20,
+        "threshold_type": "absolute",
+        "avg_daily_sales": 8.5,
+        "estimated_stockout_date": "2025-10-16",
+        "urgency": "critical",
+        "last_alerted_at": "2025-10-15T06:00:00Z"
+      },
+      {
+        "alert_id": "alt_002",
+        "product_id": "prod_cable_usbc",
+        "sku": "CBL-USBC-2M",
+        "product_name": "USB-C Cable 2 Meter",
+        "current_stock": 340,
+        "threshold": 500,
+        "threshold_type": "relative",
+        "avg_daily_sales": 45.2,
+        "estimated_stockout_date": "2025-10-22",
+        "urgency": "warning",
+        "last_alerted_at": "2025-10-15T06:00:00Z"
+      }
+    ],
+    "total": 2,
+    "page": 1,
+    "per_page": 20
+  }
+
+  Latency: 67ms
+
+[2025-10-15T10:50:00.001Z] Request:
+  POST /api/v1/inventory/thresholds/bulk HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_threshold_bulk_001
+
+  {
+    "category": "electronics",
+    "threshold_type": "absolute",
+    "threshold_value": 25,
+    "alert_channels": ["kafka", "pagerduty"],
+    "override_existing": false
+  }
+
+[2025-10-15T10:50:00.312Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_threshold_bulk_001
+
+  {
+    "applied": 847,
+    "skipped": 23,
+    "skipped_reason": "existing_custom_threshold",
+    "category": "electronics",
+    "threshold_type": "absolute",
+    "threshold_value": 25
+  }
+
+  Latency: 311ms
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: A/B Test Results — Checkout Progress Indicator (EXP-2025-163)
+────────────────────────────────────────────────────────────────────────────────
+
+Experiment ID: EXP-2025-163
+Name: checkout_progress_indicator
+Platform: LaunchDarkly (project: vantage-web)
+Team: Checkout & Payments
+Status: CONCLUDED
+Start Date: 2025-09-25
+End Date: 2025-10-14
+Winner: variant_b
+Duration: 19 days
+
+--- Experiment Design ---
+
+  Control group: the existing 4-step text breadcrumb navigation at the top of the checkout
+  flow showing Cart, Shipping, Payment, and Review as text labels with the current step
+  highlighted in bold. This has been the checkout progress indicator since the original
+  checkout launch two years ago.
+
+  Variant A: an animated progress bar with step labels and an estimated time remaining display.
+  The progress bar fills smoothly as the customer advances through each step. Below the bar,
+  a text label shows the estimated time to complete the remaining steps based on the median
+  completion time for each step from the last 30 days of data. For example, if the customer
+  is on the shipping step, the estimate might show approximately 2 minutes 15 seconds remaining.
+
+  Variant B: a minimal design using step dots with the current step highlighted. There are four
+  dots corresponding to the four checkout steps. The current step dot is larger and uses the
+  brand primary color. Completed step dots show a checkmark. Future step dots are grayed out.
+  There is no time estimate and no animation. The design is intentionally minimal to reduce
+  visual noise during the checkout flow.
+
+  Primary metric: checkout completion rate measured from the shipping step (the first step after
+  the cart) to the order confirmation page.
+  Secondary metrics: time spent on each step, drop-off rate at each step, and total checkout
+  completion time.
+
+--- Traffic Allocation ---
+
+  Control: 50 percent of checkout sessions (142,380 sessions over 19 days)
+  Variant A: 25 percent of checkout sessions (71,204 sessions over 19 days)
+  Variant B: 25 percent of checkout sessions (71,891 sessions over 19 days)
+
+  Traffic was allocated at the user level using a persistent hash of the user identifier so
+  that returning users always see the same variant across sessions. Guest users were allocated
+  based on a hash of their session identifier. The allocation was consistent across devices
+  for registered users who were logged in.
+
+--- Results ---
+
+  Completion rates:
+    Control: 67.3 percent (95,834 completions out of 142,380 sessions)
+    Variant A: 65.8 percent (46,852 completions out of 71,204 sessions)
+    Variant B: 70.1 percent (50,435 completions out of 71,891 sessions)
+
+  Variant A versus control: -1.5 percent (p=0.04, statistically significant)
+  Variant B versus control: +2.8 percent (p=0.003, statistically significant)
+
+lisa.park: "Variant B wins decisively at p=0.003 after 19 days. Interestingly, variant A
+(animated bar + time estimate) performed worse than control — the time estimate seemed to
+increase anxiety when it showed >2 minutes."
+
+--- Step-Level Drop-Off Analysis ---
+
+  The most interesting finding was the step-level drop-off analysis for Variant A. Users who
+  saw a time estimate greater than 2 minutes on the shipping step had a 24 percent higher
+  abandonment rate than users who saw a time estimate of less than 1 minute. This suggests
+  that displaying time estimates can backfire when the estimate is perceived as too long. The
+  median shipping step completion time is 1 minute 45 seconds, but for users who need to enter
+  a new address or look up their zip code, the estimate could show 3 or 4 minutes, which
+  appears to have created a sense of pressure or friction that led to abandonment.
+
+  In contrast, Variant B showed the largest improvement at the shipping-to-payment transition,
+  where drop-off was reduced by 19 percent compared to the control. The minimal dot design
+  appears to communicate progress effectively without adding cognitive load. The absence of a
+  time estimate removes the psychological pressure while the visual dots still provide a clear
+  sense of how many steps remain.
+
+--- Mobile Versus Desktop Breakdown ---
+
+  Variant B outperformed the control on both mobile and desktop, but the lift was larger on
+  mobile devices. Mobile users saw a 3.4 percent improvement in completion rate while desktop
+  users saw a 2.1 percent improvement. This is consistent with the hypothesis that minimal UI
+  elements are particularly important on small screens where visual real estate is limited and
+  any additional element competes for attention with the primary checkout form.
+
+priya.nakamura: "Shipping variant B to 100% in the Sprint 41 guest checkout update. The minimal
+dots work better across viewport sizes too — the animated bar had layout issues on small screens."
+
+--- Implementation Notes ---
+
+  Variant B implementation requires only CSS changes with no new JavaScript. The dots are
+  rendered using existing HTML elements with updated CSS classes. This means the bundle size
+  impact is negligible, less than 200 bytes of additional CSS. The existing checkout step
+  tracking JavaScript continues to work without modification because the dot states are
+  controlled entirely through CSS class toggling that is already handled by the step navigation
+  logic.
+
+  The rollout plan is to ship Variant B to 100 percent as part of the Sprint 2025-41 guest
+  checkout update. Since both changes (guest checkout 100 percent ramp and progress indicator
+  update) affect the checkout flow, bundling them into a single release reduces the number of
+  checkout deployments and simplifies the monitoring window.
+
+--- Segment Analytics Configuration ---
+
+  The experiment was tracked through Segment analytics with the following event properties added
+  to the standard checkout events during the experiment period. The experiment_id property was
+  set to EXP-2025-163 and the variant property was set to control, variant_a, or variant_b.
+  These properties were attached to all checkout-related events including checkout_started,
+  shipping_completed, payment_completed, and order_confirmed. The data was available in real
+  time through the Segment Connections dashboard and was piped to both Looker for reporting
+  and to the data warehouse for offline analysis by the data science team.
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 4: Deploy Manifest — svc-returns-portal v2.0.0
+────────────────────────────────────────────────────────────────────────────────
+
+Service: svc-returns-portal
+Version: 2.0.0
+Environment: production
+Deployer: sarah.kim
+Method: ArgoCD canary (10% → 50% → 100%)
+Timestamp: 2025-10-15T09:00:00Z
+
+--- Deployment Strategy ---
+
+sarah.kim: "Canary strategy for returns-portal v2.0.0. The backend deploys first with the flag
+off. Once canary is stable at 100%, I will enable the flag for 10% of users and monitor return
+initiation success rate."
+
+carlos.medina: "Approved the canary plan. Make sure the reconciliation job is running before
+enabling the flag — we need the orphan detection safety net from day one."
+
+  Stage 1 (09:00 UTC): deploy canary with 10 percent of traffic routed to v2.0.0 pods. The
+  remaining 90 percent continues to be served by the existing v1.8.2 pods. Monitor for 2 hours.
+  Metrics to watch: error rate on all returns-portal API endpoints, latency p99, memory and CPU
+  utilization of canary pods, and Kafka consumer lag on the returns.events topic.
+
+  Stage 2 (11:00 UTC): if all metrics are green after the initial 2-hour window, promote the
+  canary to 50 percent of traffic. Monitor for an additional 3 hours. At this stage, the
+  returns-portal is handling half of all returns API requests through the new code path.
+
+  Stage 3 (14:00 UTC): if all metrics remain green, promote to 100 percent. At this point all
+  returns-portal traffic is served by v2.0.0. The v1.8.2 pods are scaled down but kept available
+  for 24 hours in case a rollback is needed.
+
+  Feature flag activation (post-deployment): the self_service_returns feature flag remains OFF
+  during the canary deployment. The canary validates that the backend code is stable and performs
+  correctly. Only after the canary is at 100 percent and has been stable for at least 4 hours
+  will the feature flag be enabled for 10 percent of users. The feature flag rollout follows
+  its own staged plan separate from the infrastructure canary.
+
+--- Kubernetes Manifest ---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-returns-portal
+  namespace: vantage-prod
+  labels:
+    app: returns-portal
+    version: "2.0.0"
+    team: checkout-payments
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: returns-portal
+  template:
+    metadata:
+      labels:
+        app: returns-portal
+        version: "2.0.0"
+    spec:
+      containers:
+        - name: returns-portal
+          image: ghcr.io/vantage-commerce/returns-portal:2.0.0-sha-d4e7f89
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "125m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: returns-portal-secrets
+                  key: database-url
+            - name: KAFKA_BROKERS
+              value: "kafka-prod-01:9092,kafka-prod-02:9092,kafka-prod-03:9092"
+            - name: EASYPOST_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: returns-portal-secrets
+                  key: easypost-api-key
+            - name: S3_BUCKET_LABELS
+              value: "vantage-return-labels"
+            - name: VAULT_ADDR
+              value: "https://vault.vantage.internal:8200"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - returns-portal
+                topologyKey: kubernetes.io/hostname
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: svc-returns-portal-hpa
+  namespace: vantage-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: svc-returns-portal
+  minReplicas: 4
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+--- Regional Distribution ---
+
+  us-east-1: 4 replicas (primary region, handles North American traffic)
+  eu-west-1: 2 replicas (secondary region, handles European traffic)
+
+  The us-east-1 deployment has pod anti-affinity rules to ensure that replicas are spread across
+  different nodes for fault tolerance. The eu-west-1 deployment uses the same container image
+  and configuration but connects to the European database replica and the European Kafka cluster.
+
+--- Database Migration ---
+
+  Migration file: 012_self_service_returns.sql
+  Type: additive (non-breaking)
+  Execution: runs pre-deploy via a Kubernetes Job before the canary begins
+
+  The migration adds two new tables (returns and return_items) and their associated indexes.
+  The migration is additive only, meaning it does not modify any existing tables or columns.
+  The v1.8.2 code is not aware of the new tables and will continue to function normally, which
+  is critical for the canary rollback scenario where traffic is shifted back to v1.8.2 pods.
+
+--- Canary Analysis Configuration ---
+
+  Metrics source: Datadog
+  Comparison: canary pods versus stable pods
+
+  Metric 1: error rate (HTTP 5xx responses divided by total responses)
+    Threshold: canary error rate must not exceed stable error rate by more than 0.5 percent
+    Evaluation: rolling 5-minute window
+
+  Metric 2: latency p99
+    Threshold: canary p99 must not exceed stable p99 by more than 100 milliseconds
+    Evaluation: rolling 5-minute window
+
+  Metric 3: return initiation success rate (HTTP 201 responses on POST /api/v1/returns divided
+  by total POST /api/v1/returns requests excluding 422 validation errors)
+    Threshold: must be at least 95 percent
+    Evaluation: rolling 10-minute window
+
+  Rollback trigger: automatic rollback if any metric threshold is violated for 5 consecutive
+  minutes. ArgoCD performs the rollback by shifting all traffic back to the stable v1.8.2 pods
+  and scaling down the canary pods. A PagerDuty incident is created automatically when an
+  automatic rollback is triggered.
+
+--- Post-Deploy Smoke Test ---
+
+  The smoke test runs automatically after the canary deployment reaches 10 percent. It sends
+  a synthetic request to POST /api/v1/returns with a test order identifier and verifies that
+  the response is a 201 status with a valid return_id and label generation URL. The test order
+  is flagged in the database so that it does not appear in analytics or customer-facing dashboards.
+  If the smoke test fails, the canary is immediately rolled back.
+
+--- Slack Thread: #checkout-payments Sprint 2025-41 Kickoff ---
+
+[2025-10-15T09:30:00Z] carlos.medina:
+  Sprint 2025-41 is underway. The big items this sprint are guest checkout going to 100 percent
+  and the Apple Pay launch. Priya is handling the guest checkout ramp and the legacy code cleanup.
+  Janet is on Apple Pay. I am building the payment method analytics dashboard so we can track
+  Apple Pay adoption from day one. Tomás is fixing the alerting noise from transient Stripe errors.
+
+[2025-10-15T09:32:00Z] priya.nakamura:
+  I am starting the guest checkout ramp today. Plan is to go to 75 percent this afternoon and
+  monitor overnight. If everything looks good tomorrow morning, I will push to 100 percent by
+  noon. The metrics at 50 percent have been rock solid for two weeks. Conversion is up 4.2
+  percent, completion time is down 31 percent, and the error rate is down 22 percent compared
+  to the legacy flow.
+
+[2025-10-15T09:34:00Z] janet.okoye:
+  Apple Pay integration is ready for production testing. The Apple merchant identity certificate
+  is installed and verified in our production Stripe account. I am going to do a test transaction
+  in the staging environment today using the production Stripe credentials but with test mode
+  enabled. If that passes, I will create the feature flag for the Apple Pay button and we can
+  start the rollout this week.
+
+[2025-10-15T09:36:00Z] tomás.rivera:
+  I have the checkout error alerting changes ready. The Datadog monitor now has a 3-minute
+  evaluation window instead of the current 1-minute window. I backtested this against the last
+  30 days of alert data and it would have prevented 3 out of the 4 false positive pages we got.
+  The one remaining alert was a genuine Stripe outage that lasted 7 minutes, so it correctly
+  would have still fired.
+
+[2025-10-15T09:38:00Z] carlos.medina:
+  that is a good improvement on the false positive rate. tom, can you also add a runbook link
+  to the alert notification so the on-call engineer has immediate context when they get paged?
+  I have seen too many incidents where the on-call person wastes the first 5 minutes trying to
+  figure out what the alert means and what to do about it.
+
+[2025-10-15T09:40:00Z] tomás.rivera:
+  already done. the alert notification now includes a link to the checkout error triage runbook
+  and the Datadog dashboard for the checkout service. the on-call person will have immediate
+  context about the alert condition, the relevant metrics, and the first steps for triage.
+
+[2025-10-15T09:42:00Z] sarah.kim:
+  quick update on the returns portal deployment. the canary is live at 10 percent as of 9am.
+  all metrics are green so far. error rate is at 0.02 percent, latency p99 is at 180ms, and
+  memory usage is stable at 145MB per pod. I will promote to 50 percent at 11am if these
+  numbers hold.
+
+[2025-10-15T09:44:00Z] carlos.medina:
+  looks good sarah. keep us posted on the canary progression. remember to verify the
+  reconciliation job is running before you enable the customer-facing flag next week.
+
+[2025-10-15T09:46:00Z] priya.nakamura:
+  also, I am planning to include the progress indicator update (variant B from EXP-2025-163)
+  in the same deployment as the guest checkout 100 percent ramp. since both are checkout UI
+  changes, it makes sense to bundle them so we only have one checkout deployment to monitor
+  instead of two separate ones. lisa already confirmed the variant B implementation is CSS-only
+  with no new JavaScript.
+
+[2025-10-15T09:48:00Z] carlos.medina:
+  makes sense to bundle them. just make sure the progress indicator change is behind its own
+  feature flag in case we need to roll it back independently of the guest checkout ramp.
+
+[2025-10-15T09:50:00Z] janet.okoye:
+  one question about the express checkout stretch goal. the one-click purchase with saved cards
+  needs a 5-second confirmation window. should this be a modal overlay or an inline expansion
+  on the product page? I want to get design alignment before I start implementation.
+
+[2025-10-15T09:52:00Z] carlos.medina:
+  let us schedule a design review for that. I will set up a meeting with the UX team for
+  Thursday. for now focus on Apple Pay since that is the higher priority item.
+
+--- Runbook: Low-Stock Alert System Operations ---
+
+Runbook identifier: RB-INVENTORY-005
+Owner: rafael.silva
+Last updated: 2025-10-15
+
+Overview:
+  The low-stock alert system monitors inventory levels for all active products and generates
+  alerts when stock falls below configured thresholds. The system runs as a cron job every five
+  minutes and uses both absolute and relative threshold types. Alerts are delivered through four
+  channels: Kafka events for downstream consumers, PagerDuty for critical situations, email
+  digests for the merchandising team, and webhooks for merchant integrations.
+
+Common issues and resolution:
+
+  Issue one: low-stock alerts not firing for products below threshold.
+  Symptom: a product has stock below its configured threshold but no alert has been generated.
+  Diagnosis: check the inventory_thresholds table to confirm a threshold is configured for the
+  product. Then check the last_alerted_at column to see if an alert was already sent within the
+  24-hour deduplication window. If the threshold exists and no alert was sent, check the cron
+  job logs for the inventory check process. The cron job runs every 5 minutes and logs each
+  product it evaluates. Look for the product SKU in the logs to see if it was evaluated and
+  whether it met the alert criteria. Common causes include the cron job being paused during a
+  deployment, the product being in the early warning zone (1.0 to 1.2 times threshold) rather
+  than below threshold, or a stale average daily sales value causing the relative threshold
+  calculation to be incorrect.
+  Resolution: if the cron job is paused, resume it. If the average daily sales value is stale,
+  trigger a manual recalculation. If the threshold configuration is missing, create it through
+  the inventory management API.
+
+  Issue two: excessive alert volume causing email digest to be very large.
+  Symptom: the daily email digest contains hundreds of products, making it difficult for the
+  merchandising team to prioritize.
+  Diagnosis: this typically occurs after a large sale event or seasonal demand spike that
+  depletes stock across many products simultaneously. The relative thresholds may also be
+  miscalibrated if the 30-day average daily sales includes the demand spike, causing thresholds
+  to be artificially high.
+  Resolution: for temporary spikes, consider adjusting the thresholds temporarily for the
+  affected categories. For systemic issues, review the threshold defaults and ensure they are
+  appropriate for the current sales velocity. The email digest can be filtered by urgency level
+  (critical, warning, informational) to help the merchandising team focus on the most urgent
+  restocking needs.
+
+  Issue three: webhook delivery failures to merchant endpoints.
+  Symptom: merchants report not receiving low-stock alerts at their configured webhook endpoints.
+  Diagnosis: check the webhook delivery logs in the notification hub. Each webhook delivery
+  attempt is logged with the HTTP status code returned by the merchant endpoint. Common causes
+  include the merchant endpoint being down, the merchant endpoint rejecting the request due to
+  an incorrect HMAC signature (which happens when the shared secret is rotated on the merchant
+  side but not updated in our system), or network connectivity issues between our infrastructure
+  and the merchant endpoint. The system retries failed webhook deliveries three times with
+  exponential backoff (delays of one minute, five minutes, and fifteen minutes).
+  Resolution: if the merchant endpoint is down, there is nothing we can do on our side except
+  retry. If the HMAC signature is incorrect, work with the merchant to verify the shared secret
+  matches on both sides. If the issue is persistent, suggest the merchant use the Kafka event
+  integration instead, which is more reliable because it does not depend on the merchant's
+  infrastructure availability.
+
+================================================================================
+END OF LOG — 2025-10-15
+================================================================================

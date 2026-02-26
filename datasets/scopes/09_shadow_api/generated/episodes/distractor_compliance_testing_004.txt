@@ -1,0 +1,941 @@
+================================================================================
+VANTAGE COMMERCE — COMPLIANCE & SECURITY TESTING LOG
+Date: 2025-10-03
+Classification: CONFIDENTIAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Internal Network Penetration Test — Segmentation Validation
+────────────────────────────────────────────────────────────────────────────────
+
+Title: Internal Network Penetration Test — Segmentation Validation
+Vendor: Ironclad Security Partners
+Lead Tester: Rafael Vega
+Engagement ID: ISP-VC-2025-SEG-0043
+Scope: Internal network segments — corporate LAN, CDE, staging, production
+Environment: production (read-only, non-destructive)
+Test Window: 2025-09-29 through 2025-10-02
+Classification: CONFIDENTIAL
+
+--- Scope Details ---
+
+Network segments tested:
+  1. Corporate LAN segment: 10.10.0.0/16
+     Purpose: Employee workstations, corporate applications
+     Hosts: approximately 340 devices
+     Access method: VPN or on-premises WiFi
+
+  2. CDE segment: 10.42.20.0/22
+     Purpose: Cardholder data environment
+     Hosts: 23 servers
+     Access method: jump-host-prod only (bastion with MFA)
+
+  3. Production segment: 10.42.0.0/20
+     Purpose: Production application services
+     Hosts: 187 Kubernetes pods across 24 nodes
+     Access method: Teleport bastion with short-lived SSH certificates
+
+  4. Staging segment: 10.43.0.0/20
+     Purpose: Pre-production testing
+     Hosts: 94 Kubernetes pods across 8 nodes
+     Access method: Teleport bastion with engineer credentials
+
+Firewall: Palo Alto PA-5260 (fw-core-01)
+  Total rules: 847
+  Last rule review: 2025-08-15
+  Rule review frequency: quarterly
+
+Test methodology: Ironclad Segmentation Test Framework v2.1 (ISP-STF)
+Tools used: nmap 7.94, Metasploit 6.3, custom ICMP/TCP/UDP probe scripts
+Total probes executed: 9,412 across 4 segment boundaries
+
+--- Segmentation Test Results ---
+
+Segmentation Test Summary:
+  Corporate to CDE: 0/47 paths open (PASS)
+  Corporate to Production: 0/47 paths open (PASS)
+  Staging to Production: 2/47 paths open ICMP only (ADVISORY)
+  Staging to CDE: 0/47 paths open (PASS)
+  Production to CDE: controlled via fw-core-01 allowlist (PASS)
+
+Rafael performed network segmentation validation testing per PCI-DSS Requirement 11.3.4.
+
+--- Corporate LAN to CDE Testing ---
+
+Attempted lateral movement from corporate LAN (10.10.0.0/16) to CDE (10.42.20.0/22):
+  Total test probes: 47
+  Probes blocked by fw-core-01: 47/47 (100%)
+  Paths open: 0
+  Result: PASS
+
+Probe details:
+  TCP SYN scans on ports: 22, 80, 443, 3306, 5432, 6379, 8080, 8200, 8443, 9090, 27017
+  UDP scans on ports: 53, 123, 161, 514, 1900
+  ICMP echo request (type 8)
+  ICMP timestamp request (type 13)
+  ICMP address mask request (type 17)
+
+  All 47 probes: fw-core-01 returned ICMP Destination Unreachable (Admin Prohibited) or silent drop.
+
+  Sample probe log:
+    [2025-09-30 09:14:22 UTC] nmap -sS -p 443 10.42.20.1 --source 10.10.15.42
+    Result: filtered (no response, fw-core-01 silent drop)
+    [2025-09-30 09:14:25 UTC] nmap -sS -p 8200 10.42.20.5 --source 10.10.15.42
+    Result: filtered (no response)
+    [2025-09-30 09:14:28 UTC] nmap -sS -p 5432 10.42.20.10 --source 10.10.15.42
+    Result: filtered (no response)
+    [2025-09-30 09:14:31 UTC] ping -c 1 10.42.20.1 -I 10.10.15.42
+    Result: Destination unreachable (Admin Prohibited)
+
+--- Corporate LAN to Production Testing ---
+
+Attempted lateral movement from corporate LAN (10.10.0.0/16) to production (10.42.0.0/20):
+  Total test probes: 47
+  Probes blocked by fw-core-01: 47/47 (100%)
+  Paths open: 0
+  Result: PASS
+
+  All probes blocked. Corporate users access production only via Teleport bastion (authorized path).
+
+--- Staging to Production Testing ---
+
+Attempted lateral movement from staging (10.43.0.0/20) to production (10.42.0.0/20):
+  Total test probes: 47
+  Probes blocked by fw-core-01: 45/47 (95.7%)
+  ICMP echo requests passed: 2/47
+  TCP/UDP data plane exposure: 0
+  Result: ADVISORY (low severity)
+
+Finding VC-SEG-001: ICMP echo requests from staging segment (10.43.0.0/20) reach production segment (10.42.0.0/20) on 2 of 47 test paths. Severity: LOW. CVSS 2.1. No TCP/UDP data plane exposure. ICMP does not traverse CDE boundary.
+
+  ICMP leak details:
+    Path 1: 10.43.0.15 (staging node-03) → 10.42.0.8 (prod node-02)
+      ping -c 3 10.42.0.8 -I 10.43.0.15
+      PING 10.42.0.8 (10.42.0.8): 56 data bytes
+      64 bytes from 10.42.0.8: icmp_seq=0 ttl=62 time=0.4ms
+      64 bytes from 10.42.0.8: icmp_seq=1 ttl=62 time=0.3ms
+      64 bytes from 10.42.0.8: icmp_seq=2 ttl=62 time=0.3ms
+      --- 10.42.0.8 ping statistics ---
+      3 packets transmitted, 3 packets received, 0% packet loss
+
+    Path 2: 10.43.0.22 (staging node-05) → 10.42.0.14 (prod node-05)
+      ping -c 3 10.42.0.14 -I 10.43.0.22
+      3 packets transmitted, 3 packets received, 0% packet loss
+
+    TCP verification (same paths — blocked):
+      nmap -sS -p 22,80,443,8080 10.42.0.8 --source 10.43.0.15
+      All ports: filtered (no response)
+      nmap -sS -p 22,80,443,8080 10.42.0.14 --source 10.43.0.22
+      All ports: filtered (no response)
+
+  Root cause analysis:
+    fw-core-01 rule ID 482 (added 2025-05-14 during networking troubleshooting):
+      action: allow
+      source: 10.43.0.0/20
+      destination: 10.42.0.0/20
+      service: icmp
+      description: "TEMP: allow ICMP for connectivity testing staging-to-prod"
+    This rule was intended to be temporary during a network migration in May 2025.
+    It was not removed after the migration completed.
+    Rule does not affect TCP or UDP traffic — ICMP only.
+
+  Previous segmentation test (2025-03-28) had 0 findings. ICMP rule was added in May firewall change after the previous test.
+
+Marcus Tran received findings and confirmed ICMP exception will be closed by firewall rule update in next change window.
+Remediation timeline: firewall change request CHG-2025-5489 scheduled for 2025-10-07 maintenance window.
+
+--- Staging to CDE Testing ---
+
+Attempted lateral movement from staging (10.43.0.0/20) to CDE (10.42.20.0/22):
+  Total test probes: 47
+  Probes blocked: 47/47 (100%)
+  Paths open: 0
+  Result: PASS
+
+--- Production to CDE Testing ---
+
+Production to CDE access controlled via fw-core-01 allowlist:
+  Allowed paths:
+    payment-gateway (10.42.0.100) → tokenization-service (10.42.20.5) on port 8443 (HTTPS)
+    payment-gateway (10.42.0.100) → vault-kms-prod (10.42.20.10) on port 8200 (Vault API)
+    monitoring-agent → CDE hosts on port 9090 (Prometheus metrics, read-only)
+  All other production-to-CDE traffic: blocked
+  Result: PASS (allowlist verified, no unexpected paths)
+
+--- Jump Host Validation ---
+
+jump-host-prod validation:
+  IP: 10.42.0.250
+  Access: SSH via Teleport (requires Okta MFA + SSH certificate)
+  SSH certificate type: short-lived, 8-hour validity
+  Session recording: Teleport v13.1, all sessions recorded
+  Idle timeout: 15 minutes
+  Maximum session duration: 4 hours
+  Audit log retention: 365 days
+
+  Tested access controls:
+    1. SSH without MFA: Connection refused (Okta MFA challenge not satisfied)
+    2. SSH with expired certificate: Connection refused (certificate expired)
+    3. SSH with valid certificate + MFA: Connection succeeded
+    4. Session recording: Verified session replay available in Teleport admin console
+    5. Idle timeout: Confirmed session terminated after 15 minutes of inactivity
+    6. Session duration limit: Confirmed warning at 3h45m, disconnect at 4h00m
+
+jump-host-prod validation: SSH access requires Okta MFA + SSH certificate (short-lived, 8hr). Session recording via Teleport. Idle timeout: 15 min. Max session: 4 hours. Audit log retention: 365 days.
+
+--- Findings Summary ---
+
+  Critical: 0
+  High: 0
+  Low: 1 (VC-SEG-001, ICMP leak staging to production)
+  Informational: 2
+    VC-SEG-002 (INFO): fw-core-01 has 847 rules. Consider rule consolidation review to reduce operational complexity.
+    VC-SEG-003 (INFO): Staging network uses same IP range schema (10.43.x.x) as future planned expansion. Document IP allocation plan.
+
+No critical or high findings — 1 low finding (ICMP leak), 2 informational.
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: GDPR Data Processing Impact Assessment — Recommendation Engine
+────────────────────────────────────────────────────────────────────────────────
+
+Title: GDPR Data Processing Impact Assessment — Recommendation Engine Personalization Feature
+Author: Elena Marchetti (Data Protection Officer)
+Date: 2025-10-03
+Feature: Enhanced product recommendations based on browsing history
+Status: Under Review
+Reference: DPIA-2025-017
+Expected completion: 2025-10-20
+
+--- Background ---
+
+Elena Marchetti initiated DPIA for new personalization feature that extends recommendation engine to use 90-day browsing history.
+
+Current state:
+  svc-recommendation-engine uses only purchase history and explicit user preferences.
+  GDPR lawful basis: contract performance (Art. 6(1)(b)) — recommendations are part of the service.
+  Data elements: purchase history (order items, categories, timestamps), explicit preferences (saved categories, wishlist items).
+
+Proposed state:
+  Add browsing history as additional signal for product recommendations.
+  browsing-history-collector v1.2.0 sends anonymized page-view events to recommendation engine.
+  Requires legitimate interest assessment (Art. 6(1)(f)) or explicit consent (Art. 6(1)(a)).
+
+--- Data Mapping ---
+
+DPIA Summary: Feature 'Enhanced Personalization v2'. Data subjects: approximately 2.1M EU users. Data elements: page URLs (product pages only), timestamp, session duration, pseudonymized user token. No direct identifiers. Retention: 90 days proposed, 60 days recommended.
+
+Data flow:
+  Step 1: User browses product pages on vantage.com
+  Step 2: browsing-history-collector v1.2.0 captures page-view event
+    Fields captured:
+      - product_page_url (e.g., /products/wireless-earbuds-pro)
+      - timestamp (ISO 8601)
+      - session_duration_seconds
+      - pseudonymized_user_token (SHA-256 hash of user_id + daily salt)
+    Fields NOT captured:
+      - raw user_id
+      - IP address
+      - device fingerprint
+      - any direct identifier
+  Step 3: Events sent to Kafka topic browsing-events-eu
+  Step 4: svc-recommendation-engine consumes events and builds user preference model
+  Step 5: Recommendations served via /api/v2/recommendations/personalized endpoint
+
+Data volume: browsing-history-collector processes approximately 4.2M events per day for EU users.
+Storage: dedicated PostgreSQL database in EU-WEST-1 region (eu-browsing-db-prod)
+
+--- Retention Assessment ---
+
+Proposed retention: 90 days with automated deletion (CRON job at 02:00 UTC daily).
+Elena Marchetti requested reduction to 60 days.
+Rationale: 60 days provides sufficient signal for recommendations while minimizing data held.
+Decision: pending Legal department review.
+
+--- Lawful Basis Assessment ---
+
+Lawful Basis Assessment: Contract performance (Art. 6(1)(b)) covers purchase-based recommendations. Browsing-based recommendations likely require legitimate interest (Art. 6(1)(f)) with balancing test, or consent (Art. 6(1)(a)). Legal review in progress.
+
+Legitimate interest balancing test (preliminary):
+  Interest: Improving product recommendations to serve customers better and drive revenue
+  Necessity: Browsing history provides signal that purchase history alone does not capture (e.g., products viewed but not purchased)
+  Impact on data subject: Minimal — pseudonymized data, no profiling for automated decisions, no data shared with third parties
+  Safeguards: Pseudonymization, 60-day retention, data subject access request support, opt-out mechanism
+  Preliminary assessment: Legitimate interest likely applicable, subject to Legal confirmation
+
+Legal department reviewing. Decision expected by 2025-10-10.
+
+--- Technical Safeguards ---
+
+Technical Safeguards: Pseudonymization via SHA-256 hash of user_id + daily salt. No raw user_id in browsing-history-collector datastore. Re-identification requires access to user-profile-service mapping table (access restricted to 3 engineers).
+
+Pseudonymization details:
+  Algorithm: SHA-256(user_id + daily_salt)
+  Salt rotation: daily at 00:00 UTC
+  Salt storage: vault-kms-prod, path secret/browsing-history/daily-salt
+  Linkability window: 24 hours (within single salt period)
+  Re-identification path: requires access to user-profile-service mapping table
+  Mapping table access: restricted to 3 engineers (Rachel Kim, Tom Nguyen, David Okafor)
+  Access logging: all mapping table queries logged in Splunk
+
+Data subject rights implementation:
+  Right of access (Art. 15): browsing data exportable via DSAR process in less than 24 hours
+  Right to erasure (Art. 17): deletion endpoint available in browsing-history-collector API
+  Right to object (Art. 21): opt-out flag in user-profile-service disables browsing data collection
+  Automated decision-making (Art. 22): not applicable — recommendations are suggestions only, no automated decisions with legal effect
+
+Data residency:
+  Elena confirmed that browsing data does not leave EU-WEST-1 region — no cross-border transfer concern.
+  Database: eu-browsing-db-prod (us-east-1 → EU-WEST-1 migration completed 2025-08-15)
+  Kafka cluster: kafka-eu-west-1 (dedicated EU cluster)
+  svc-recommendation-engine EU instance: deployed in EU-WEST-1
+
+--- DPIA Metadata ---
+
+DPIA reference: DPIA-2025-017
+Expected completion: 2025-10-20
+Feature launch: blocked pending DPIA approval
+Previous DPIA (DPIA-2025-012, email marketing): completed in 14 days by same DPO
+EU supervisory authority (Irish DPC): notified of DPIA initiation per company policy
+DPC notification date: 2025-10-01
+DPC reference: DPC-2025-VC-017
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Slack Thread — #security-compliance — 2025-10-03
+────────────────────────────────────────────────────────────────────────────────
+
+Channel: #security-compliance
+Date: 2025-10-03
+Thread span: 14:20 to 16:05 UTC (11 messages)
+
+Participants:
+  - emarchetti (Elena Marchetti, Data Protection Officer)
+  - mtran (Marcus Tran, Security Lead)
+  - kjohanssen (Kai Johannsen, QA Performance Engineering)
+  - nosei (Nathan Osei, Internal Audit)
+
+--- Thread ---
+
+[14:20 UTC] emarchetti:
+DPIA-2025-017 is moving. Marcus, can you review the tech safeguards section by EOW? Specifically the pseudonymization approach and the re-identification risk.
+
+[14:24 UTC] emarchetti:
+The browsing-history-collector data flow diagram is in Confluence at Legal/DPIA/2025-017/data-flow-v2.pdf. I've also attached the data mapping spreadsheet showing all fields collected and their classification.
+
+[14:28 UTC] mtran:
+Looked at it. SHA-256 with daily salt is fine for pseudonymization. How often does the salt rotate? If it's daily, the linkability window is 24h which is reasonable.
+
+[14:31 UTC] mtran:
+One concern — the salt is stored in Vault, which is good, but make sure the browsing-history-collector only has access to today's salt, not historical salts. If an attacker gets access to the collector and all historical salts, they can link browsing sessions across days.
+
+[14:34 UTC] emarchetti:
+Good point. I'll check with the engineering team on the Vault policy. The intent is that only the current day's salt is accessible to the collector process.
+
+[14:37 UTC] emarchetti:
+Also — Legal is still deliberating on legitimate interest versus consent. If we go with consent, we need a consent management UI component. Product team estimates 2 weeks for that. If legitimate interest, we just need the balancing test documented and approved.
+
+[14:42 UTC] kjohanssen:
+FYI the checkout load test post-mortem is finalized. Cart-service memory bug is filed. If anyone needs the report for compliance evidence, it's in Confluence under QA/LoadTests/2025-Q3.
+
+[14:45 UTC] kjohanssen:
+The load test also generated some good data for our capacity planning evidence for SOC 2 CC7. We can demonstrate that the platform handles 12,000 concurrent users with sub-second p99 latency. Happy to put together an evidence summary if Nathan needs it.
+
+[14:50 UTC] nosei:
+SOC 2 update — we're at 89% evidence collected. Remaining 11% is mostly CC7 (system operations) and CC8 (change management). On track for auditor arrival Oct 6.
+
+[14:54 UTC] nosei:
+Kai, yes please — a one-page summary of the load test results would be great for CC7 evidence. Can you include the database failover test from the August incident too? That covers our DR testing evidence.
+
+[15:02 UTC] mtran:
+@nosei reminder — the segmentation test report from Rafael just came in. One low finding on ICMP leak from staging to prod. Fix is scheduled for next Tuesday maintenance window. I'll have it closed before the auditors arrive.
+
+[16:05 UTC] nosei:
+Thanks Marcus. I'll add the segmentation report to the CC6.6 evidence. Let me know when the ICMP rule is removed so I can document the remediation.
+
+--- Thread Metadata ---
+
+Total messages in thread: 11
+Time span: 14:20 to 16:05 UTC
+Salt rotation: daily at 00:00 UTC per browsing-history-collector config
+SOC 2 evidence vault: 258/290 artifacts collected (89%)
+Auditor firm arrival: 2025-10-06 (3 days from this thread)
+ICMP fix: CHG-2025-5489 scheduled for 2025-10-07 maintenance window
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX A: HTTP Log Excerpts — Segmentation Test Probe Traffic
+────────────────────────────────────────────────────────────────────────────────
+
+Source: fw-core-01 traffic log (Palo Alto PA-5260)
+Date: 2025-09-30 through 2025-10-02
+
+--- Corporate to CDE Probes (All Blocked) ---
+
+[2025-09-30 09:14:22.104 UTC] TRAFFIC
+  Action: deny
+  Rule: implicit-deny-corp-to-cde
+  Source: 10.10.15.42 (ironclad-test-vm-corp)
+  Destination: 10.42.20.1 (vault-kms-prod)
+  Protocol: TCP
+  Dest Port: 443
+  Application: ssl
+  Bytes sent: 0
+  Session ID: 847291
+
+[2025-09-30 09:14:25.201 UTC] TRAFFIC
+  Action: deny
+  Rule: implicit-deny-corp-to-cde
+  Source: 10.10.15.42
+  Destination: 10.42.20.5 (tokenization-service)
+  Protocol: TCP
+  Dest Port: 8200
+  Bytes sent: 0
+  Session ID: 847292
+
+[2025-09-30 09:14:28.301 UTC] TRAFFIC
+  Action: deny
+  Rule: implicit-deny-corp-to-cde
+  Source: 10.10.15.42
+  Destination: 10.42.20.10 (payment-db-primary)
+  Protocol: TCP
+  Dest Port: 5432
+  Bytes sent: 0
+  Session ID: 847293
+
+[2025-09-30 09:14:31.401 UTC] TRAFFIC
+  Action: deny
+  Rule: implicit-deny-corp-to-cde
+  Source: 10.10.15.42
+  Destination: 10.42.20.1
+  Protocol: ICMP
+  ICMP Type: 8 (echo request)
+  Bytes sent: 0
+  Session ID: 847294
+
+--- Staging to Production Probes (ICMP Leak) ---
+
+[2025-10-01 10:22:14.501 UTC] TRAFFIC
+  Action: allow
+  Rule: rule-482 (TEMP: allow ICMP staging-to-prod)
+  Source: 10.43.0.15 (staging node-03)
+  Destination: 10.42.0.8 (prod node-02)
+  Protocol: ICMP
+  ICMP Type: 8 (echo request)
+  Bytes sent: 84
+  Bytes received: 84
+  Session ID: 851104
+
+[2025-10-01 10:22:14.901 UTC] TRAFFIC
+  Action: allow
+  Rule: rule-482
+  Source: 10.43.0.15
+  Destination: 10.42.0.8
+  Protocol: ICMP
+  ICMP Type: 0 (echo reply)
+  Bytes received: 84
+  Session ID: 851104
+
+[2025-10-01 10:22:18.201 UTC] TRAFFIC
+  Action: deny
+  Rule: implicit-deny-staging-to-prod
+  Source: 10.43.0.15
+  Destination: 10.42.0.8
+  Protocol: TCP
+  Dest Port: 22
+  Bytes sent: 0
+  Session ID: 851105
+  Note: TCP probe on same path — blocked. Only ICMP allowed by rule-482.
+
+[2025-10-01 10:22:21.301 UTC] TRAFFIC
+  Action: deny
+  Rule: implicit-deny-staging-to-prod
+  Source: 10.43.0.15
+  Destination: 10.42.0.8
+  Protocol: TCP
+  Dest Port: 443
+  Bytes sent: 0
+  Session ID: 851106
+
+[2025-10-01 10:22:24.401 UTC] TRAFFIC
+  Action: deny
+  Rule: implicit-deny-staging-to-prod
+  Source: 10.43.0.15
+  Destination: 10.42.0.8
+  Protocol: TCP
+  Dest Port: 8080
+  Bytes sent: 0
+  Session ID: 851107
+
+[2025-10-01 10:23:01.101 UTC] TRAFFIC
+  Action: allow
+  Rule: rule-482
+  Source: 10.43.0.22 (staging node-05)
+  Destination: 10.42.0.14 (prod node-05)
+  Protocol: ICMP
+  ICMP Type: 8 (echo request)
+  Bytes sent: 84
+  Session ID: 851201
+
+--- Staging to CDE Probes (All Blocked) ---
+
+[2025-10-01 11:00:01.201 UTC] TRAFFIC
+  Action: deny
+  Rule: explicit-deny-staging-to-cde
+  Source: 10.43.0.15
+  Destination: 10.42.20.1
+  Protocol: TCP
+  Dest Port: 443
+  Bytes sent: 0
+  Session ID: 852001
+
+[2025-10-01 11:00:04.301 UTC] TRAFFIC
+  Action: deny
+  Rule: explicit-deny-staging-to-cde
+  Source: 10.43.0.15
+  Destination: 10.42.20.5
+  Protocol: ICMP
+  ICMP Type: 8
+  Bytes sent: 0
+  Session ID: 852002
+  Note: ICMP also blocked to CDE, even though rule-482 allows ICMP to production. CDE has explicit deny rule that takes precedence.
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX B: Firewall Rule Remediation — CHG-2025-5489
+────────────────────────────────────────────────────────────────────────────────
+
+ServiceNow Change Request: CHG-2025-5489
+Type: Standard
+State: Approved — Scheduled
+Priority: P3
+Risk: LOW
+
+Requested by: Marcus Tran (Security Lead)
+Approved by: Carla Mendes (DevOps Manager)
+Scheduled: 2025-10-07 02:00 UTC (maintenance window)
+
+Description:
+  Remove temporary ICMP allow rule (rule-482) from fw-core-01.
+  Rule was added 2025-05-14 during network migration troubleshooting (CHG-2025-3891).
+  Rule allows ICMP from staging segment (10.43.0.0/20) to production segment (10.42.0.0/20).
+  Rule was intended to be temporary but was not removed after migration completed.
+  Identified during internal network segmentation test ISP-VC-2025-SEG-0043, finding VC-SEG-001.
+
+Change details:
+  Before:
+    Rule 482:
+      action: allow
+      source-zone: staging
+      destination-zone: production
+      source-address: 10.43.0.0/20
+      destination-address: 10.42.0.0/20
+      service: icmp
+      description: "TEMP: allow ICMP for connectivity testing staging-to-prod"
+      created: 2025-05-14
+      created-by: tom.nguyen
+
+  After:
+    Rule 482: DELETED
+
+Rollback plan:
+  If ICMP connectivity is needed between staging and production for any reason after removal,
+  re-add rule-482 with expiration date and formal justification.
+  Rollback command: set rulebase security rules rule-482 <original-config>
+
+Verification:
+  After rule removal, run: ping -c 3 10.42.0.8 -I 10.43.0.15
+  Expected result: 100% packet loss (ICMP blocked)
+  Run: ping -c 3 10.42.0.14 -I 10.43.0.22
+  Expected result: 100% packet loss
+
+Post-change notification:
+  Notify Marcus Tran (security), Rafael Vega (Ironclad), Nathan Osei (audit)
+  Update audit evidence AV-2025-SOC2-CC6-020 with remediation confirmation
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX C: DPIA — browsing-history-collector Data Flow Diagram (Text)
+────────────────────────────────────────────────────────────────────────────────
+
+Data Flow: Enhanced Personalization v2
+
+[EU User Browser]
+     |
+     | page-view event (product URL, timestamp, session duration)
+     v
+[CDN / Load Balancer — EU-WEST-1]
+     |
+     | stripped of IP address at load balancer
+     v
+[browsing-history-collector v1.2.0 — EU-WEST-1]
+     |
+     | pseudonymize: SHA-256(user_id + daily_salt) → pseudonymized_user_token
+     | drop raw user_id from event
+     |
+     |--- Store event → [eu-browsing-db-prod — PostgreSQL — EU-WEST-1]
+     |                     Retention: 60 days (proposed)
+     |                     Automated deletion: daily CRON at 02:00 UTC
+     |
+     |--- Publish to → [kafka-eu-west-1 / topic: browsing-events-eu]
+     |                   Retention: 7 days
+     v
+[svc-recommendation-engine — EU-WEST-1 instance]
+     |
+     | consume browsing events
+     | build user preference model (collaborative filtering)
+     | combine with purchase history (existing)
+     |
+     | serve personalized recommendations
+     v
+[API: /api/v2/recommendations/personalized]
+     |
+     v
+[EU User Browser — product recommendation widget]
+
+Cross-border transfers: NONE
+  All components deployed in EU-WEST-1.
+  No data replication to other regions.
+  API requests from EU users routed to EU-WEST-1 by GeoDNS.
+
+Data elements at each stage:
+  Stage 1 (browser → collector): product_page_url, timestamp, session_duration_seconds, user_id (raw, in authentication context)
+  Stage 2 (collector processing): user_id replaced with pseudonymized_user_token, IP address dropped
+  Stage 3 (collector → database/kafka): product_page_url, timestamp, session_duration_seconds, pseudonymized_user_token
+  Stage 4 (recommendation engine): aggregated browsing patterns per pseudonymized_user_token
+  Stage 5 (API response): list of recommended product IDs, no browsing data returned to client
+
+Re-identification risk:
+  Requires: access to user-profile-service mapping table (user_id → pseudonymized_user_token)
+  Mapping table access: 3 engineers (Rachel Kim, Tom Nguyen, David Okafor)
+  All access to mapping table logged in Splunk with alert on query patterns
+  Estimated re-identification difficulty: HIGH (requires compromising both Vault daily salt AND user-profile-service database access)
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX D: Nmap Scan Results — Full Segmentation Test Output (Excerpts)
+────────────────────────────────────────────────────────────────────────────────
+
+Source: Ironclad Security Partners engagement ISP-VC-2025-SEG-0043
+Scanner: nmap 7.94 running on ironclad-test-vm-corp (10.10.15.42) and ironclad-test-vm-staging (10.43.0.99)
+Date: 2025-09-30 through 2025-10-02
+
+--- Scan 1: Corporate LAN to CDE (Full Port Scan) ---
+
+Command: nmap -sS -sU -p- -T4 --max-retries 2 --host-timeout 120s 10.42.20.0/22 -oX /results/corp-to-cde-full.xml
+
+Starting Nmap 7.94 ( https://nmap.org ) at 2025-09-30 09:14 UTC
+Nmap scan report for 10.42.20.1 (vault-kms-prod)
+Host is up (latency unknown).
+All 65535 TCP ports are filtered
+All 65535 UDP ports are open|filtered
+Note: Host appears to be behind a firewall that drops all probes silently.
+
+Nmap scan report for 10.42.20.5 (tokenization-service)
+Host is up (latency unknown).
+All 65535 TCP ports are filtered
+All 65535 UDP ports are open|filtered
+
+Nmap scan report for 10.42.20.10 (payment-db-primary)
+Host is up (latency unknown).
+All 65535 TCP ports are filtered
+All 65535 UDP ports are open|filtered
+
+[... 20 additional CDE hosts, all filtered ...]
+
+Nmap done: 1024 IP addresses (23 hosts up) scanned in 2847.12 seconds
+Summary: 0 open TCP ports, 0 open UDP ports across all CDE hosts from corporate LAN.
+Result: PASS — complete network isolation confirmed.
+
+--- Scan 2: Staging to Production (Targeted Port Scan) ---
+
+Command: nmap -sS -p 22,80,443,3306,5432,6379,8080,8200,8443,9090 -T4 10.42.0.0/20 --source 10.43.0.15 -oX /results/staging-to-prod-targeted.xml
+
+Starting Nmap 7.94 at 2025-10-01 10:22 UTC
+
+Nmap scan report for 10.42.0.1 (prod-ingress-01)
+All 10 scanned ports are filtered
+
+Nmap scan report for 10.42.0.2 (prod-ingress-02)
+All 10 scanned ports are filtered
+
+Nmap scan report for 10.42.0.8 (prod-node-02)
+All 10 scanned ports are filtered
+Note: ICMP echo request to this host SUCCEEDS (finding VC-SEG-001, path 1)
+
+Nmap scan report for 10.42.0.14 (prod-node-05)
+All 10 scanned ports are filtered
+Note: ICMP echo request to this host SUCCEEDS (finding VC-SEG-001, path 2)
+
+Nmap scan report for 10.42.0.15 (prod-node-06)
+All 10 scanned ports are filtered
+Note: ICMP echo request to this host FAILS (blocked) — ICMP leak is path-specific, not blanket
+
+[... 19 additional production nodes, all filtered, ICMP blocked ...]
+
+Nmap done: 4096 IP addresses (24 hosts up) scanned in 1241.78 seconds
+Summary: 0 open TCP ports across all production hosts from staging.
+ICMP reachable: 2 hosts (10.42.0.8, 10.42.0.14)
+Result: ADVISORY — TCP/UDP fully blocked, ICMP leak on 2 paths.
+
+--- Scan 3: Production to CDE (Allowlist Verification) ---
+
+Command: nmap -sS -p 8443,8200 10.42.20.0/22 --source 10.42.0.100 -oX /results/prod-to-cde-allowlist.xml
+
+Starting Nmap 7.94 at 2025-10-01 14:00 UTC
+
+Nmap scan report for 10.42.20.5 (tokenization-service)
+PORT     STATE SERVICE
+8443/tcp open  https-alt
+Note: Expected — payment-gateway (10.42.0.100) is allowed to reach tokenization-service on 8443
+
+Nmap scan report for 10.42.20.10 (vault-kms-prod)
+PORT     STATE SERVICE
+8200/tcp open  trivnet1
+Note: Expected — payment-gateway allowed to reach Vault API on 8200
+
+Nmap scan report for 10.42.20.11 (payment-db-primary)
+PORT     STATE SERVICE
+8443/tcp filtered
+8200/tcp filtered
+Note: Expected — payment-gateway not allowed to reach payment-db directly (must go through tokenization-service)
+
+Summary: Only expected allowlist paths are open. No unexpected paths.
+Result: PASS
+
+--- Metasploit Lateral Movement Attempts ---
+
+Test: Corporate LAN to CDE via Metasploit auxiliary scanners
+Date: 2025-10-02
+
+msf6 > use auxiliary/scanner/portscan/tcp
+msf6 auxiliary(scanner/portscan/tcp) > set RHOSTS 10.42.20.0/22
+msf6 auxiliary(scanner/portscan/tcp) > set PORTS 22,80,443,3306,5432,6379,8080,8200,8443,9090,27017
+msf6 auxiliary(scanner/portscan/tcp) > set INTERFACE eth0
+msf6 auxiliary(scanner/portscan/tcp) > set THREADS 50
+msf6 auxiliary(scanner/portscan/tcp) > run
+
+[*] Scanned 256 of 1024 hosts (25% complete)
+[*] Scanned 512 of 1024 hosts (50% complete)
+[*] Scanned 768 of 1024 hosts (75% complete)
+[*] Scanned 1024 of 1024 hosts (100% complete)
+[*] Auxiliary module execution completed
+
+Result: 0 open ports found. All connection attempts timed out or were refused.
+Duration: 847 seconds
+Conclusion: Complete network isolation between corporate LAN and CDE confirmed via Metasploit.
+
+msf6 > use auxiliary/scanner/smb/smb_version
+msf6 auxiliary(scanner/smb/smb_version) > set RHOSTS 10.42.20.0/22
+msf6 auxiliary(scanner/smb/smb_version) > run
+
+Result: 0 SMB services detected in CDE from corporate LAN.
+
+msf6 > use auxiliary/scanner/ssh/ssh_version
+msf6 auxiliary(scanner/ssh/ssh_version) > set RHOSTS 10.42.20.0/22
+msf6 auxiliary(scanner/ssh/ssh_version) > run
+
+Result: 0 SSH services detected in CDE from corporate LAN (SSH access via jump-host-prod only).
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX E: DPIA Risk Assessment Matrix (DPIA-2025-017)
+────────────────────────────────────────────────────────────────────────────────
+
+Risk ID | Risk Description                                  | Likelihood | Impact  | Inherent Risk | Mitigations                                    | Residual Risk
+--------|---------------------------------------------------|------------|---------|---------------|------------------------------------------------|--------------
+R-001   | Re-identification of pseudonymized users           | Low        | High    | Medium        | Daily salt rotation, 3-person access control    | Low
+R-002   | Browsing data used for purposes beyond recs        | Low        | Medium  | Low           | Purpose limitation in data processing agreement | Very Low
+R-003   | Data breach exposing browsing patterns              | Low        | Medium  | Low           | Encryption at rest (AES-256), TLS in transit    | Very Low
+R-004   | Excessive data retention beyond necessity           | Medium     | Low     | Low           | Automated 60-day deletion, retention monitoring | Very Low
+R-005   | Cross-border data transfer to non-EU region         | Very Low   | High    | Low           | All infra in EU-WEST-1, GeoDNS routing          | Very Low
+R-006   | Failure to honor data subject access requests       | Low        | High    | Medium        | DSAR endpoint in collector API, 24hr SLA         | Low
+R-007   | Insufficient legal basis for processing             | Medium     | High    | High          | LIA balancing test or consent mechanism          | Medium
+R-008   | Lack of user opt-out mechanism                      | Medium     | Medium  | Medium        | Opt-out flag in user-profile-service             | Low
+
+Overall DPIA risk assessment: MEDIUM (pending Legal decision on lawful basis)
+If legitimate interest confirmed with balancing test: overall risk drops to LOW
+If explicit consent required: additional development needed for consent UI, risk drops to LOW after implementation
+
+Decision gate: Legal department approval required before feature launch
+Expected decision: 2025-10-10
+Feature launch earliest: 2025-10-20 (pending DPIA completion and engineering readiness)
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX F: Teleport Session Log — Jump Host Access Verification
+────────────────────────────────────────────────────────────────────────────────
+
+Source: Teleport audit log for jump-host-prod
+Date: 2025-10-01 (during segmentation test)
+
+Session 1: Rafael Vega (Ironclad Security Partners) — authorized access for testing
+
+  Session ID: teleport-sess-2025-10-01-0847
+  User: rafael.vega-ext@ironclad-security.com
+  Node: jump-host-prod (10.42.0.250)
+  Login as: pentest-user (restricted shell)
+  Start time: 2025-10-01 09:00:14 UTC
+  End time: 2025-10-01 09:47:22 UTC
+  Duration: 47 minutes 8 seconds
+  Authentication: Okta MFA (FIDO2 hardware key) + SSH certificate
+  Certificate validity: 2025-10-01 08:55:00 UTC to 2025-10-01 16:55:00 UTC (8 hours)
+  Session recorded: Yes
+  Recording size: 14.2 MB
+  Recording stored: s3://vc-teleport-recordings/2025/10/01/teleport-sess-2025-10-01-0847.tar.gz
+
+  Commands executed (from audit log):
+    09:00:22 — whoami → pentest-user
+    09:00:28 — uname -a → Linux jump-host-prod 5.15.0 x86_64
+    09:00:35 — ip addr show → 10.42.0.250/20 (production segment)
+    09:01:12 — nmap -sS -p 443 10.42.20.1 → filtered (CDE blocked from jump host)
+    09:01:45 — nmap -sS -p 8200 10.42.20.10 → filtered
+    09:02:18 — ping -c 1 10.42.20.1 → Destination unreachable
+    09:02:30 — ping -c 1 10.42.0.8 → 64 bytes from 10.42.0.8 (within same segment, expected)
+    [... additional probing commands ...]
+    09:47:15 — exit
+
+  Access verification results:
+    Jump host is in production segment (10.42.0.0/20)
+    Jump host cannot reach CDE directly (blocked by fw-core-01)
+    Jump host MFA requirement confirmed (tested by Rafael)
+    Session idle timeout tested: connection dropped after 15 minutes of no input (verified in separate test session)
+
+Session 2: Idle timeout test
+
+  Session ID: teleport-sess-2025-10-01-0892
+  User: rafael.vega-ext@ironclad-security.com
+  Start time: 2025-10-01 10:00:00 UTC
+  End time: 2025-10-01 10:15:03 UTC (disconnected by idle timeout)
+  Duration: 15 minutes 3 seconds
+  Last command: 10:00:05 — echo "idle timeout test"
+  Disconnect reason: idle_timeout (15 minutes)
+  Session recorded: Yes
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX G: Firewall Rule Audit Summary — fw-core-01 (Palo Alto PA-5260)
+────────────────────────────────────────────────────────────────────────────────
+
+Source: Firewall management console export
+Date: 2025-10-02 (during segmentation test engagement)
+Exported by: Rafael Vega (Ironclad Security Partners) with Marcus Tran supervision
+
+Total rules: 847
+Rule categories:
+  CDE isolation rules: 124 (14.6%)
+  Production segmentation rules: 187 (22.1%)
+  Staging segmentation rules: 94 (11.1%)
+  Corporate LAN rules: 156 (18.4%)
+  VPN and remote access rules: 78 (9.2%)
+  DNS and NTP infrastructure rules: 34 (4.0%)
+  Monitoring and logging rules: 42 (5.0%)
+  Temporary/troubleshooting rules: 12 (1.4%)
+  Default deny rules: 8 (0.9%)
+  Other/legacy rules: 112 (13.2%)
+
+Temporary rules audit:
+  12 temporary rules found in rule set.
+  Rules with expiration dates: 3 (expired, should have been removed)
+  Rules without expiration dates: 9 (including rule-482 ICMP leak)
+
+  Expired temporary rules (should be cleaned up):
+    Rule 391: "TEMP: allow HTTP from corp to staging-old" — expired 2025-04-30
+      Created: 2025-03-15
+      Purpose: Migration testing from old staging environment
+      Status: Old staging decommissioned 2025-05-01. Rule has no traffic for 5 months.
+      Recommendation: Remove in next maintenance window.
+
+    Rule 412: "TEMP: allow SNMP from monitoring-vm-02 to prod" — expired 2025-06-30
+      Created: 2025-05-20
+      Purpose: Monitoring migration from VM-based to Kubernetes-based monitoring
+      Status: VM-based monitoring decommissioned 2025-07-01. Rule has no traffic for 3 months.
+      Recommendation: Remove in next maintenance window.
+
+    Rule 427: "TEMP: allow MySQL from staging to dev-db" — expired 2025-07-15
+      Created: 2025-06-01
+      Purpose: Database migration testing
+      Status: Migration complete. Rule has no traffic for 2.5 months.
+      Recommendation: Remove in next maintenance window.
+
+  Active temporary rules without expiration (should have expiration added):
+    Rule 482: ICMP staging to production — to be removed per CHG-2025-5489
+    Rule 501: Allow HTTPS from CI/CD to staging artifact registry — legitimate but should have 90-day review
+    Rule 518: Allow SSH from security team VMs to staging — used for pentest engagements, should have engagement-based expiration
+    [... 6 additional rules ...]
+
+  Informational finding VC-SEG-002:
+    847 total rules is above the recommended threshold of 500 for operational manageability.
+    23 rules have zero traffic hits in the past 90 days.
+    Recommendation: Conduct comprehensive rule consolidation review.
+    Estimated effort: 2 days with network and security team collaboration.
+    Priority: Low (no security impact, operational improvement only).
+
+Last full rule review: 2025-08-15 by Marcus Tran and Tom Nguyen
+Next scheduled review: 2025-11-15 (quarterly)
+Review process: Export all rules, verify each has documented justification, check traffic hit counts, remove zero-hit rules older than 90 days.
+
+Rule change log (last 30 days):
+  2025-09-12: Rule 839 added — allow HTTPS from new monitoring agent to production Prometheus (CHG-2025-5201)
+  2025-09-18: Rule 841 modified — update source IP range for VPN concentrator (CHG-2025-5312)
+  2025-09-25: Rule 844 added — allow gRPC from new search-service replica to Elasticsearch cluster (CHG-2025-5401)
+  2025-10-02: No changes (test engagement is read-only)
+
+Hardware status:
+  Model: Palo Alto PA-5260
+  PAN-OS version: 11.1.2-h3
+  Uptime: 147 days (last reboot 2025-05-09 during firmware upgrade)
+  CPU utilization: 12% average, 34% peak
+  Memory utilization: 48%
+  Session count: 142,847 current / 4,000,000 max (3.6% utilization)
+  Throughput: 2.4 Gbps average / 20 Gbps capacity
+  HA status: Active-Passive pair with fw-core-02 (standby)
+  Last failover test: 2025-08-01 (successful, 4-second failover)
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX H: Runbook — Firewall Rule Removal Procedure
+────────────────────────────────────────────────────────────────────────────────
+
+Runbook: RB-NET-008 — Firewall Rule Removal from fw-core-01
+Author: Tom Nguyen (DevOps)
+Created: 2025-09-15
+Last Updated: 2025-10-02
+
+Prerequisites:
+  - Approved ServiceNow change request (Standard or Normal change type)
+  - Maintenance window confirmed (Tuesdays 02:00-04:00 UTC)
+  - Backup of current rule configuration taken and stored
+
+Procedure:
+  Step 1: Connect to fw-core-01 management interface
+    ssh admin@fw-mgmt.internal.vantage.com
+    (Requires Okta MFA + SSH certificate)
+
+  Step 2: Take configuration backup
+    request config save backup-before-chg-XXXX.xml
+    scp admin@fw-mgmt:/config/backup-before-chg-XXXX.xml /backup/fw-core-01/
+
+  Step 3: Verify current rule traffic stats
+    show rule-hit-count vsys vsys1 rule <rule-name>
+    If rule has active traffic in last 24 hours, STOP and verify with requestor.
+
+  Step 4: Delete the rule
+    configure
+    delete rulebase security rules <rule-name>
+    commit force description "CHG-XXXX: Remove rule <rule-name> per segmentation test finding"
+
+  Step 5: Verify rule is removed
+    show running security-policy | match <rule-name>
+    Expected: no output (rule not found)
+
+  Step 6: Verify no connectivity regression
+    Run predefined connectivity test suite from monitoring-vm:
+    /opt/scripts/fw-connectivity-test.sh --post-change
+    Expected: all required paths green, removed rule path shows "blocked"
+
+  Step 7: Update change request
+    Set CHG-XXXX state to "Implemented"
+    Attach before/after configuration diff
+    Attach connectivity test results
+
+Rollback:
+  If connectivity regression detected:
+    configure
+    load config partial from backup-before-chg-XXXX.xml from-xpath /config/devices/entry/vsys/entry/rulebase/security
+    commit force description "ROLLBACK CHG-XXXX: Restoring rule <rule-name>"
+  Immediately notify on-call network engineer and the original change requestor.
+
+================================================================================
+END OF DOCUMENT — 2025-10-03
+================================================================================

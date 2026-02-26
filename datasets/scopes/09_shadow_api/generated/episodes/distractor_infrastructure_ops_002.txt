@@ -1,0 +1,1046 @@
+================================================================================
+INFRASTRUCTURE OPERATIONS LOG — VANTAGE COMMERCE PLATFORM
+Date: 2025-09-14
+Cluster: prod-us-east-1
+Classification: Internal — Operations Team Only
+================================================================================
+
+--- SECTION 1: RUNBOOK EXECUTION — DB-MIG-042: POSTGRESQL MAJOR VERSION UPGRADE ---
+
+Timestamp: 2025-09-14T11:00:00Z
+Runbook: DB-MIG-042: PostgreSQL Major Version Upgrade
+Service: order-database
+Environment: production
+Author: jenna.liu
+Reviewer: carlos.mendez
+Status: Pre-Upgrade Phase (switchover scheduled 2025-09-16 03:00 UTC)
+
+TARGET INFRASTRUCTURE:
+
+  Primary Instance:
+    Identifier: orders-prod-primary
+    Instance Class: db.r6g.4xlarge
+    vCPU: 16
+    Memory: 128 GiB
+    Storage: 2 TiB gp3 (8000 IOPS provisioned, 500 MiB/s throughput)
+    Current Version: PostgreSQL 15.7
+    Target Version: PostgreSQL 16.4
+    Engine: Aurora PostgreSQL (cluster mode)
+    Multi-AZ: Enabled
+    Encryption: AES-256 (KMS key arn:aws:kms:us-east-1:123456789012:key/orders-rds-key)
+    Parameter Group: vantage-pg15-production
+    Maintenance Window: Sun 03:00-05:00 UTC
+
+  Read Replicas:
+    Replica 1: orders-prod-read-east
+      Instance Class: db.r6g.2xlarge
+      Region: us-east-1
+      Replication Lag (avg): 8ms
+      Purpose: Application read traffic (order history, search)
+      Connections (avg): 120
+
+    Replica 2: orders-prod-read-west
+      Instance Class: db.r6g.2xlarge
+      Region: us-west-2
+      Replication Lag (avg): 42ms (cross-region)
+      Purpose: Analytics and reporting queries
+      Connections (avg): 35
+
+  Blue-Green Deployment:
+    Managed By: AWS RDS Blue/Green Deployments
+    Blue Environment: orders-prod-primary (PostgreSQL 15.7)
+    Green Environment: orders-prod-green-primary (PostgreSQL 16.4)
+    Replication Method: Logical replication (pglogical 2.4.4)
+    Replication Lag: Steady at 12ms
+    Green Status: Synchronized, accepting read-only validation queries
+
+PRE-UPGRADE VALIDATION STEPS:
+
+  Step 1: pg_upgrade Compatibility Check
+    Executed On: staging-orders-clone (exact replica of production)
+    Command: pg_upgrade --check --old-datadir /data/pg15 --new-datadir /data/pg16
+    Result: PASSED — 0 incompatible objects found
+    Duration: 4 minutes 22 seconds
+    Output Summary:
+      - Checking cluster versions: OK
+      - Checking database user is the install user: OK
+      - Checking database connection settings: OK
+      - Checking for prepared transactions: OK (none found)
+      - Checking for system-defined composite types in user tables: OK
+      - Checking for reg* data types in user tables: OK
+      - Checking for contrib/isn with bigint-passing mismatch: OK
+      - Checking for incompatible polymorphic functions: OK
+      - Checking for user-defined encoding conversions: OK
+      - Checking for user-defined postfix operators: OK
+      - Checking for presence of required libraries: OK
+      - Checking for tables WITH OIDS: OK (none found)
+
+  Step 2: Extension Compatibility Audit
+    Extensions Verified Compatible with PostgreSQL 16:
+      1. postgis 3.4.2 — spatial queries for shipping zone calculations
+         Test: SELECT PostGIS_Full_Version() — OK on green environment
+      2. pg_stat_statements 1.10 — query performance monitoring
+         Test: SELECT * FROM pg_stat_statements LIMIT 1 — OK
+      3. pgcrypto 1.3 — encryption for PII fields
+         Test: SELECT crypt('test', gen_salt('bf')) — OK
+      4. uuid-ossp 1.1 — UUID generation for order IDs
+         Test: SELECT uuid_generate_v4() — OK
+      5. pg_trgm 1.6 — trigram similarity for fuzzy search
+         Test: SELECT similarity('hello', 'helo') — OK (returns 0.5)
+      6. btree_gist 1.7 — GiST index support for exclusion constraints
+         Test: Existing exclusion constraint on order_time_slots validated
+      7. hstore 1.8 — key-value storage for order metadata
+         Test: SELECT 'key=>value'::hstore — OK
+      8. pglogical 2.4.4 — logical replication for blue-green deployment
+         Test: Active subscription replicating at 12ms lag — OK
+
+  Step 3: Query Performance Validation on Green Environment
+    Methodology: Top 50 production queries by total execution time replayed against green
+    Tool: pgbench + custom query replay harness
+    Duration: 2 hours 15 minutes
+
+    Results Summary:
+      Queries with No Change: 44
+      Queries with Improvement: 3
+        - order_history_range_scan: 14% faster (PG16 incremental sort optimization)
+        - product_search_trigram: 8% faster (improved pg_trgm internals)
+        - monthly_revenue_aggregate: 11% faster (parallel aggregate improvements)
+      Queries with Regression: 0
+      Queries with Minor Variance (<5%): 3
+
+    Detailed Query Comparison (top 10 by execution time):
+
+      Query 1: order_history_by_customer
+        PG 15.7: avg 2.4ms, p99 8.1ms
+        PG 16.4: avg 2.3ms, p99 7.8ms
+        Plan: Index Scan on idx_orders_customer_id — unchanged
+
+      Query 2: order_search_fulltext
+        PG 15.7: avg 12.1ms, p99 34.2ms
+        PG 16.4: avg 11.8ms, p99 33.1ms
+        Plan: GIN Index Scan on idx_orders_fulltext — unchanged
+
+      Query 3: order_history_range_scan
+        PG 15.7: avg 18.4ms, p99 42.0ms
+        PG 16.4: avg 15.8ms, p99 36.1ms
+        Plan: Index Scan with Incremental Sort — improved in PG16
+        Note: This is one of the three queries that improved due to PG16 incremental sort optimization
+
+      Query 4: product_inventory_join
+        PG 15.7: avg 8.2ms, p99 22.4ms
+        PG 16.4: avg 8.1ms, p99 21.9ms
+        Plan: Hash Join — unchanged
+
+      Query 5: monthly_revenue_aggregate
+        PG 15.7: avg 340ms, p99 890ms
+        PG 16.4: avg 302ms, p99 780ms
+        Plan: Parallel Aggregate with 4 workers — improved in PG16
+
+    EXPLAIN ANALYZE Comparison (sample):
+      Query: SELECT o.id, o.total, o.created_at FROM orders o
+             WHERE o.customer_id = $1 AND o.created_at > $2
+             ORDER BY o.created_at DESC LIMIT 50
+
+      PG 15.7 Plan:
+        Limit (cost=0.56..124.33 rows=50 width=28) (actual time=0.082..2.341 rows=50 loops=1)
+          -> Index Scan Backward using idx_orders_customer_created on orders o
+               Index Cond: ((customer_id = 'cust_84721') AND (created_at > '2025-06-01'))
+               Rows Removed by Filter: 0
+        Planning Time: 0.184 ms
+        Execution Time: 2.412 ms
+
+      PG 16.4 Plan:
+        Limit (cost=0.56..118.21 rows=50 width=28) (actual time=0.078..2.298 rows=50 loops=1)
+          -> Index Scan Backward using idx_orders_customer_created on orders o
+               Index Cond: ((customer_id = 'cust_84721') AND (created_at > '2025-06-01'))
+               Rows Removed by Filter: 0
+        Planning Time: 0.171 ms
+        Execution Time: 2.362 ms
+
+RUNBOOK NOTE: @jenna.liu: Switchover window confirmed for 2025-09-16 03:00 UTC. order-service team acknowledged 5-minute read-only window. Rollback plan: revert DNS CNAME to blue endpoint within 30 seconds.
+
+REPLICATION STATUS:
+
+  Logical Replication Configuration:
+    Publisher: orders-prod-primary (Blue, PG 15.7)
+    Subscriber: orders-prod-green-primary (Green, PG 16.4)
+    Replication Slot: pglogical_blue_green_slot
+    WAL Retained: 890 MB during test pause (3-hour pause window for validation)
+    Current WAL Generation Rate: 2.4 GB/hr
+    Replication Lag: 12ms (steady state)
+    Tables Replicated: 47 (all user tables)
+    Sequences Synchronized: 23
+    Large Objects: 0 (not used in this database)
+
+  Connection Pool Configuration (PgBouncer):
+    Max Client Connections: 600
+    Default Pool Size: 40
+    Reserve Pool Size: 10
+    Reserve Pool Timeout: 5 seconds
+    Server Idle Timeout: 600 seconds
+    Server Lifetime: 3600 seconds
+    Server Login Retry: 1 second
+    Stats Period: 60 seconds
+    Pool Mode: transaction
+    Auth Type: scram-sha-256
+    Active Connections (current): 284
+    Waiting Connections (current): 0
+    Server Connections (current): 40
+
+DATABASE METRICS (current state):
+
+  Database Size: 1.4 TiB
+  Table Count: 47
+  Index Count: 142
+  Largest Tables:
+    1. orders: 420 GB, 189M rows, 34 indexes
+    2. order_items: 280 GB, 612M rows, 18 indexes
+    3. order_events: 180 GB, 1.2B rows, 12 indexes (partitioned by month)
+    4. shipping_records: 95 GB, 84M rows, 14 indexes
+    5. payment_transactions: 78 GB, 67M rows, 16 indexes
+  Vacuum Status: autovacuum running, no tables with >10% dead tuples
+  Bloat Estimate: 3.2% average across all tables (healthy)
+  Checkpoint Interval: 5 minutes
+  WAL Segment Size: 16 MB
+
+--- SECTION 2: PAGERDUTY INCIDENT — PD-2025-09-14-0042 ---
+
+Incident ID: PD-2025-09-14-0042
+Timestamp: 2025-09-14T03:18:00Z
+Service: payment-gateway
+Environment: production
+Severity: P3
+Status: RESOLVED
+Resolved At: 2025-09-14T03:34:00Z
+Duration: 16 minutes
+Customer Impact: None
+
+ON-CALL ROTATION:
+
+  Primary: @samira.hassan (Platform SRE)
+  Secondary: @alex.greenfield (Search Platform)
+  Escalation Manager: @drew.park (Platform Engineering Lead)
+  Notification Time: 03:18:12Z (PagerDuty push + SMS)
+  Acknowledgment Time: 03:19:01Z (49 seconds)
+
+AFFECTED INFRASTRUCTURE:
+
+  Service: payment-gateway
+  Namespace: payments-prod
+  Replicas: 6
+  Pod Distribution:
+    us-east-1a: 2 pods (payment-gateway-7a8b9c-x2k4m, payment-gateway-7a8b9c-y3l5n)
+    us-east-1b: 2 pods (payment-gateway-7a8b9c-z4m6p, payment-gateway-7a8b9c-a5n7q)
+    us-east-1c: 2 pods (payment-gateway-7a8b9c-b6p8r, payment-gateway-7a8b9c-c7q9s)
+  Load Balancer: NLB nlb-payments-prod (arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/net/nlb-payments-prod/abc123def456)
+  Health Check: TCP port 8443, interval 10s, healthy threshold 3, unhealthy threshold 2
+
+TIMELINE:
+
+  [03:18:00Z] NLB health checks failed for 2 of 6 targets
+    Unhealthy Targets:
+      - payment-gateway-7a8b9c-z4m6p (ip-10-42-11-73, us-east-1b) — TCP health check timeout
+      - payment-gateway-7a8b9c-a5n7q (ip-10-42-11-73, us-east-1b) — TCP health check timeout
+    Healthy Targets: 4 (in us-east-1a and us-east-1c)
+    NLB Action: Cross-zone load balancing automatically shifted traffic to 4 healthy targets
+    Throughput During Incident: 1,240 TPS (maintained, no degradation)
+
+  [03:18:12Z] PagerDuty alert triggered
+    Alert: "payment-gateway: 2 unhealthy NLB targets"
+    Routing: Platform SRE on-call
+    Urgency: High (P3 auto-escalation policy: 15 minutes to acknowledge)
+
+  [03:19:01Z] Acknowledged by @samira.hassan
+    Initial Assessment: Both unhealthy pods on same node ip-10-42-11-73
+
+  [03:19:30Z] Investigation started
+    Command: kubectl describe node ip-10-42-11-73
+    Finding: Node condition Ready=False, Reason=PLEG not healthy
+    PLEG (Pod Lifecycle Event Generator) not responding for 6 minutes
+    Kubelet last heartbeat: 03:12:44Z (6+ minutes stale)
+
+  [03:20:15Z] Root cause identified
+    Issue: Container runtime deadlock in containerd
+    containerd version: 1.7.18
+    Known Issue: containerd/containerd#9847 — race condition in container state machine under high pod churn
+    Node had processed 14 pod lifecycle events in preceding 10 minutes (batch job completions)
+
+  [03:21:00Z] Mitigation decision
+    Option A: Restart containerd service — risk of pod disruption
+    Option B: Reboot node via SSM — clean recovery, pods reschedule
+    Decision: Option B (node reboot via SSM)
+    Reason: containerd restart may not clear the deadlock state; full reboot is deterministic
+
+  [03:27:00Z] Node ip-10-42-11-73 rebooted via SSM
+    SSM Command ID: cmd-0a1b2c3d4e5f6789a
+    Command: "sudo reboot"
+    Execution Status: Success
+    Node went NotReady at 03:27:04Z
+
+  [03:29:18Z] Node came back online
+    Kubelet started: 03:29:18Z
+    Node Ready: 03:29:42Z (24 seconds from boot to Ready)
+    containerd version post-reboot: 1.7.18 (same — upgrade planned)
+
+  [03:30:00Z] Pods rescheduled
+    payment-gateway-7a8b9c-z4m6p: Running at 03:30:12Z
+    payment-gateway-7a8b9c-a5n7q: Running at 03:30:18Z
+    Both pods passed readiness probes within 15 seconds
+
+  [03:34:00Z] All 6 NLB targets healthy
+    Health check recovery: 3 consecutive successful checks (30 seconds)
+    Incident resolved
+
+IMPACT ASSESSMENT:
+
+  Duration: 16 minutes
+  Customer Impact: None
+  Reason: NLB cross-zone load balancing maintained throughput at 1,240 TPS
+  Error Rate During Incident: 0.00% (all requests served by healthy targets)
+  Latency Impact: p50 unchanged at 45ms, p99 from 120ms to 140ms (4 targets instead of 6)
+  Failed Transactions: 0
+  Revenue Impact: $0
+
+POST-INCIDENT ACTIONS:
+
+  Action Item 1: Upgrade containerd to 1.7.20 on all nodes
+    Owner: @drew.park
+    Due: Next maintenance window (2025-09-22)
+    Jira: PLAT-4901
+    Notes: v1.7.20 includes fix for race condition (containerd/containerd#9847)
+    Risk: Low — containerd upgrade requires node drain and reboot
+
+  Action Item 2: Add PLEG health monitoring to Grafana dashboard
+    Owner: @samira.hassan
+    Due: 2025-09-18
+    Jira: PLAT-4902
+    Notes: Monitor kubelet_pleg_relist_duration_seconds and kubelet_pleg_last_seen_seconds
+
+  Action Item 3: Review NLB health check configuration
+    Owner: @ravi.shankar
+    Due: 2025-09-16
+    Jira: PLAT-4903
+    Notes: Current unhealthy threshold is 2 (20 seconds). Consider whether 3 (30 seconds) would reduce false positives without impacting detection time.
+
+--- SLACK TRANSCRIPT: #incidents ---
+
+Timestamp Range: 2025-09-14T03:18:00Z — 2025-09-14T03:40:00Z
+Channel: #incidents
+
+[03:18:15] @pagerduty-bot: :rotating_light: PD-2025-09-14-0042 | payment-gateway | P3 | 2 unhealthy NLB targets | Assigned: @samira.hassan
+[03:19:03] @samira.hassan: ack. looking at it now. two targets down in us-east-1b
+[03:19:45] @samira.hassan: both pods on same node ip-10-42-11-73. node is NotReady — kubelet hasn't reported in 6 minutes
+[03:20:20] @samira.hassan: payment-gateway P3 — two targets down on nlb health check. Traced to single node kubelet issue, not application. Rebooting node now.
+[03:20:45] @alex.greenfield: need help? I can check if any other services are affected on that node
+[03:21:10] @samira.hassan: yeah please check. I see 8 other pods on that node besides the two payment ones
+[03:21:42] @alex.greenfield: checking... catalog-search has 2 pods there, notification-service has 1, batch-processor has 3, daemonsets have 4. catalog-search and notification have enough replicas elsewhere so no user impact
+[03:22:15] @samira.hassan: good. Sending SSM reboot command now. PLEG deadlock — containerd race condition, known issue with 1.7.18
+[03:27:08] @samira.hassan: node rebooting. Should be back in 2-3 minutes
+[03:29:50] @samira.hassan: node is back, kubelet reporting Ready. Pods are scheduling now
+[03:30:25] @samira.hassan: all payment-gateway pods running. Waiting for NLB health checks to recover
+[03:34:10] @samira.hassan: Resolved. Node back, all payment pods healthy. No customer-facing impact — NLB drained cleanly. RCA: PLEG not responding for 6m due to container runtime deadlock.
+[03:34:35] @drew.park: thanks samira. Quick resolution. Let's get containerd 1.7.20 on the roadmap for next maintenance window
+[03:35:01] @samira.hassan: already filed PLAT-4901. Will add it to the next sprint planning
+[03:35:22] @alex.greenfield: all other services on that node also recovered. No lingering issues
+[03:36:45] @samira.hassan: closing the incident. Full timeline documented in PagerDuty. Post-incident review scheduled for Wednesday
+
+--- SECTION 3: GRAFANA ALERT — CERTIFICATE EXPIRY WARNING ---
+
+Timestamp: 2025-09-14T18:45:00Z
+Alert Name: CertificateExpiryWarning
+Alert UID: grafana-alert-cert-8b3d2e
+Alert Rule Group: security-certificates
+Environment: production
+Severity: WARNING
+Status: RESOLVED (automated renewal completed)
+Duration: 7 minutes (alert to resolution)
+
+ALERT CONFIGURATION:
+
+  Datasource: Prometheus (prometheus-prod)
+  Expression: |
+    certmanager_certificate_expiration_timestamp_seconds -
+    time() < 30 * 24 * 3600
+  Evaluation Interval: 1 hour
+  For Duration: 0 (immediate)
+  Labels:
+    severity: warning
+    team: security-ops
+    automation: cert-manager-autorenew
+  Annotations:
+    summary: "Certificate {{ $labels.name }} expires in {{ $value | humanizeDuration }}"
+    runbook_url: "https://runbooks.vantage.internal/cert-expiry"
+
+CERTIFICATE DETAILS:
+
+  Certificate Manager: cert-manager v1.15.1
+  Namespace: cert-manager
+  Issuer: letsencrypt-prod (ClusterIssuer)
+  ACME Server: https://acme-v02.api.letsencrypt.org/directory
+
+  Expiring Certificate:
+    Name: vantage-api-wildcard
+    DNS Names: *.api.vantagecommerce.com, api.vantagecommerce.com
+    Issuer: Let's Encrypt Authority X3
+    Not Before: 2025-07-16T00:00:00Z
+    Not After: 2025-10-14T00:00:00Z
+    Serial Number: 04:8A:2B:3C:4D:5E:6F:7A:8B:9C:0D:1E:2F
+    Key Algorithm: RSA 2048
+    Secret Name: tls-vantage-api-wildcard
+    Namespaces Using Secret: api-gateway, payments-prod, orders-prod, catalog-prod
+
+RENEWAL PROCESS:
+
+  [18:45:00Z] cert-manager detected certificate expiring in 30 days
+    Certificate Readiness: Ready=True → Ready=False (renewal needed)
+    Order created: Order/vantage-api-wildcard-renewal-28471
+
+  [18:45:12Z] ACME DNS-01 challenge initiated
+    Challenge Type: DNS-01 (wildcard certificates require DNS-01)
+    DNS Provider: Route 53
+    Zone: api.vantagecommerce.com (hosted zone Z1A2B3C4D5E6F7)
+    TXT Record: _acme-challenge.api.vantagecommerce.com
+    TXT Value: Rg9h0jKlMnOpQrStUvWxYz1234567890AbCdEfGh
+    Record TTL: 60 seconds
+    Propagation Wait: 90 seconds
+
+  [18:47:02Z] DNS-01 challenge verified by Let's Encrypt
+    Verification Status: Valid
+    Challenge cleanup: TXT record removed from Route 53
+
+  [18:47:15Z] Certificate order fulfilled
+    New Certificate Issued: 2025-09-14T18:47:15Z
+    New Expiration: 2025-12-13T18:47:15Z (90-day validity)
+    Certificate Chain: End-entity → R3 → ISRG Root X1
+    OCSP Stapling: Enabled
+
+  [18:47:20Z] Secret tls-vantage-api-wildcard updated
+    Namespaces Updated:
+      1. api-gateway — secret version incremented, resourceVersion: 894271
+      2. payments-prod — secret version incremented, resourceVersion: 894273
+      3. orders-prod — secret version incremented, resourceVersion: 894275
+      4. catalog-prod — secret version incremented, resourceVersion: 894277
+    Update Method: cert-manager secretTemplate with cross-namespace reflection
+
+  [18:47:28Z] Ingress controllers reloaded TLS context
+    Controller: nginx-ingress-controller (3 replicas)
+    Replica 1 (us-east-1a): TLS context reloaded at 18:47:28Z (8 seconds after secret update)
+    Replica 2 (us-east-1b): TLS context reloaded at 18:47:29Z (9 seconds)
+    Replica 3 (us-east-1c): TLS context reloaded at 18:47:30Z (10 seconds)
+    Connection Drops During Reload: 0 (hot reload via inotify watcher)
+    SSL Handshake Validation: openssl s_client confirmed new certificate serial
+
+  [18:52:00Z] Certificate renewal confirmed complete
+    Certificate Readiness: Ready=True
+    Alert auto-resolved
+
+CERTIFICATE INVENTORY (production):
+
+  Certificate 1: vantage-api-wildcard
+    DNS: *.api.vantagecommerce.com
+    Expiry: 2025-12-13 (just renewed)
+    Issuer: Let's Encrypt
+    Auto-Renew: Yes (30 days before expiry)
+
+  Certificate 2: vantage-admin-wildcard
+    DNS: *.admin.vantagecommerce.com
+    Expiry: 2025-11-22
+    Issuer: Let's Encrypt
+    Auto-Renew: Yes
+
+  Certificate 3: vantage-internal-wildcard
+    DNS: *.internal.vantage.net
+    Expiry: 2025-10-28
+    Issuer: Internal CA (Vault PKI)
+    Auto-Renew: Yes (14 days before expiry)
+
+  Certificate 4: vantage-cdn-cert
+    DNS: cdn.vantagecommerce.com, static.vantagecommerce.com
+    Expiry: 2026-01-15
+    Issuer: AWS Certificate Manager (managed)
+    Auto-Renew: Yes (managed by ACM)
+
+  Total Certificates Managed: 14
+  Certificates Expiring in Next 30 Days: 0 (after today's renewal)
+  Certificates Expiring in Next 60 Days: 2
+
+--- SECTION 4: INFRASTRUCTURE METRICS SNAPSHOT ---
+
+Timestamp: 2025-09-14T00:00:00Z — 2025-09-14T23:59:59Z
+Source: Prometheus / Grafana Dashboard "Cluster Overview — prod-us-east-1"
+
+COMPUTE METRICS (24-hour summary):
+
+  CPU:
+    Cluster Capacity: 312 vCPU
+    Average Usage: 66% (206 vCPU)
+    Peak Usage: 78% (243 vCPU, at 14:22 UTC during checkout surge)
+    Minimum Usage: 31% (97 vCPU, at 04:00 UTC overnight)
+
+  Memory:
+    Cluster Capacity: 1.18 TiB
+    Average Usage: 55% (664 GiB)
+    Peak Usage: 61% (738 GiB)
+    Minimum Usage: 52% (630 GiB)
+
+  Pods:
+    Running (avg): 492
+    Pending (max): 0
+    Failed (total): 4 (all batch jobs, expected)
+    Restarts (total): 2 (1x analytics-collector OOM at 04:12, 1x notification-worker connection timeout)
+
+NETWORK METRICS (24-hour totals):
+
+  Ingress: 3.1 TB
+  Egress: 2.2 TB
+  Cross-AZ Transfer: 1.1 TB ($99.00)
+  DNS Queries: 52.8M (99.8% success)
+  TCP Connections Established: 14.2M
+  Active Connections (peak): 48,200
+
+STORAGE METRICS:
+
+  RDS Storage Used: 1.4 TiB / 2 TiB (70%)
+  RDS IOPS (avg): 6,200 / 8,000 provisioned (77.5%)
+  RDS Read Latency (avg): 0.8ms
+  RDS Write Latency (avg): 1.2ms
+  EBS Total: 28.4 TiB
+  S3 Requests: 2.6M GET, 195K PUT
+  S3 Egress: 420 GB
+
+--- SECTION 5: HTTP LOG EXCERPTS — DATABASE OPERATIONS ---
+
+Timestamp Range: 2025-09-14T10:00:00Z — 2025-09-14T12:00:00Z
+Source: RDS Performance Insights API / Internal tooling endpoints
+
+[10:00:15Z] GET /api/v1/databases/orders-prod-primary/status HTTP/1.1
+  Host: rds-monitor.internal.vantage.net
+  User-Agent: grafana-datasource/10.4.1
+  Status: 200 OK
+  Response-Time: 22ms
+  Response-Body: {
+    "instance": "orders-prod-primary",
+    "engine": "aurora-postgresql",
+    "version": "15.7",
+    "status": "available",
+    "connections": 284,
+    "cpu_utilization": 34.2,
+    "freeable_memory_gb": 82.4,
+    "read_iops": 4200,
+    "write_iops": 1800,
+    "replication_lag_ms": 0,
+    "storage_used_gb": 1433
+  }
+
+[10:15:00Z] POST /api/v1/databases/orders-prod-green-primary/validate HTTP/1.1
+  Host: rds-monitor.internal.vantage.net
+  User-Agent: db-migration-tool/1.2.0
+  Content-Type: application/json
+  Status: 200 OK
+  Response-Time: 4821ms
+  Request-Body: {
+    "validation_type": "query_replay",
+    "query_set": "top_50_by_execution_time",
+    "timeout_per_query": 30000
+  }
+  Response-Body: {
+    "status": "passed",
+    "queries_tested": 50,
+    "queries_improved": 3,
+    "queries_regressed": 0,
+    "queries_unchanged": 44,
+    "queries_minor_variance": 3,
+    "total_duration_ms": 4821
+  }
+
+[11:00:00Z] GET /api/v1/databases/orders-prod-primary/replication/slots HTTP/1.1
+  Host: rds-monitor.internal.vantage.net
+  User-Agent: db-migration-tool/1.2.0
+  Status: 200 OK
+  Response-Time: 8ms
+  Response-Body: {
+    "slots": [
+      {
+        "slot_name": "pglogical_blue_green_slot",
+        "slot_type": "logical",
+        "active": true,
+        "wal_retained_bytes": 933232640,
+        "wal_retained_mb": 890,
+        "restart_lsn": "1A/4B2C3D4E",
+        "confirmed_flush_lsn": "1A/4B2C3D3F",
+        "lag_bytes": 15
+      }
+    ]
+  }
+
+[11:30:00Z] GET /api/v1/databases/orders-prod-green-primary/extensions HTTP/1.1
+  Host: rds-monitor.internal.vantage.net
+  User-Agent: db-migration-tool/1.2.0
+  Status: 200 OK
+  Response-Time: 12ms
+  Response-Body: {
+    "extensions": [
+      {"name": "postgis", "version": "3.4.2", "schema": "public", "status": "installed"},
+      {"name": "pg_stat_statements", "version": "1.10", "schema": "public", "status": "installed"},
+      {"name": "pgcrypto", "version": "1.3", "schema": "public", "status": "installed"},
+      {"name": "uuid-ossp", "version": "1.1", "schema": "public", "status": "installed"},
+      {"name": "pg_trgm", "version": "1.6", "schema": "public", "status": "installed"},
+      {"name": "btree_gist", "version": "1.7", "schema": "public", "status": "installed"},
+      {"name": "hstore", "version": "1.8", "schema": "public", "status": "installed"},
+      {"name": "pglogical", "version": "2.4.4", "schema": "pglogical", "status": "installed"}
+    ]
+  }
+
+--- SLACK TRANSCRIPT: #database-ops ---
+
+Timestamp Range: 2025-09-14T10:30:00Z — 2025-09-14T12:00:00Z
+Channel: #database-ops
+
+[10:30:15] @jenna.liu: morning team. Quick update on the PG 16 migration. Green environment is fully synced, replication lag steady at 12ms. Running final validation now
+[10:31:02] @carlos.mendez: Ran EXPLAIN ANALYZE on top 50 queries against green — no plan regressions. Three queries improved due to PG16 incremental sort optimization.
+[10:31:45] @jenna.liu: perfect. Which three improved?
+[10:32:10] @carlos.mendez: order_history_range_scan (14% faster), product_search_trigram (8%), monthly_revenue_aggregate (11%). All three benefit from the new sort and parallel aggregate paths in PG16
+[10:33:00] @jenna.liu: excellent. I'm documenting all of this in the runbook. Switchover is still on for Monday 03:00 UTC
+[10:33:28] @carlos.mendez: order-service team confirmed the 5-minute read-only window?
+[10:34:01] @jenna.liu: yes, talked to @mike.chen yesterday. They'll put up a banner for the read-only period. Their service degrades gracefully — queues writes and replays after switchover
+[10:35:15] @carlos.mendez: good. What's the rollback plan?
+[10:35:42] @jenna.liu: revert DNS CNAME to blue endpoint within 30 seconds. PgBouncer will pick up the change in the next connection attempt. Tested in staging — total rollback time under 45 seconds
+[10:36:20] @carlos.mendez: and we keep the blue environment alive for how long after switchover?
+[10:37:00] @jenna.liu: 72 hours per the runbook. If everything looks clean after 3 days, we decommission blue and terminate the replication slot
+[10:38:14] @jenna.liu: oh also — WAL generation is at 2.4 GB/hr. The replication slot retained 890 MB during our 3-hour test pause yesterday. Slot is healthy, no risk of WAL bloat
+[10:39:00] @carlos.mendez: sounds solid. I'll be secondary on-call during the switchover window
+
+--- SECTION 6: PGBOUNCER DETAILED CONFIGURATION AND STATUS ---
+
+Timestamp: 2025-09-14T11:30:00Z
+Service: PgBouncer
+Version: 1.22.1
+Deployment: 2 replicas behind internal NLB
+
+CONFIGURATION DUMP:
+
+  [databases]
+    orders = host=orders-prod-primary.cluster-abc123.us-east-1.rds.amazonaws.com port=5432 dbname=orders
+    orders_readonly = host=orders-prod-read-east.cluster-ro-abc123.us-east-1.rds.amazonaws.com port=5432 dbname=orders
+
+  [pgbouncer]
+    listen_addr = 0.0.0.0
+    listen_port = 6432
+    auth_type = scram-sha-256
+    auth_file = /etc/pgbouncer/userlist.txt
+    admin_users = pgbouncer_admin
+    stats_users = pgbouncer_stats
+    pool_mode = transaction
+    max_client_conn = 600
+    default_pool_size = 40
+    reserve_pool_size = 10
+    reserve_pool_timeout = 5
+    min_pool_size = 10
+    server_idle_timeout = 600
+    server_lifetime = 3600
+    server_connect_timeout = 15
+    server_login_retry = 1
+    client_idle_timeout = 0
+    client_login_timeout = 60
+    query_timeout = 0
+    query_wait_timeout = 120
+    cancel_wait_timeout = 10
+    stats_period = 60
+    log_connections = 1
+    log_disconnections = 1
+    log_pooler_errors = 1
+    server_tls_sslmode = verify-full
+    server_tls_ca_file = /etc/ssl/certs/rds-combined-ca-bundle.pem
+    tcp_keepalive = 1
+    tcp_keepidle = 300
+    tcp_keepintvl = 60
+    tcp_keepcnt = 3
+
+CONNECTION POOL STATISTICS (snapshot at 11:30 UTC):
+
+  Database: orders
+    Active Server Connections: 38
+    Idle Server Connections: 2
+    Client Active: 284
+    Client Waiting: 0
+    Pool Size: 40
+    Free Pool: 2
+    Total Query Count (last hour): 1,248,000
+    Total TX Count (last hour): 892,000
+    Total Received (last hour): 4.2 GB
+    Total Sent (last hour): 18.4 GB
+    Average Query Duration: 2.1ms
+    Average TX Duration: 4.8ms
+
+  Database: orders_readonly
+    Active Server Connections: 22
+    Idle Server Connections: 8
+    Client Active: 120
+    Client Waiting: 0
+    Pool Size: 30
+    Free Pool: 8
+    Total Query Count (last hour): 680,000
+    Average Query Duration: 6.4ms (heavier analytics queries)
+
+PGBOUNCER METRICS EXPORT (Prometheus):
+
+  pgbouncer_pools_server_active{database="orders"}: 38
+  pgbouncer_pools_server_idle{database="orders"}: 2
+  pgbouncer_pools_client_active{database="orders"}: 284
+  pgbouncer_pools_client_waiting{database="orders"}: 0
+  pgbouncer_stats_total_query_count{database="orders"}: 14892847291
+  pgbouncer_stats_total_query_time_microseconds{database="orders"}: 31274582910000
+  pgbouncer_stats_avg_query_duration_microseconds{database="orders"}: 2100
+
+--- SECTION 7: CONTAINERD NODE AUDIT ---
+
+Timestamp: 2025-09-14T04:00:00Z
+Trigger: Post-incident review of PD-2025-09-14-0042
+Scope: All nodes in prod-us-east-1
+
+CONTAINERD VERSION INVENTORY:
+
+  Version 1.7.18:
+    Nodes Running: 36 (all)
+    Known CVEs: None critical
+    Known Bugs: containerd/containerd#9847 (PLEG deadlock under high pod churn)
+    Target Upgrade: 1.7.20
+    Upgrade Window: 2025-09-22 maintenance
+
+  Per-Node containerd Health Check:
+
+    ip-10-42-17-201: containerd 1.7.18, uptime 27d, containers: 22, healthy
+    ip-10-42-17-203: containerd 1.7.18, uptime 27d, containers: 19, healthy
+    ip-10-42-18-105: containerd 1.7.18, uptime 27d, containers: 23, healthy
+    ip-10-42-18-107: containerd 1.7.18, uptime 24d, containers: 17, healthy
+    ip-10-42-19-44: containerd 1.7.18, uptime 27d, containers: 20, healthy
+    ip-10-42-19-46: containerd 1.7.18, uptime 27d, containers: 18, healthy
+    ip-10-42-19-87: containerd 1.7.18, uptime 6d, containers: 16, healthy
+    ip-10-42-19-88: containerd 1.7.18, uptime 6d, containers: 15, healthy
+    ip-10-42-11-73: containerd 1.7.18, uptime 0d (rebooted 03:27), containers: 14, healthy
+    [Remaining 27 nodes: all containerd 1.7.18, all healthy]
+
+  Pod Churn Analysis (to assess deadlock risk):
+    Nodes with >10 pod lifecycle events/10min (higher risk):
+      ip-10-42-18-105: 12 events/10min avg (batch job node)
+      ip-10-42-11-73: 14 events/10min avg (incident node — batch jobs)
+      ip-10-42-19-44: 11 events/10min avg (batch job node)
+    Recommendation: Prioritize containerd upgrade on high-churn nodes
+    Mitigation Until Upgrade: Reduce batch job concurrency on affected nodes via nodeAffinity
+
+--- SECTION 8: CHANGE MANAGEMENT LOG ---
+
+Change Record: CHG-2025-09-14-001
+  Title: PostgreSQL Blue/Green Deployment — Green Environment Validation
+  Type: Standard Change (pre-approved for validation phase)
+  Risk Level: Low (read-only validation, no production impact)
+  CAB Approval: Pre-approved per Standard Change Template SC-089
+  Implementer: jenna.liu
+  Start Time: 2025-09-14T10:00:00Z
+  End Time: 2025-09-14T12:00:00Z
+  Duration: 2 hours
+  Result: Successful — all 50 queries validated, 0 regressions
+  Dependent Change: CHG-2025-09-16-001 (Switchover — scheduled)
+
+Change Record: CHG-2025-09-14-002
+  Title: Certificate Renewal — vantage-api-wildcard
+  Type: Automated Change
+  Risk Level: Low
+  Trigger: cert-manager auto-renewal (30 days before expiry)
+  Start Time: 2025-09-14T18:45:00Z
+  End Time: 2025-09-14T18:52:00Z
+  Duration: 7 minutes
+  Result: Successful — new certificate issued, 4 namespaces updated
+  Customer Impact: None
+
+--- SECTION 7: DAILY OPERATIONS CHECKLIST ---
+
+Date: 2025-09-14
+Completed By: @samira.hassan (morning shift), @ravi.shankar (evening shift)
+
+Morning Checks (06:00 UTC):
+  [x] Cluster node health — 36/36 Ready
+  [x] Pod status — 0 pending, 0 crashlooping
+  [x] DaemonSet health — all 5 DaemonSets 36/36
+  [x] Certificate expiry scan — 1 renewal in progress (vantage-api-wildcard)
+  [x] Backup verification — RDS snapshots current, S3 replication healthy
+  [x] Cost anomaly check — no anomalies detected in AWS Cost Explorer
+  [x] Security scan — 0 critical CVEs in running container images
+  [x] DNS resolution test — all internal and external zones resolving
+  [x] PagerDuty incident review — 1 P3 overnight (PD-2025-09-14-0042, resolved)
+
+Evening Checks (18:00 UTC):
+  [x] Cluster node health — 36/36 Ready
+  [x] Pod status — 0 pending, 0 crashlooping
+  [x] Certificate renewal confirmed — vantage-api-wildcard renewed until 2025-12-13
+  [x] Replication health — RDS replicas synced, Redis replicas synced
+  [x] Log pipeline health — Fluent Bit shipping to ES, no lag
+  [x] Kafka consumer lag — all consumer groups within SLA (< 5000 messages)
+  [x] Grafana alert review — 2 alerts total today (CertificateExpiryWarning resolved, PD-0042 resolved)
+  [x] Handoff notes for next shift — PG 16 switchover in 2 days, containerd upgrade in 8 days
+  [x] Blue-green replication lag stable — logical replication slot healthy, 890 MB retained
+  [x] Cost anomaly check — no anomalies detected, daily spend $4,247 within 5% of 30-day average
+  [x] Autoscaler status — no scaling events since morning, 36 nodes stable all day
+  [x] External endpoint health — all public endpoints responding, SSL certificate valid
+  [x] Backup verification — latest RDS snapshot 18:00 UTC completed, S3 cross-region replication caught up
+  [x] Next certificate renewal — internal wildcard due 2025-10-28, auto-renewal configured via Vault PKI
+
+--- SECTION 10: NODE IP-10-42-11-73 INCIDENT FORENSICS ---
+
+Timestamp: 2025-09-14T04:30:00Z
+Type: Post-Incident Technical Analysis
+Node: ip-10-42-11-73
+Incident: PD-2025-09-14-0042
+
+SYSTEM STATE AT TIME OF FAILURE (reconstructed from node metrics):
+
+  CPU Usage (03:10-03:18 UTC):
+    03:10: 42%
+    03:12: 58% (batch job completions accelerating)
+    03:14: 64% (containerd CPU spike — state machine processing)
+    03:16: 71% (containerd stuck in spin loop)
+    03:17: 68% (kubelet PLEG timeout threshold crossed)
+    03:18: 45% (kubelet stopped reporting — PLEG deadlock)
+
+  Memory Usage (03:10-03:18 UTC):
+    03:10: 72%
+    03:12: 74%
+    03:14: 76%
+    03:16: 76% (stable — not a memory issue)
+    03:18: 76%
+
+  Container Lifecycle Events (03:08-03:18 UTC):
+    03:08:12 — batch-processor-job-8a2b completed (exit 0)
+    03:08:44 — batch-processor-job-8a2c completed (exit 0)
+    03:09:15 — batch-processor-job-8a2d completed (exit 0)
+    03:09:38 — batch-processor-job-8a2e started
+    03:10:02 — batch-processor-job-8a2f started
+    03:10:28 — batch-processor-job-8a2g started
+    03:10:55 — batch-processor-job-8a2b cleanup (container removed)
+    03:11:20 — batch-processor-job-8a2c cleanup (container removed)
+    03:11:44 — batch-processor-job-8a2d cleanup (container removed)
+    03:12:01 — batch-processor-job-8a2h started
+    03:12:18 — batch-processor-job-8a2i started
+    03:12:33 — batch-processor-job-8a2e completed (exit 0)
+    03:12:44 — PLEG last successful relist
+    03:12:58 — batch-processor-job-8a2f completed (exit 0)
+    03:13:22 — containerd state machine deadlock occurred (inferred)
+    03:13:22 — No further container lifecycle events processed
+    Total events in 5 minutes: 14
+
+  Kubelet Logs (relevant entries):
+    03:12:44Z I0914 kubelet.go:2142] "SyncLoop (PLEG): event received" pod="batch-jobs/batch-processor-job-8a2e"
+    03:15:44Z E0914 kubelet.go:2251] "PLEG is not healthy" elapsed="3m0s"
+    03:18:44Z E0914 kubelet.go:2251] "PLEG is not healthy" elapsed="6m0s"
+    03:18:44Z W0914 kubelet_node_status.go:88] "Failed to update node status" err="PLEG not healthy, unable to update node status"
+
+  containerd Logs (relevant entries):
+    03:13:22Z WARN  containerd: "timeout waiting for container state transition" container="batch-processor-job-8a2f" from="running" to="stopped" timeout="10s"
+    03:13:32Z ERROR containerd: "failed to handle container event" error="context deadline exceeded" container="batch-processor-job-8a2f"
+    03:13:32Z WARN  containerd: "state machine locked" — no further log output until reboot
+
+  dmesg Output (relevant):
+    [452812.441] containerd[1842]: segfault at 7f8a2b3c4d5e ip 00007f8a1b2c3d4e sp 00007ffee1234567 error 4
+    [452812.442] Code: 48 8b 45 f8 48 8b 00 48 89 c7 e8 12 34 56 78 <48> 8b 45 f0
+
+POST-REBOOT VALIDATION:
+
+  Reboot Time: 03:27:00Z
+  Time to BIOS POST: 8 seconds
+  Time to OS Boot: 22 seconds
+  Time to kubelet Ready: 38 seconds (from boot)
+  Total Recovery: 62 seconds (reboot to node Ready)
+
+  Post-Reboot Checks:
+    - containerd PID: 1842 (new process, clean state)
+    - Kubelet PLEG health: OK
+    - Node conditions: all False (no pressure)
+    - DaemonSet pods: all 5 running
+    - Workload pods: rescheduling began at 03:30:00Z
+
+--- SECTION 11: NLB HEALTH CHECK ANALYSIS ---
+
+Load Balancer: nlb-payments-prod
+Type: Network Load Balancer
+Region: us-east-1
+Cross-Zone: Enabled
+Scheme: internet-facing
+
+TARGET GROUP CONFIGURATION:
+
+  Target Group: tg-payment-gateway-prod
+  Protocol: TCP
+  Port: 8443
+  Health Check:
+    Protocol: TCP
+    Port: 8443
+    Interval: 10 seconds
+    Healthy Threshold: 3 (30 seconds to mark healthy)
+    Unhealthy Threshold: 2 (20 seconds to mark unhealthy)
+    Timeout: 10 seconds
+
+  Target Status Timeline (03:15-03:35 UTC):
+
+    Target: payment-gateway-7a8b9c-x2k4m (10.42.5.201:8443, us-east-1a)
+      03:15: healthy | 03:18: healthy | 03:21: healthy | 03:24: healthy | 03:27: healthy | 03:30: healthy | 03:33: healthy
+      Status: Continuously healthy
+
+    Target: payment-gateway-7a8b9c-y3l5n (10.42.5.204:8443, us-east-1a)
+      03:15: healthy | 03:18: healthy | 03:21: healthy | 03:24: healthy | 03:27: healthy | 03:30: healthy | 03:33: healthy
+      Status: Continuously healthy
+
+    Target: payment-gateway-7a8b9c-z4m6p (10.42.11.73:8443, us-east-1b)
+      03:15: healthy | 03:18: unhealthy | 03:21: unhealthy | 03:24: unhealthy | 03:27: unhealthy | 03:30: initial | 03:33: healthy
+      Status: Unhealthy 03:18-03:30, recovered at 03:33 (3 healthy checks)
+
+    Target: payment-gateway-7a8b9c-a5n7q (10.42.11.73:8443, us-east-1b)
+      03:15: healthy | 03:18: unhealthy | 03:21: unhealthy | 03:24: unhealthy | 03:27: unhealthy | 03:30: initial | 03:33: healthy
+      Status: Unhealthy 03:18-03:30, recovered at 03:33
+
+    Target: payment-gateway-7a8b9c-b6p8r (10.42.7.196:8443, us-east-1c)
+      03:15: healthy | 03:18: healthy | 03:21: healthy | 03:24: healthy | 03:27: healthy | 03:30: healthy | 03:33: healthy
+      Status: Continuously healthy
+
+    Target: payment-gateway-7a8b9c-c7q9s (10.42.7.198:8443, us-east-1c)
+      03:15: healthy | 03:18: healthy | 03:21: healthy | 03:24: healthy | 03:27: healthy | 03:30: healthy | 03:33: healthy
+      Status: Continuously healthy
+
+  Traffic Distribution During Incident:
+    Normal (6 targets): ~207 TPS per target
+    During Incident (4 targets): ~310 TPS per target (49% increase per target)
+    Latency Impact: p50 unchanged (45ms), p99 increased from 120ms to 140ms (+17%)
+    Connection Queue: 0 (no queuing at 310 TPS per target, well within capacity)
+
+NLB CLOUDWATCH METRICS (03:15-03:35 UTC):
+
+  ActiveFlowCount: avg 4,200, max 4,800
+  NewFlowCount: avg 620/min, max 740/min
+  ProcessedBytes: 84 MB/min
+  HealthyHostCount: min 4, max 6
+  UnHealthyHostCount: min 0, max 2
+  TCP_Target_Reset_Count: 0
+  TCP_Client_Reset_Count: 0
+  TCP_ELB_Reset_Count: 0
+
+--- SECTION 12: BLUE-GREEN DEPLOYMENT INFRASTRUCTURE ---
+
+Blue/Green Environment Comparison:
+
+  BLUE ENVIRONMENT (current production):
+    Endpoint: orders-prod-primary.cluster-abc123.us-east-1.rds.amazonaws.com
+    Engine Version: PostgreSQL 15.7
+    Instance Class: db.r6g.4xlarge
+    Storage: 2 TiB gp3
+    IOPS: 8000 provisioned
+    Throughput: 500 MiB/s
+    CPU (24h avg): 34%
+    Connections (24h avg): 284
+    Buffer Cache Hit Rate: 99.2%
+    WAL Generation: 2.4 GB/hr
+    Oldest Transaction Age: 4,200,000 XIDs
+    Autovacuum Workers Active: 2 (avg)
+    Dead Tuple Ratio: 1.8% (healthy)
+    Table Bloat: 3.2% average
+    Index Bloat: 2.1% average
+    Checkpoint Duration: 12 seconds (avg)
+    Checkpoint Interval: 5 minutes
+
+  GREEN ENVIRONMENT (PG 16.4 target):
+    Endpoint: orders-prod-green-primary.cluster-def456.us-east-1.rds.amazonaws.com
+    Engine Version: PostgreSQL 16.4
+    Instance Class: db.r6g.4xlarge
+    Storage: 2 TiB gp3
+    IOPS: 8000 provisioned
+    Throughput: 500 MiB/s
+    CPU (24h avg): 8% (validation traffic only)
+    Connections (24h avg): 12 (validation tools)
+    Replication Lag: 12ms (logical replication from blue)
+    Logical Replication Status: Active, streaming
+    Initial Sync: Completed 2025-09-12T08:00:00Z
+    Tables Synchronized: 47/47
+    Sequences Synchronized: 23/23
+    Data Integrity Check: SHA256 row counts match (validated hourly)
+
+  SWITCHOVER CHECKLIST (for 2025-09-16 03:00 UTC):
+    [ ] Notify order-service team — T-30 minutes
+    [ ] Enable read-only mode on application — T-5 minutes
+    [ ] Verify replication lag < 100ms — T-2 minutes
+    [ ] Execute DNS CNAME switchover — T-0
+    [ ] Validate green primary accepting writes — T+30 seconds
+    [ ] Run smoke test suite (10 transactions) — T+1 minute
+    [ ] Disable read-only mode on application — T+2 minutes
+    [ ] Monitor error rates for 30 minutes — T+2 to T+32 minutes
+    [ ] Declare switchover successful — T+32 minutes
+    [ ] Keep blue environment for 72 hours as rollback target
+
+ROLLBACK PROCEDURE:
+  Trigger: Any of the following within 72 hours of switchover:
+    - Error rate > 1% on order-service endpoints
+    - Replication to read replicas fails
+    - Query plan regressions detected in production
+    - Application team requests rollback
+
+  Steps:
+    1. Revert DNS CNAME from green to blue endpoint (30 seconds)
+    2. PgBouncer detects DNS change on next connection attempt
+    3. Verify blue primary is accepting writes
+    4. Notify application team to resume normal operations
+    5. Post-rollback: investigate root cause before reattempting
+
+--- SECTION 13: RDS PERFORMANCE INSIGHTS SNAPSHOT ---
+
+Timestamp: 2025-09-14T11:00:00Z
+Instance: orders-prod-primary
+Engine: Aurora PostgreSQL 15.7
+
+TOP SQL BY TOTAL TIME (past 6 hours):
+
+  1. SELECT o.id, o.customer_id, o.total, o.status FROM orders o WHERE o.customer_id = $1 ORDER BY o.created_at DESC LIMIT $2
+     Calls: 142,000
+     Total Time: 284s
+     Avg Time: 2.0ms
+     Shared Buffers Hit: 99.2%
+     Rows Returned: 7.1M
+
+  2. INSERT INTO order_events (order_id, event_type, payload, created_at) VALUES ($1, $2, $3, $4)
+     Calls: 89,000
+     Total Time: 178s
+     Avg Time: 2.0ms
+     WAL Generated: 1.8 GB
+
+  3. UPDATE orders SET status = $1, updated_at = $2 WHERE id = $3
+     Calls: 44,000
+     Total Time: 132s
+     Avg Time: 3.0ms
+     Rows Affected: 44,000
+
+  4. SELECT p.id, p.name, p.price, i.quantity FROM products p JOIN inventory i ON p.id = i.product_id WHERE p.id = ANY($1)
+     Calls: 68,000
+     Total Time: 122s
+     Avg Time: 1.8ms
+     Shared Buffers Hit: 98.8%
+
+  5. SELECT COUNT(*) FROM orders WHERE created_at > $1 AND status = $2
+     Calls: 12,000
+     Total Time: 96s
+     Avg Time: 8.0ms
+     Shared Buffers Hit: 94.1%
+
+  [Remaining 45 queries omitted — all within normal parameters]
+
+WAIT EVENT ANALYSIS:
+
+  CPU: 62.4% of total wait time
+  IO:DataFileRead: 18.2%
+  IO:WALWrite: 8.4%
+  Lock:transactionid: 4.1%
+  IO:BufferFileWrite: 3.8%
+  Client:ClientRead: 2.1%
+  Other: 1.0%
+
+  Assessment: Normal wait event distribution. No lock contention issues.
+  CPU dominance expected for in-memory workload with high buffer cache hit rate.
+
+================================================================================
+END OF INFRASTRUCTURE OPERATIONS LOG — 2025-09-14
+================================================================================

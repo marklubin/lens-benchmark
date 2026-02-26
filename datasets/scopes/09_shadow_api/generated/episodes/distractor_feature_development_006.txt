@@ -1,0 +1,823 @@
+================================================================================
+VANTAGE COMMERCE — FEATURE DEVELOPMENT LOG
+Date: 2025-10-09
+Classification: INTERNAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Pull Request #4745 — Self-Service Returns Portal
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/svc-returns-portal
+PR: #4745
+Branch: feature/self-service-returns
+Author: sarah.kim
+Reviewers: carlos.medina, angela.russo
+Status: APPROVED
+Files changed: 53
+Insertions: 3241
+Deletions: 876
+Created: 2025-10-05T10:00:00Z
+Merged: 2025-10-09T11:30:00Z
+
+--- Affected Services ---
+
+- svc-returns-portal v2.0.0 (major version bump due to complete rewrite)
+- svc-order-service (return eligibility check, order data retrieval)
+- svc-inventory-tracker (stock update on return receipt)
+- svc-payment-gateway (refund processing flow)
+- PostgreSQL returns table and return_items table (new tables)
+- Kafka topic: returns.events (new topic)
+- EasyPost API (shipping label generation)
+- S3 bucket: vantage-return-labels (PDF storage for shipping labels)
+
+--- Changes Summary ---
+
+1. Complete rewrite of the returns flow. The current process requires customers to email
+   support, wait for an agent to create a ticket, wait for the agent to process the return
+   manually, and then wait 5 to 7 business days for a refund. The new self-service flow
+   allows customers to click a return button on their order page, select a reason from a
+   standardized taxonomy of 18 reasons, receive a shipping label instantly, and get a
+   refund when the carrier confirms package pickup. The target is less than 24 hours from
+   initiation to refund.
+
+sarah.kim: "Current returns process: customer emails support, agent creates ticket, agent
+processes return manually, 5-7 business day refund. New flow: customer clicks return,
+selects reason, gets label, refund on pickup scan. Target: <24h from initiation to refund."
+
+2. Three new API endpoints for the returns flow. The POST endpoint initiates a return and
+   validates eligibility. The GET endpoint retrieves the status of an existing return
+   including the current stage in the process. The PUT endpoint generates a shipping label
+   for an approved return using the EasyPost API.
+
+3. Automatic refund processing. The refund is issued automatically when the carrier scan
+   confirms that the package has been picked up. This eliminates the manual step where a
+   support agent had to verify receipt and trigger the refund. A 72-hour fallback exists
+   for cases where the carrier scan is delayed or missing.
+
+4. Integration with svc-inventory-tracker. When a return is received (confirmed by carrier
+   delivery scan at the warehouse), the inventory tracker automatically updates the
+   available stock for the returned items. This ensures that returned items are back in
+   stock for purchase without manual intervention.
+
+5. Return reason taxonomy. There are 18 standardized reasons organized into categories
+   including quality issues (defective, damaged, wrong color, wrong size), preference
+   issues (changed mind, found better price, not as described), and logistical issues
+   (late delivery, wrong item shipped, duplicate order). Each reason has an optional
+   free-text field for additional details.
+
+carlos.medina: "This is a big changeset. The refund-on-pickup-scan logic needs careful
+review — what if the carrier scan is delayed or missing?"
+
+sarah.kim: "Good point. Added a 72h fallback: if no carrier scan within 72h of label
+generation, the return goes into a manual review queue. Also added a daily reconciliation
+job that checks for orphaned returns."
+
+angela.russo: "Reviewed the refund authorization flow. It correctly validates return
+eligibility (30-day window, item condition) before generating the shipping label. The
+refund amount calculation matches order-service totals. Approved."
+
+--- Return Eligibility Rules ---
+
+  Rule 1: the return must be initiated within 30 days of the delivery date
+  Rule 2: the item must not be in an excluded category. Excluded categories are
+  personalized items (custom engravings, monograms), hazardous materials (batteries,
+  chemicals), and digital products (gift cards, digital downloads)
+  Rule 3: the order total must be greater than 10 dollars
+  Rule 4: the item must not have been previously returned (no duplicate returns)
+  Rule 5: the return quantity must not exceed the purchased quantity
+
+--- Refund Calculation Logic ---
+
+  Standard return: item price plus proportional tax minus original shipping cost
+  Defective or wrong item return: item price plus proportional tax plus full shipping
+  cost (customer should not pay shipping for our mistakes)
+
+  Proportional tax calculation: the tax for the returned item is calculated as a
+  proportion of the total order tax based on the item's contribution to the order subtotal.
+  This ensures accurate tax refund even for orders with mixed tax rates across items.
+
+  Refund method: refund is issued to the original payment method. If the original payment
+  method is no longer valid (expired card, closed account), the refund is issued as store
+  credit with a notification to the customer.
+
+--- Shipping Label Generation ---
+
+  Provider: EasyPost API
+  Label format: PDF, stored in S3 bucket vantage-return-labels
+  Shipping method: cheapest ground shipping option from EasyPost
+  Label dimensions: 4 inches by 6 inches (standard shipping label)
+  Return address: Vantage Commerce Returns Center, 500 Warehouse Drive, Louisville KY 40218
+
+  EasyPost API integration:
+    Endpoint: POST https://api.easypost.com/v2/shipments
+    Authentication: API key (stored in HashiCorp Vault, rotated for production)
+    Rate limit: 100 requests per minute
+    Response includes: tracking number, label URL, estimated delivery date, shipping cost
+    Error handling: retry on 429 and 5xx with 3 attempts and exponential backoff
+
+--- Database Schema ---
+
+  Table: returns
+    Columns: id (UUID primary key), order_id (UUID foreign key to orders), user_id (UUID
+    foreign key to users), status (enum: initiated, label_generated, carrier_scanned,
+    refund_issued, completed, manual_review, cancelled), reason_code (VARCHAR 50),
+    reason_text (TEXT nullable), refund_amount (DECIMAL 10 2), refund_method (enum:
+    original_payment, store_credit), shipping_label_url (TEXT nullable), tracking_number
+    (VARCHAR 50 nullable), carrier_scan_at (TIMESTAMP nullable), refund_issued_at
+    (TIMESTAMP nullable), created_at (TIMESTAMP default now), updated_at (TIMESTAMP
+    default now)
+
+  Table: return_items
+    Columns: id (UUID primary key), return_id (UUID foreign key to returns), order_item_id
+    (UUID foreign key to order_items), quantity (INTEGER), condition (enum: unopened,
+    opened_unused, opened_used, defective, damaged), created_at (TIMESTAMP default now)
+
+  Indexes:
+    idx_returns_order_id on returns(order_id)
+    idx_returns_user_id on returns(user_id)
+    idx_returns_status on returns(status) WHERE status NOT IN ('completed', 'cancelled')
+    idx_returns_tracking on returns(tracking_number)
+    idx_return_items_return_id on return_items(return_id)
+
+--- Kafka Events ---
+
+  Topic: returns.events
+  Partitions: 6
+  Replication factor: 3
+  Retention: 90 days
+
+  Event types:
+    return.initiated: fired when a customer initiates a return request
+    return.label_generated: fired when the shipping label is created via EasyPost
+    return.carrier_scanned: fired when the carrier confirms package pickup
+    return.refund_issued: fired when the refund is processed via svc-payment-gateway
+    return.completed: fired when the return is fully processed and closed
+    return.manual_review: fired when a return enters manual review (72h fallback or exception)
+
+  Consumers:
+    analytics-pipeline-returns: processes events for Looker dashboards and reporting
+    inventory-update-consumer: listens for return.carrier_scanned to update stock levels
+    notification-consumer-returns: sends email notifications to customers at each status change
+
+--- HTTP Request/Response Samples ---
+
+[2025-10-09T10:15:22.001Z] Request:
+  POST /api/v1/returns HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_return_001
+  Accept: application/json
+
+  {
+    "order_id": "ord_1a2b3c4d5e6f",
+    "items": [
+      {
+        "order_item_id": "oi_7g8h9i0j",
+        "quantity": 1,
+        "condition": "defective",
+        "reason_code": "defective_on_arrival",
+        "reason_text": "Screen has a dead pixel visible in the upper left corner"
+      }
+    ]
+  }
+
+[2025-10-09T10:15:22.234Z] Response:
+  HTTP/1.1 201 Created
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_return_001
+  X-Trace-ID: trace_return_a1b2c3
+
+  {
+    "return_id": "ret_9k0l1m2n",
+    "status": "initiated",
+    "eligible": true,
+    "refund_amount": 314.99,
+    "refund_includes_shipping": true,
+    "reason": "defective_on_arrival",
+    "next_step": "Generate shipping label via PUT /api/v1/returns/ret_9k0l1m2n/label",
+    "created_at": "2025-10-09T10:15:22Z"
+  }
+
+  Latency: 233ms
+
+[2025-10-09T10:16:45.112Z] Request:
+  PUT /api/v1/returns/ret_9k0l1m2n/label HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_return_label_001
+  Accept: application/json
+
+  {}
+
+[2025-10-09T10:16:46.887Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_return_label_001
+
+  {
+    "return_id": "ret_9k0l1m2n",
+    "status": "label_generated",
+    "shipping_label_url": "https://vantage-return-labels.s3.amazonaws.com/ret_9k0l1m2n/label.pdf",
+    "tracking_number": "USPS9205590036297012345678",
+    "carrier": "USPS",
+    "estimated_cost": 8.45,
+    "return_address": "Vantage Commerce Returns Center, 500 Warehouse Drive, Louisville KY 40218",
+    "label_expires_at": "2025-10-23T10:16:46Z"
+  }
+
+  Latency: 1775ms (includes EasyPost API call at 1412ms)
+
+[2025-10-09T10:18:30.001Z] Request:
+  GET /api/v1/returns/ret_9k0l1m2n HTTP/1.1
+  Host: api.vantage.com
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_return_status_001
+  Accept: application/json
+
+[2025-10-09T10:18:30.045Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_return_status_001
+
+  {
+    "return_id": "ret_9k0l1m2n",
+    "order_id": "ord_1a2b3c4d5e6f",
+    "status": "label_generated",
+    "items": [
+      {
+        "order_item_id": "oi_7g8h9i0j",
+        "product_name": "4K Monitor Pro 32 inch",
+        "quantity": 1,
+        "condition": "defective",
+        "reason_code": "defective_on_arrival"
+      }
+    ],
+    "refund_amount": 314.99,
+    "refund_includes_shipping": true,
+    "shipping_label_url": "https://vantage-return-labels.s3.amazonaws.com/ret_9k0l1m2n/label.pdf",
+    "tracking_number": "USPS9205590036297012345678",
+    "timeline": [
+      {"event": "return_initiated", "timestamp": "2025-10-09T10:15:22Z"},
+      {"event": "label_generated", "timestamp": "2025-10-09T10:16:46Z"}
+    ],
+    "next_step": "Print label and drop off package at any USPS location",
+    "fallback_deadline": "2025-10-12T10:16:46Z"
+  }
+
+  Latency: 44ms
+
+[2025-10-09T10:22:00.112Z] Request:
+  POST /api/v1/returns HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_return_ineligible_001
+
+  {
+    "order_id": "ord_old_order_45days",
+    "items": [
+      {
+        "order_item_id": "oi_expired_item",
+        "quantity": 1,
+        "condition": "opened_unused",
+        "reason_code": "changed_mind"
+      }
+    ]
+  }
+
+[2025-10-09T10:22:00.145Z] Response:
+  HTTP/1.1 422 Unprocessable Entity
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_return_ineligible_001
+
+  {
+    "error": "RETURN_INELIGIBLE",
+    "message": "This order is not eligible for return",
+    "reasons": [
+      {
+        "code": "PAST_RETURN_WINDOW",
+        "message": "Return window expired. Orders must be returned within 30 days of delivery.",
+        "delivery_date": "2025-08-25T00:00:00Z",
+        "return_deadline": "2025-09-24T00:00:00Z"
+      }
+    ]
+  }
+
+  Latency: 22ms
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: Feature Specification — Multi-Currency Support
+────────────────────────────────────────────────────────────────────────────────
+
+Document ID: SPEC-2025-103
+Title: Multi-Currency Support for International Orders
+Author: elena.volkov
+Status: APPROVED
+Team: Platform Architecture
+Target release: v5.0.0 (2025-11-15)
+
+--- Affected Services ---
+
+- svc-pricing-engine (display price conversion)
+- svc-payment-gateway (multi-currency payment processing)
+- svc-order-service (dual-currency order recording)
+- svc-product-catalog (base price storage, remains USD-only)
+- Open Exchange Rates API (external rate source)
+- Stripe multi-currency (payment processing)
+- PostgreSQL currency_rates table (rate cache)
+- Redis (exchange rate cache)
+
+--- Problem Statement ---
+
+elena.volkov: "International revenue is 22% of total but we only accept USD. Customers
+in EU and UK see dynamic Stripe conversion fees of 2-3%. Accepting EUR and GBP directly
+removes that friction."
+
+International customers currently pay an additional 2 to 3 percent in currency conversion
+fees charged by Stripe because all payments are processed in USD regardless of the
+customer's location. By accepting payments in the customer's local currency, we eliminate
+this fee and improve the checkout experience for international customers.
+
+--- Supported Currencies at Launch ---
+
+  Currency | Code | Symbol | Decimal Places | Rounding Rule
+  ---------|------|--------|----------------|---------------------------
+  US Dollar     | USD  | $      | 2              | Standard rounding
+  Euro          | EUR  | E      | 2              | Standard rounding
+  British Pound | GBP  | P      | 2              | Standard rounding
+  Canadian Dollar| CAD | C$     | 2              | Standard rounding
+  Australian Dollar| AUD| A$    | 2              | Standard rounding
+  Japanese Yen  | JPY  | Y      | 0              | Round to integer
+  Mexican Peso  | MXN  | MX$    | 2              | Standard rounding
+  Brazilian Real| BRL  | R$     | 2              | Standard rounding
+
+  All currencies round in the customer's favor. For example, if the converted price is
+  EUR 29.456, it is rounded down to EUR 29.45.
+
+--- Architecture ---
+
+  The pricing engine operates exclusively in USD. Dynamic pricing adjustments (from the
+  dynamic_pricing_v3 feature) are applied to the USD base price. Currency conversion
+  is a presentation layer concern that happens after all pricing logic is complete.
+
+  The conversion flow is:
+  Step one: retrieve the base price in USD from the product catalog
+  Step two: apply dynamic pricing adjustments in USD (if applicable)
+  Step three: convert the adjusted USD price to the customer's display currency using
+  the cached exchange rate
+  Step four: display the converted price to the customer
+  Step five: at checkout, the payment is processed in the customer's currency via Stripe
+  multi-currency
+  Step six: the order record stores both the local currency amount (what the customer paid)
+  and the USD equivalent (for financial reporting)
+
+rafael.silva: "How does this interact with dynamic pricing? We need to ensure the pricing
+engine operates on USD base prices and conversion happens after adjustment, not before."
+
+elena.volkov: "Correct — the pricing engine is USD-only. Currency conversion is a
+presentation layer concern. The flow is: base_price_usd, then dynamic_adjustment_usd,
+then convert_to_display_currency. All business logic stays in USD."
+
+--- Exchange Rate Management ---
+
+  Source: Open Exchange Rates API
+  Update frequency: every 15 minutes
+  Cache: Redis with key pattern currency:rate:{pair} and 15-minute TTL
+  Fallback: if the API is unavailable, use the last known rate from Redis
+  Staleness protection: if the cached rate is more than 1 hour old, add a 1 percent
+  buffer to the exchange rate to protect against adverse currency movement. This buffer
+  is applied in the direction that favors the customer (higher rate for selling currency,
+  lower rate for buying currency).
+
+  Rate staleness thresholds:
+    Fresh (less than 15 minutes): use rate directly
+    Stale (15 to 60 minutes): use rate with warning log, no buffer
+    Very stale (more than 60 minutes): use rate with 1 percent buffer and alert
+
+--- Currency Detection Priority ---
+
+  The system determines the customer's currency using the following priority order:
+  Priority one: shipping address country (if available, most accurate)
+  Priority two: billing address country (if available)
+  Priority three: IP geolocation (least accurate, used as fallback for anonymous browsing)
+
+  Country to currency mapping is maintained in a configuration file. For countries where
+  we do not support the local currency, prices are displayed in USD.
+
+--- Financial Reporting ---
+
+  All analytics dashboards, revenue reports, and financial statements continue to use
+  USD as the reporting currency. The USD equivalent is recorded at order time using the
+  exchange rate that was active when the order was placed. This provides a consistent
+  basis for financial reporting regardless of subsequent exchange rate fluctuations.
+
+  The orders table includes two new columns:
+    local_currency_amount: the amount the customer paid in their local currency
+    local_currency_code: the ISO 4217 currency code
+  The existing usd_amount column continues to store the USD equivalent.
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Code Review — PR #4751 Search Personalization
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/svc-search
+PR: #4751
+Branch: feature/search-personalization
+Author: omar.hassan
+Reviewers: lisa.park, noor.al-rashid
+Status: CHANGES REQUESTED
+Files changed: 15
+Insertions: 834
+Deletions: 112
+Created: 2025-10-07T09:00:00Z
+Last updated: 2025-10-09T14:30:00Z
+
+--- Service Version ---
+
+svc-search v4.4.0
+
+--- Affected Infrastructure ---
+
+- Elasticsearch 8.11 (function_score query with script_score)
+- svc-user-profile (user preference vectors stored in Redis)
+- Vespa re-ranking model (LightGBM via RPC)
+- Kafka clickstream topic (user behavior data)
+- Custom PyTorch model (preference vector generation, nightly batch job)
+
+--- Changes Summary ---
+
+1. Adds a personalization layer to search results. A 128-dimensional user preference
+   vector is used as a boost signal in the Elasticsearch query. The vector is generated
+   from the last 90 days of user behavior including product views, purchases, and
+   wishlist additions. The vector captures the user's category preferences, brand
+   affinity, price sensitivity, and style preferences in a compressed representation.
+
+2. Re-ranking of search results using a Vespa serving model. The top 100 results from
+   Elasticsearch are passed to a Vespa re-ranking model that uses additional features
+   including the user preference similarity score, recency of the product listing,
+   popularity metrics, and the original Elasticsearch relevance score. The re-ranking
+   model is a LightGBM model trained on click-through rate data.
+
+3. Lisa requested that the entire personalization feature be gated behind a feature flag
+   with an A/B test framework before any production rollout. This is to ensure that
+   online metrics (click-through rate, add-to-cart rate, conversion rate) match the
+   promising offline evaluation results.
+
+4. Noor identified a cold-start problem for new users who have fewer than 10 behavioral
+   signals. These users receive no personalization boost, meaning their results are based
+   purely on the Elasticsearch relevance score. Noor suggested implementing a fallback
+   using category-level popularity vectors until sufficient user-specific data is available.
+
+omar.hassan: "Personalized search lifts click-through rate by 18% in offline eval.
+Largest gains on ambiguous queries like 'shoes' or 'gift' where intent varies by user."
+
+lisa.park: "Offline metrics look great but we need online validation. Please gate this
+behind a flag and set up the A/B test framework before merging. Also need to define what
+happens for logged-out users."
+
+noor.al-rashid: "The cold-start fallback needs work. Currently new users get zero
+personalization boost — their results are pure relevance score. Suggesting we use
+category-level popularity vectors until we have 10+ behavioral signals."
+
+--- Preference Vector Details ---
+
+  Dimensionality: 128 dimensions
+  Model: custom PyTorch model (two-tower architecture with user and item embeddings)
+  Training data: 90-day rolling window of user clickstream events from Kafka
+  Training schedule: nightly batch job at 03:00 UTC
+  Storage: computed vectors stored in svc-user-profile Redis cache with 24-hour TTL
+  Refresh: vectors are recomputed nightly; during the day the cached vector is used
+
+  Behavioral signals used for vector computation:
+    Product page views (weighted at 1.0)
+    Add to cart events (weighted at 2.0)
+    Purchases (weighted at 5.0)
+    Wishlist additions (weighted at 3.0)
+    Search click-throughs (weighted at 1.5)
+    Product review reads (weighted at 0.5)
+
+--- Cold-Start Strategy ---
+
+  Users with fewer than 10 behavioral events receive no personalization (pure relevance).
+  Users with 10 to 50 behavioral events receive a blended score: 50 percent personalization
+  plus 50 percent category-level popularity vector.
+  Users with more than 50 behavioral events receive full personalization.
+
+  Category-level popularity vectors are pre-computed weekly. They represent the aggregate
+  preference pattern for all users who have viewed products in a given category. This
+  provides a reasonable starting point for new users who have shown interest in a category
+  but do not yet have enough individual behavioral data.
+
+--- Elasticsearch Query Structure ---
+
+  The search query uses a function_score query wrapping the standard match query. The
+  script_score function computes the cosine similarity between the user's preference
+  vector and each product's embedding vector. The similarity score is used as a
+  multiplicative boost on the base relevance score.
+
+  Query structure (simplified):
+    function_score query with the main match query for the search terms, combined with a
+    script_score function that calls a stored script computing the dot product between the
+    user vector (passed as a query parameter) and the product vector (stored in the index
+    as a dense_vector field). The boost factor is configurable and defaults to 1.5 for
+    fully personalized users and 0.75 for blended cold-start users.
+
+--- Vespa Re-Ranking Details ---
+
+  The top 100 results from Elasticsearch are sent to Vespa for re-ranking. The Vespa
+  serving infrastructure hosts a LightGBM model that was trained on 6 months of
+  click-through rate data with the following features:
+    Feature one: the Elasticsearch relevance score (normalized to 0 to 1)
+    Feature two: the cosine similarity between the user preference vector and the product vector
+    Feature three: the product recency score (newer products get a small boost)
+    Feature four: the product popularity score (based on views and purchases in the last 7 days)
+
+  The re-ranking RPC call adds approximately 5 to 8 milliseconds to the search latency.
+  The re-ranked results replace the Elasticsearch ordering for the top 100 results.
+
+--- Privacy Considerations ---
+
+  Preference vectors are ephemeral and based on a 90-day rolling window. Older behavioral
+  data is automatically excluded from the vector computation. When a user deletes their
+  account, the preference vector is deleted from Redis within 24 hours (next nightly
+  batch job). Preference vectors are never shared with third parties or used for
+  advertising purposes. They exist solely to improve search relevance for the individual user.
+
+--- Slack Thread: #search-team Search Personalization Review ---
+
+[2025-10-09T14:00:00Z] omar.hassan:
+  PR 4751 for search personalization is up for review. offline eval shows 18 percent
+  click-through rate lift on ambiguous queries. looking for feedback from lisa and noor.
+
+[2025-10-09T14:02:15Z] lisa.park:
+  i reviewed the offline eval methodology and the results are solid. the 18 percent
+  lift is primarily on queries with 3 or more possible intents (like "shoes" which could
+  mean running shoes, dress shoes, or casual shoes). for specific queries like "nike air
+  max 97 black" the personalization has minimal impact which is expected.
+
+[2025-10-09T14:04:30Z] lisa.park:
+  however, i want to see this validated online before we ship. please gate it behind
+  a feature flag and set up an A/B test with the following design: 50 percent control
+  (no personalization), 50 percent treatment (personalized results). primary metric is
+  click-through rate on search results. secondary metrics are add-to-cart rate and
+  conversion rate. guardrail metric is search latency p99 which must not regress more
+  than 20 milliseconds.
+
+[2025-10-09T14:06:45Z] noor.al-rashid:
+  the cold-start problem is my main concern. about 15 percent of our daily active users
+  have fewer than 10 behavioral signals. these users will see no difference between the
+  control and treatment groups, which dilutes the A/B test signal. the category-level
+  popularity vectors as a fallback would address this.
+
+[2025-10-09T14:08:00Z] omar.hassan:
+  both valid points. i will add the feature flag and A/B test integration before the next
+  review round. for the cold-start fallback, i already have the category popularity vectors
+  pre-computed from the weekly batch job. i just need to wire them into the search query
+  for users in the 10 to 50 event range.
+
+[2025-10-09T14:10:00Z] lisa.park:
+  one more thing: what happens for logged-out users? they have no preference vector at all.
+
+[2025-10-09T14:11:15Z] omar.hassan:
+  logged-out users get the standard Elasticsearch results with no personalization boost.
+  we could use session-level signals (searches and clicks within the current session) to
+  build a temporary vector, but that is more complex and i would like to defer it to a
+  follow-up PR.
+
+[2025-10-09T14:12:30Z] noor.al-rashid:
+  agreed. session-level personalization is a different feature. let us ship user-level
+  personalization first and validate it, then build session-level as an enhancement.
+
+[2025-10-09T14:14:00Z] lisa.park:
+  sounds good. once you have the A/B test framework in place, i will help design the
+  experiment and set up the Looker dashboard for monitoring results.
+
+[2025-10-09T14:15:30Z] omar.hassan:
+  ETA for the updated PR: end of this week. i will have the flag, A/B test integration,
+  cold-start fallback, and the Vespa re-ranking all wired up.
+
+--- Slack Thread: #checkout-returns Self-Service Returns Portal Launch Planning ---
+
+[2025-10-09T11:45:00Z] sarah.kim:
+  PR 4745 just merged for the self-service returns portal. I want to walk through the deployment
+  plan before we start the canary rollout next week. The key thing to understand is that we are
+  deploying the backend first with the feature flag turned off, so no customers will see the new
+  returns flow until we explicitly enable it after the canary is stable. The deployment itself
+  is a canary strategy with three stages: ten percent of traffic for two hours, then fifty percent
+  for three hours, then one hundred percent if all metrics are green. The primary metrics we are
+  watching during canary are error rate on the new returns API endpoints, latency percentiles for
+  the EasyPost integration, and memory and CPU utilization of the returns portal pods.
+
+[2025-10-09T11:47:30Z] carlos.medina:
+  I want to make sure the reconciliation job is running before we enable the feature flag for
+  actual customers. The reconciliation job is the safety net that catches orphaned returns where
+  the customer initiated a return but something went wrong in the pipeline. It runs every hour
+  and checks for returns that have been in the initiated or label_generated status for longer
+  than the expected processing time. Without this job running, we could have customers stuck
+  in limbo with no visibility into what happened to their return request.
+
+[2025-10-09T11:49:15Z] angela.russo:
+  I reviewed the reconciliation job code during the PR review and it looks solid. It queries the
+  returns table for any record where the status is initiated and the created_at timestamp is
+  more than two hours old, or where the status is label_generated and the created_at is more
+  than seventy two hours old. For the first case it sends an internal alert to the support team.
+  For the second case it moves the return into manual_review status and sends the customer an
+  email explaining that their return is being reviewed by a support agent.
+
+[2025-10-09T11:51:30Z] sarah.kim:
+  exactly. and the reconciliation job also handles the case where the carrier scan comes in late.
+  if a return is in manual_review status and we receive a carrier scan event, the return
+  automatically moves back to the normal flow and the refund is processed. the customer gets
+  a notification saying their return has been completed. this way, the manual review does not
+  block the return if the scan was simply delayed.
+
+[2025-10-09T11:53:00Z] carlos.medina:
+  what about the EasyPost API key rotation? you mentioned we need new production keys configured
+  in Vault before the deployment.
+
+[2025-10-09T11:54:30Z] sarah.kim:
+  the new EasyPost API keys are already in Vault. I rotated them yesterday and verified they work
+  against the EasyPost sandbox environment. the production keys are configured under the path
+  secret/vantage/prod/easypost and the service reads them at startup. if we ever need to rotate
+  again, it is a Vault update plus a rolling restart of the returns portal pods.
+
+[2025-10-09T11:56:00Z] angela.russo:
+  one thing I want to flag is the S3 bucket for return labels. the bucket vantage-return-labels
+  is configured with a lifecycle policy that deletes labels after 90 days. this is important for
+  data hygiene since we do not want to store shipping labels indefinitely. the labels contain
+  customer addresses and other personally identifiable information, so the 90-day retention
+  aligns with our data retention policy.
+
+[2025-10-09T11:57:30Z] sarah.kim:
+  correct. and the labels are encrypted at rest using the default S3 SSE-S3 encryption. the
+  pre-signed URLs we generate for customers to download their labels have a 14-day expiration.
+  after that the customer would need to contact support to get a new label if they have not
+  shipped the item yet.
+
+[2025-10-09T11:59:00Z] carlos.medina:
+  this all sounds good. let us plan the canary for next wednesday morning at 9am eastern. I will
+  be on call and monitoring the Datadog dashboards during the rollout. sarah, please send out
+  the deployment plan to the team mailing list so everyone is aware.
+
+[2025-10-09T12:00:30Z] sarah.kim:
+  will do. deployment plan email going out today. the rollback plan is simple: if any canary
+  metric goes red, ArgoCD automatically rolls back to the previous version. if the issue is
+  discovered after full rollout, we can manually trigger a rollback through ArgoCD or by pushing
+  the previous image tag. the feature flag provides an additional layer of safety since we can
+  disable the customer-facing UI without rolling back the backend.
+
+--- Grafana Alert Configuration: Returns Portal ---
+
+Alert name: returns-portal-error-rate
+Condition: the five minute error rate for the returns portal API endpoints exceeds one percent
+of total requests. Errors are defined as HTTP responses with status codes in the 5xx range.
+This threshold was chosen based on the existing error rate baselines for other customer-facing
+services in the Vantage platform, where the typical error rate is between zero point one and
+zero point three percent during normal operation. An error rate above one percent indicates a
+systemic issue that requires immediate investigation.
+
+Severity: critical
+Notification channels: PagerDuty (pages the on-call engineer), Slack channel returns-alerts
+Evaluation interval: every sixty seconds
+For duration: three minutes (the alert must be in a firing state for three consecutive minutes
+before a notification is sent, to avoid alerting on transient spikes)
+Labels: team=checkout, service=svc-returns-portal, environment=production
+Dashboard link: https://grafana.vantage.internal/d/returns-portal-overview
+
+Alert name: returns-portal-easypost-latency
+Condition: the p99 latency for EasyPost API calls exceeds three thousand milliseconds over a
+five minute window. The EasyPost API typically responds in eight hundred to fifteen hundred
+milliseconds for label generation requests. Latency above three seconds indicates either a
+degradation on the EasyPost side or network issues between our infrastructure and the EasyPost
+API endpoints.
+
+Severity: warning
+Notification channels: Slack channel returns-alerts
+Evaluation interval: every sixty seconds
+For duration: five minutes
+Labels: team=checkout, service=svc-returns-portal, dependency=easypost
+
+Alert name: returns-reconciliation-orphan-count
+Condition: the count of returns in manual_review status that were moved there by the
+reconciliation job exceeds five in a single hour. A high number of orphaned returns suggests
+a systemic problem in the returns processing pipeline, possibly a Kafka consumer lag or a
+failure in the carrier scan webhook integration.
+
+Severity: warning
+Notification channels: Slack channel returns-alerts, email to checkout-team@vantage.com
+Evaluation interval: every fifteen minutes
+For duration: zero minutes (immediate notification)
+Labels: team=checkout, service=svc-returns-portal, component=reconciliation
+
+--- PagerDuty On-Call Schedule: Checkout and Payments Team ---
+
+Schedule name: checkout-payments-oncall
+Team: Checkout and Payments
+Rotation type: weekly
+Timezone: America/New_York
+
+Current rotation (week of 2025-10-06):
+  Primary: carlos.medina (Mon 09:00 to Mon 09:00)
+  Secondary: sarah.kim
+
+Next rotation (week of 2025-10-13):
+  Primary: janet.okoye
+  Secondary: priya.nakamura
+
+Escalation policy: if the primary on-call does not acknowledge the alert within ten minutes,
+escalate to the secondary on-call. If the secondary does not acknowledge within ten minutes,
+escalate to the engineering manager. For critical severity alerts (such as returns-portal-error-rate),
+the escalation timeout is reduced to five minutes. All on-call engineers have the PagerDuty mobile
+app configured with push notifications and phone call alerts for critical incidents.
+
+Override schedule: sarah.kim has requested an override for the canary deployment on 2025-10-15
+from 09:00 to 14:00 Eastern. She will be primary during the returns portal deployment window
+since she authored the code and is most familiar with the system behavior. After the deployment
+window closes, the scheduled on-call rotation resumes.
+
+--- Runbook: Search Personalization Troubleshooting ---
+
+Runbook identifier: RB-SEARCH-012
+Owner: omar.hassan
+Last updated: 2025-10-09
+
+Overview:
+  The search personalization feature uses user preference vectors to boost search results
+  that match the user's historical behavior. The feature depends on several external
+  services: svc-user-profile for vector storage, Vespa for re-ranking, and the nightly
+  batch job for vector computation.
+
+Common issues and resolution:
+
+  Issue one: preference vectors not available for users who should have them.
+  Symptom: users with more than 50 behavioral events are seeing non-personalized results.
+  Diagnosis: check the svc-user-profile Redis cache for the user's vector. If absent,
+  check the nightly batch job logs for errors. The job runs at 03:00 UTC and processes
+  all users with new behavioral data since the last run.
+  Resolution: if the batch job failed, manually trigger a re-run for the affected user
+  segment. If Redis evicted the vectors due to memory pressure, increase the Redis memory
+  allocation or reduce the TTL on less critical cached data.
+
+  Issue two: Vespa re-ranking service unavailable.
+  Symptom: search latency increases and results appear less relevant because the top 100
+  results are returned in Elasticsearch order without Vespa re-ranking.
+  Diagnosis: check the Vespa serving cluster health. Common causes include pod
+  out-of-memory kills (the LightGBM model uses approximately 200 MB), network issues
+  between the search service and Vespa, or Vespa configuration drift after a deployment.
+  Resolution: restart the Vespa serving pods if they are in a crash loop. If the issue
+  is persistent, disable the Vespa re-ranking via feature flag and serve Elasticsearch
+  results directly. The search experience will be degraded but functional.
+
+  Issue three: search latency regression after enabling personalization.
+  Symptom: search p99 latency exceeds the 100 millisecond SLA.
+  Diagnosis: check whether the latency is in the Elasticsearch query phase (vector
+  similarity computation) or the Vespa re-ranking phase (RPC call). The Datadog APM trace
+  for the search request shows both phases separately.
+  Resolution: if the bottleneck is Elasticsearch, reduce the vector dimensionality or
+  switch from script_score to a pre-computed similarity index. If the bottleneck is Vespa,
+  scale up the Vespa serving cluster or simplify the re-ranking model.
+
+--- Runbook: Returns Portal EasyPost Integration Troubleshooting ---
+
+Runbook identifier: RB-RETURNS-001
+Owner: sarah.kim
+Last updated: 2025-10-09
+
+Overview:
+  The self-service returns portal depends on the EasyPost API for shipping label generation.
+  This runbook covers common failure scenarios in the EasyPost integration and the steps to
+  diagnose and resolve them. The EasyPost API is an external dependency and therefore subject
+  to availability and performance issues that are outside our control. Our integration includes
+  retry logic, circuit breaker patterns, and fallback behaviors to handle these scenarios
+  gracefully.
+
+Common issues and resolution:
+
+  Issue one: EasyPost API returning 429 Too Many Requests.
+  Symptom: label generation requests are failing with a 429 status code and customers are seeing
+  an error message saying the shipping label could not be generated at this time.
+  Diagnosis: check the Datadog metrics for easypost.api.requests and filter by status code 429.
+  Our rate limit with EasyPost is 100 requests per minute. During peak return periods such as
+  post-holiday returns in January, we may approach this limit.
+  Resolution: the integration has built-in retry logic with exponential backoff. If the retries
+  are also failing, contact EasyPost support to request a temporary rate limit increase. As an
+  interim measure, enable the rate limiter in the returns portal configuration which queues
+  label generation requests and processes them at a controlled rate of 80 requests per minute
+  to stay safely below the limit.
+
+  Issue two: EasyPost API returning invalid shipping rates.
+  Symptom: the shipping cost returned by EasyPost is unusually high (more than 50 dollars for
+  a domestic ground shipment) or unusually low (less than 1 dollar).
+  Diagnosis: compare the shipment dimensions and weight sent to EasyPost with the actual product
+  dimensions in the product catalog. A mismatch can cause incorrect rate calculation.
+  Resolution: verify the product dimensions in the catalog and correct any discrepancies. If the
+  dimensions are correct and the rate is still anomalous, try requesting rates from alternative
+  carriers available through EasyPost. The integration defaults to the cheapest ground option but
+  can be configured to use a specific carrier if needed.
+
+================================================================================
+END OF LOG — 2025-10-09
+================================================================================

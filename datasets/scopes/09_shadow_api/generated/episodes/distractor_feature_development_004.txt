@@ -1,0 +1,926 @@
+================================================================================
+VANTAGE COMMERCE — FEATURE DEVELOPMENT LOG
+Date: 2025-09-29
+Classification: INTERNAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: QA Report — Guest Checkout v2 at 25% Rollout Validation
+────────────────────────────────────────────────────────────────────────────────
+
+Report ID: QA-2025-0922
+Title: Guest Checkout v2 — 25% Rollout Validation
+Author: tomas.rivera
+Date: 2025-09-29
+Environment: production (us-east-1, eu-west-1)
+Overall Status: PASS with observations
+
+--- Services Under Test ---
+
+- checkout-service v3.8.1
+- svc-payment-gateway
+- Redis checkout-sessions-prod cluster
+- Stripe sandbox and production environments
+- Datadog APM traces
+- Cypress test suite (147 tests)
+
+--- QA Team ---
+
+  Name              | Role               | Test Area
+  ------------------|--------------------|--------------------------
+  Tomas Rivera      | QA lead            | Test coordination, load test
+  Priya Nakamura    | Frontend platform  | Cypress E2E, bug triage
+  Carlos Medina     | Checkout team lead | Review, sign-off
+
+--- Test Execution Summary ---
+
+  Test Type                     | Total | Passed | Failed | Skipped | Duration
+  ------------------------------|-------|--------|--------|---------|----------
+  Cypress E2E (automated)       | 147   | 147    | 0      | 0       | 12m 34s
+  Manual exploratory testing    | 23    | 23     | 0      | 0       | 4h 15m
+  Load test (sustained)         | 1     | 1      | 0      | 0       | 30m
+  Stripe webhook verification   | 1     | 1      | 0      | 0       | 15m
+  Redis session TTL validation  | 1     | 1      | 0      | 0       | 20m
+  Cross-browser testing         | 4     | 4      | 0      | 0       | 2h
+  ------------------------------|-------|--------|--------|---------|----------
+  Total                         | 177   | 177    | 0      | 0       | 7h 34m
+
+--- Automated Test Execution (Cypress) ---
+
+  Cypress version: 13.3.0
+  Node version: 20.8.0
+  Browsers tested: Chrome 117, Firefox 118, Safari 17, Edge 117
+  Environment: staging (pre-production, mirrors production configuration)
+  Total specs: 147 (all passing)
+  Parallel workers: 4
+
+  Test suite breakdown:
+    Guest checkout happy path (Chrome):         14 tests, 1m 48s
+    Guest checkout happy path (Safari):         14 tests, 2m 12s
+    Guest checkout happy path (Firefox):        14 tests, 1m 55s
+    Guest checkout happy path (Edge):           14 tests, 1m 50s
+    Guest checkout validation errors:           18 tests, 2m 22s
+    Guest checkout session expiry:              8 tests, 1m 15s
+    Guest checkout payment retry:               12 tests, 2m 45s
+    Guest to registered conversion:             10 tests, 1m 30s
+    Guest checkout concurrent tabs:             6 tests, 1m 02s
+    Guest checkout mobile viewport:             8 tests, 0m 55s
+    Guest checkout accessibility:               6 tests, 0m 42s
+    Guest checkout analytics events:            5 tests, 0m 38s
+    Guest checkout internationalization:        4 tests, 0m 35s
+    Guest checkout error boundary:              8 tests, 0m 45s
+    Guest checkout back button:                 6 tests, 0m 40s
+
+  Screenshots captured: 0 (all tests passing)
+  Videos recorded: 24 (one per spec file)
+  Artifacts: stored in CI pipeline artifacts for 30 days
+
+--- Manual Exploratory Testing ---
+
+  Tester: tomas.rivera
+  Duration: 4 hours 15 minutes
+  Date: 2025-09-28 and 2025-09-29
+
+  Scenario 1: Happy path on desktop Chrome
+    Steps: add items to cart, proceed as guest, enter email and shipping, select card payment,
+    complete checkout, verify order confirmation page, verify confirmation email
+    Result: PASS
+    Notes: checkout completion time approximately 35 seconds, smooth flow with no unexpected behaviors
+
+  Scenario 2: Happy path on mobile Safari (iPhone 15)
+    Steps: same as scenario 1 but on mobile device
+    Result: PASS
+    Notes: responsive layout works correctly, address form auto-fills from Safari keychain,
+    payment form renders correctly below the fold
+
+  Scenario 3: Session expiry during checkout
+    Steps: start guest checkout, wait 16 minutes without interacting, attempt to complete payment
+    Result: PASS
+    Notes: session expired as expected after 15 minutes, user shown "session expired" message
+    with option to restart checkout, cart contents preserved
+
+  Scenario 4: Payment failure and retry
+    Steps: use Stripe test card that triggers decline, verify error message, retry with valid card
+    Result: PASS
+    Notes: user-facing error message "We're having trouble processing your payment. Please try
+    again in a moment." displayed correctly, retry succeeds on second attempt
+
+  Scenario 5: Concurrent tabs
+    Steps: open guest checkout in two tabs, complete checkout in tab 1, attempt to complete in tab 2
+    Result: PASS
+    Notes: tab 2 shows "this session has already been completed" message, prevents double order
+
+  Scenario 6: Back button navigation
+    Steps: complete shipping step, press back button, verify shipping data preserved, proceed again
+    Result: PASS
+    Notes: form data persisted correctly on back navigation, no data loss
+
+  Scenario 7: Cart modification during checkout
+    Steps: start checkout, open cart in new tab, add item, return to checkout tab
+    Result: PASS
+    Notes: checkout page detects cart modification and prompts user to review updated cart
+
+  Scenario 8 through 23: Additional scenarios covering edge cases including empty cart,
+    international shipping addresses, very long email addresses, special characters in names,
+    multiple payment method switches, browser autofill interactions, screen reader navigation,
+    keyboard-only navigation, and various error states
+    Result: all PASS
+
+--- Load Test Results ---
+
+  Tool: k6 v0.47.0
+  Test script: scripts/load-test-guest-checkout.js
+  Target: 4200 concurrent guest sessions sustained for 30 minutes
+  Environment: production (us-east-1)
+  Date: 2025-09-28T23:00:00Z (off-peak hours)
+
+  Configuration:
+    Virtual users: 4200
+    Ramp-up: 0 to 4200 over 5 minutes
+    Sustained load: 4200 concurrent for 25 minutes
+    Ramp-down: 4200 to 0 over 5 minutes
+    Think time: 2-5 seconds between steps (simulates human checkout flow)
+
+  Results:
+    Total requests: 847,231
+    Successful requests: 846,112
+    Failed requests: 1,119 (0.13%)
+    Error breakdown:
+      502 Bad Gateway (Stripe transient): 892 (79.7% of errors)
+      408 Request Timeout: 147 (13.1% of errors)
+      409 Conflict (concurrent cart update): 80 (7.2% of errors)
+
+    Latency:
+      p50: 142ms
+      p90: 312ms
+      p99: 887ms
+      max: 2,341ms
+
+    Throughput:
+      Requests per second (avg): 470
+      Requests per second (peak): 612
+
+    Redis cluster metrics during load test:
+      Peak memory: 2.1 GB out of 8 GB
+      p99 latency: 1.2ms
+      Evictions: 0
+      Connected clients (peak): 4,287
+      Commands per second (peak): 24,501
+      Replication lag: less than 1ms
+      Cluster state: ok throughout
+
+    Application metrics during load test:
+      CPU usage (checkout-service pods, avg): 67%
+      CPU usage (checkout-service pods, peak): 82%
+      Memory usage (checkout-service pods, avg): 420 MB
+      Memory usage (checkout-service pods, peak): 580 MB
+      Pod count: 6 (no auto-scaling triggered, threshold is 85% CPU)
+
+  Load test conclusion: system handled 4200 concurrent sessions (2x peak production traffic)
+  without degradation. Redis cluster has headroom, application pods stayed within resource
+  limits, and error rate was within acceptable bounds. The 502 errors from Stripe are
+  transient and handled by the retry logic added in PR 4602.
+
+tomas.rivera: "Overall PASS. Two observations: (1) on Safari iOS the payment form
+occasionally flickers during Stripe element mount — cosmetic only, no functional impact.
+(2) Cart recovery emails for abandoned guest checkouts have a 4-second delay compared to
+registered users because of the Redis lookup."
+
+priya.nakamura: "Safari flicker is a known Stripe SDK issue — they have a fix in their
+next minor release. The 4s delay on cart recovery is acceptable for now."
+
+--- Redis Session TTL Validation ---
+
+  Test: verify that guest sessions correctly expire after 15 minutes of inactivity
+  Method: created 100 test sessions with known UUIDs, monitored TTL countdown, verified
+  expiry behavior
+
+  Results:
+    Sessions created: 100
+    Sessions expired within expected window (15 min +/- 5s): 100
+    Sessions that persisted beyond expected window: 0
+    TTL renewal on activity: verified (5 sessions had activity at 10-minute mark, TTL
+    correctly reset to 15 minutes from last activity)
+    Session data cleanup: verified (Redis DEL callback fires on expiry, Kafka event
+    published for analytics pipeline)
+
+--- Conversion Rate Analysis (25% Rollout) ---
+
+  Period: 2025-09-22 to 2025-09-29 (7 days at 25% traffic)
+  Data source: Looker dashboard "Checkout Conversion"
+
+  Metric                    | Guest v2 (25%) | Legacy Guest (75%) | Delta
+  --------------------------|----------------|--------------------|--------
+  Conversion rate           | 3.42%          | 3.38%              | +0.04%
+  Avg completion time       | 47 seconds     | 68 seconds         | -31%
+  Error rate                | 0.12%          | 0.15%              | -0.03%
+  Cart abandonment rate     | 71.2%          | 72.8%              | -1.6%
+  Payment retry rate        | 1.8%           | 2.1%               | -0.3%
+  Mobile conversion rate    | 3.18%          | 3.02%              | +0.16%
+  Desktop conversion rate   | 3.87%          | 3.94%              | -0.07%
+
+  Statistical significance: conversion rate delta is within noise (p=0.42, not significant
+  at alpha=0.05). Completion time improvement is statistically significant (p<0.001).
+
+  Recommendation: proceed to 50% rollout in Sprint 38 (week of 2025-10-06)
+
+--- Stripe Webhook Verification ---
+
+  Endpoint: the guest checkout webhook endpoint on the Vantage API
+  Test method: sampled 500 webhook events from the Stripe dashboard and cross-referenced
+  with order records in the database
+
+  Results:
+    Events sampled: 500
+    Events delivered successfully: 500 (100% delivery rate)
+    Average delivery time: 412 milliseconds
+    Maximum delivery time: 2,341 milliseconds
+    Events delivered within 3 seconds: 500 (100%)
+    Webhook signature verification: all 500 signatures validated successfully
+    Order status updates: all 500 orders had correct status transitions matching webhook events
+    Duplicate event handling: verified with 10 intentionally replayed events, all correctly
+    deduplicated using the event ID
+
+  Conclusion: Stripe webhook integration is functioning correctly at 25% rollout volume.
+  No missed events, no duplicate processing, all within latency expectations.
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: Pull Request #4689 — Push Notification Preferences
+────────────────────────────────────────────────────────────────────────────────
+
+Repository: vantage-commerce/svc-notification-hub
+PR: #4689
+Branch: feature/push-notification-preferences
+Author: kwame.asante
+Reviewers: maya.chen, angela.russo
+Status: APPROVED
+Files changed: 41
+Insertions: 2103
+Deletions: 334
+Created: 2025-09-25T10:00:00Z
+Merged: 2025-09-29T14:15:00Z
+
+--- Service Version ---
+
+svc-notification-hub v3.2.0
+
+--- Affected Services ---
+
+- svc-notification-hub v3.2.0
+- Firebase Cloud Messaging (FCM)
+- Apple Push Notification Service (APNs)
+- PostgreSQL notification_preferences table
+- svc-user-profile
+- Kafka topic: notification.events
+- SQS queue: deals-notification-batch
+- Lambda: deals-notification-sender
+
+--- Changes Summary ---
+
+1. Implements granular push notification preferences. Users can opt in or out per
+   category: orders, deals, wishlist, and social. Previously there was a single toggle
+   for all push notifications. This granularity should reduce the opt-out rate by allowing
+   users who want order updates but not deals to keep push notifications enabled.
+
+2. New preferences API: GET and PUT on the endpoint for user notification preferences.
+   The GET endpoint returns current preferences for all channels and categories. The PUT
+   endpoint allows updating individual category preferences without affecting others.
+
+3. Adds batch notification scheduling. Deals notifications are queued in SQS with a
+   delivery window attribute and a Lambda consumer sends them at the user's preferred
+   time window. This prevents deals notifications from waking users up at night.
+
+4. FCM topic subscription management. When users change their preferences, the service
+   subscribes or unsubscribes them from category-specific FCM topics. This allows sending
+   notifications to all users subscribed to a topic without iterating through individual
+   device tokens.
+
+5. Migration adds notification_preferences table with per-channel (push, email, SMS) and
+   per-category columns. Backward compatibility is maintained by migrating existing users
+   with all categories set to ON, matching the current single-toggle behavior.
+
+kwame.asante: "Currently we have a single push notification toggle. Users either get
+everything or nothing. This adds per-category control which should reduce opt-out rates."
+
+maya.chen: "Product data shows 62% of push opt-outs happen within 48h of enabling —
+usually triggered by deal spam. Per-category controls should help retain users who want
+order updates but not deals."
+
+angela.russo: "Security review: the preferences endpoint correctly validates that the
+authenticated user matches the id parameter. Approved."
+
+--- Preferences Schema ---
+
+  Table: notification_preferences
+  Engine: PostgreSQL 15.4
+  Database: notification-prod
+
+  Columns:
+    user_id: UUID, foreign key to users table
+    channel: VARCHAR(10), one of push, email, sms
+    category: VARCHAR(20), one of orders, deals, wishlist, social
+    enabled: BOOLEAN, default true
+    quiet_hours_start: TIME, nullable (e.g., 22:00 for 10 PM)
+    quiet_hours_end: TIME, nullable (e.g., 07:00 for 7 AM)
+    updated_at: TIMESTAMP WITH TIME ZONE, default now
+    Primary key: composite of user_id, channel, and category
+
+  Default preferences for new users:
+    orders: ON for all channels (push, email, sms)
+    deals: ON for push and email, OFF for sms
+    wishlist: ON for push and email, OFF for sms
+    social: OFF for all channels (opt-in only)
+
+  Migration plan for existing users:
+    All existing users get all categories set to ON for push (matching current behavior
+    where the single toggle was ON). Email and SMS preferences migrated from existing
+    email_notifications and sms_notifications columns in the users table.
+    Migration is run as a background job processing 10,000 users per batch with a 1-second
+    delay between batches to avoid database load spikes. Estimated total migration time
+    for 2.4 million users: approximately 4 minutes.
+
+--- Batch Notification Scheduler ---
+
+  Architecture:
+    Producer: svc-notification-hub queues deals notifications to SQS with a delivery
+    window attribute
+    Queue: deals-notification-batch (SQS FIFO queue, message group by user_id)
+    Consumer: Lambda function deals-notification-sender polls queue every 60 seconds
+    Delivery: Lambda sends notifications via FCM and APNs at the user's preferred time
+
+  SQS message format:
+    MessageBody: the notification payload including title, body, deep link, image URL
+    MessageAttributes:
+      delivery_window_start: the earliest time to deliver (ISO 8601)
+      delivery_window_end: the latest time to deliver (ISO 8601)
+      user_id: the target user identifier
+      notification_category: deals
+      priority: normal or high
+
+  Lambda configuration:
+    Runtime: Node.js 20
+    Memory: 256 MB
+    Timeout: 30 seconds
+    Concurrency: 10 (rate limited to avoid FCM throttling)
+    Trigger: SQS event source with batch size 10, maximum batching window 60 seconds
+
+  Quiet hours enforcement:
+    If a notification is queued during the user's quiet hours, the delivery window is
+    adjusted to start at the end of quiet hours. For example, if quiet hours are 22:00
+    to 07:00 and a deals notification is queued at 23:00, the delivery window start is
+    set to 07:00 the next morning.
+
+--- FCM Topic Configuration ---
+
+  Topics:
+    vantage-deals-us (deals notifications for US users)
+    vantage-deals-eu (deals notifications for EU users)
+    vantage-deals-apac (deals notifications for APAC users)
+    vantage-orders-all (order status notifications, all users)
+    vantage-wishlist-updates (wishlist price drop and restock notifications)
+    vantage-social-activity (social feature notifications, opt-in only)
+
+  Subscription management:
+    When a user enables a notification category, the service subscribes their device
+    tokens to the corresponding FCM topic. When they disable it, the service unsubscribes
+    them. This is done via the FCM Admin SDK with batch operations (up to 1000 tokens
+    per batch request).
+
+  Topic message delivery:
+    Deals: sent via topic message to the regional deals topic
+    Orders: sent via individual device token (not topic) for personalized content
+    Wishlist: sent via topic message to the wishlist-updates topic
+    Social: sent via individual device token for personalized content
+
+--- HTTP Request/Response Samples ---
+
+[2025-09-29T09:15:22.001Z] Request:
+  GET /api/v1/users/usr_7f8e9d0a/notification-preferences HTTP/1.1
+  Host: api.vantage.com
+  Accept: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_notif_pref_001
+
+[2025-09-29T09:15:22.034Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_notif_pref_001
+
+  {
+    "user_id": "usr_7f8e9d0a",
+    "preferences": [
+      {"channel": "push", "category": "orders", "enabled": true, "quiet_hours": null},
+      {"channel": "push", "category": "deals", "enabled": true, "quiet_hours": {"start": "22:00", "end": "07:00"}},
+      {"channel": "push", "category": "wishlist", "enabled": true, "quiet_hours": null},
+      {"channel": "push", "category": "social", "enabled": false, "quiet_hours": null},
+      {"channel": "email", "category": "orders", "enabled": true},
+      {"channel": "email", "category": "deals", "enabled": true},
+      {"channel": "email", "category": "wishlist", "enabled": true},
+      {"channel": "email", "category": "social", "enabled": false},
+      {"channel": "sms", "category": "orders", "enabled": true},
+      {"channel": "sms", "category": "deals", "enabled": false},
+      {"channel": "sms", "category": "wishlist", "enabled": false},
+      {"channel": "sms", "category": "social", "enabled": false}
+    ],
+    "updated_at": "2025-09-29T09:10:00Z"
+  }
+
+  Latency: 33ms
+
+[2025-09-29T09:18:45.112Z] Request:
+  PUT /api/v1/users/usr_7f8e9d0a/notification-preferences HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.***
+  X-Request-ID: req_notif_pref_002
+
+  {
+    "updates": [
+      {"channel": "push", "category": "deals", "enabled": false},
+      {"channel": "push", "category": "social", "enabled": true}
+    ]
+  }
+
+[2025-09-29T09:18:45.178Z] Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_notif_pref_002
+
+  {
+    "updated": 2,
+    "fcm_topic_changes": [
+      {"topic": "vantage-deals-us", "action": "unsubscribed", "device_tokens": 2},
+      {"topic": "vantage-social-activity", "action": "subscribed", "device_tokens": 2}
+    ],
+    "updated_at": "2025-09-29T09:18:45Z"
+  }
+
+  Latency: 156ms (includes FCM topic subscription API calls)
+
+[2025-09-29T09:22:10.334Z] Request:
+  PUT /api/v1/users/usr_unauthorized/notification-preferences HTTP/1.1
+  Host: api.vantage.com
+  Content-Type: application/json
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.*** (token for usr_7f8e9d0a)
+  X-Request-ID: req_notif_pref_003
+
+  {
+    "updates": [
+      {"channel": "push", "category": "orders", "enabled": false}
+    ]
+  }
+
+[2025-09-29T09:22:10.341Z] Response:
+  HTTP/1.1 403 Forbidden
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: req_notif_pref_003
+
+  {
+    "error": "FORBIDDEN",
+    "message": "You can only update your own notification preferences"
+  }
+
+  Latency: 7ms
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Sprint Plan — Sprint 2025-39
+────────────────────────────────────────────────────────────────────────────────
+
+Team: Discovery & Engagement
+Sprint: Sprint 2025-39
+Dates: 2025-09-29 to 2025-10-10
+Sprint Goal: Launch wishlist sharing beta and notification preferences
+Velocity (last 3 sprints): 25, 27, 29
+Current sprint capacity: 32 points
+
+--- Team Roster ---
+
+  Engineer           | Role                   | Availability
+  -------------------|------------------------|--------------
+  Maya Chen          | Product manager        | Full sprint
+  Deepak Patel       | Backend lead           | Full sprint
+  Kwame Asante       | Notifications engineer | Full sprint
+  Angela Russo       | Security engineer      | 50% (shared with platform team)
+  Lisa Park          | Data science           | 30% (analytics setup only)
+
+--- Sprint Backlog ---
+
+  Ticket    | Title                                                      | Assignee     | Points | Priority
+  ----------|------------------------------------------------------------|--------------|--------|----------
+  DISC-2340 | Wishlist sharing — deploy OG renderer to prod              | Deepak Patel | 5      | P0
+  DISC-2341 | Wishlist sharing — ramp flag to 100% internal, 10% external| Deepak Patel | 3      | P0
+  DISC-2355 | Notification preferences — backend deploy + mobile SDK     | Kwame Asante | 8      | P1
+  DISC-2360 | Notification preferences — analytics events for changes    | Kwame Asante | 3      | P1
+  DISC-2362 | Share link click-through tracking in Segment               | Maya/Lisa    | 2      | P1
+  DISC-2370 | OG renderer load test at 500 concurrent renders            | Deepak Patel | 3      | P0
+
+  Total committed: 24 points
+  Stretch: DISC-2375 (wishlist price drop notifications, 5 pts)
+
+maya.chen: "Wishlist sharing is the tentpole feature for the October product update email.
+We need it at 10% external by Sprint end."
+
+deepak.patel: "The OG renderer is the risk item. If the load test shows issues, we fall
+back to static placeholder images and skip personalized previews for launch."
+
+kwame.asante: "Notification preferences backend is ready — blocked on mobile SDK update
+from James. He committed to merging by Wednesday."
+
+--- Sprint Risks ---
+
+  Risk                                | Severity | Mitigation
+  ------------------------------------|----------|------------------------------------------
+  OG renderer stability under load    | Medium   | Load test before flag ramp, static fallback
+  Mobile SDK dependency on James      | Low      | Committed to Wednesday delivery
+  FCM topic migration complexity      | Low      | Batch operations, rollback script ready
+
+--- Sprint Velocity Trend ---
+
+  Sprint 2025-36: 25 points completed
+  Sprint 2025-37: 27 points completed
+  Sprint 2025-38: 29 points completed
+  Sprint 2025-39: 24 points committed (conservative, risk items)
+  Trend: velocity trending up, team capacity increasing
+
+--- Sprint Retro Action from Sprint 38 ---
+
+  Action: improve PR review turnaround — target less than 24 hours for all reviews
+  Owner: deepak.patel
+  Status: in progress, implemented review assignment bot in GitHub
+  Metric: average review turnaround Sprint 38 was 31 hours, target is less than 24 hours
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 4: Deploy Manifest — svc-og-renderer v1.0.0
+────────────────────────────────────────────────────────────────────────────────
+
+Service: svc-og-renderer
+Version: 1.0.0
+Environment: production
+Timestamp: 2025-09-29T11:30:00Z
+Deployer: deepak.patel
+Method: ArgoCD auto-sync
+
+--- Deployment Overview ---
+
+This is the initial production deployment of the OG renderer service. The service
+generates Open Graph preview images for shared wishlists using Puppeteer to render
+HTML templates and capture screenshots. Images are cached in Cloudflare R2 with a
+24-hour TTL.
+
+deepak.patel: "First prod deploy of og-renderer. Starting with 2+1 replicas. Will
+monitor for 24h before enabling wishlist sharing flag."
+
+--- Kubernetes Manifest ---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-og-renderer
+  namespace: vantage-prod
+  labels:
+    app: svc-og-renderer
+    version: v1.0.0
+    team: discovery-engagement
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: svc-og-renderer
+  template:
+    metadata:
+      labels:
+        app: svc-og-renderer
+        version: v1.0.0
+    spec:
+      containers:
+      - name: og-renderer
+        image: ghcr.io/vantage-commerce/og-renderer:1.0.0-sha-a8f3c21
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: R2_BUCKET
+          value: vantage-social-assets
+        - name: RENDER_TIMEOUT_MS
+          value: "5000"
+        - name: BROWSER_POOL_SIZE
+          value: "3"
+        - name: R2_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: r2-credentials
+              key: access-key-id
+        - name: R2_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: r2-credentials
+              key: secret-access-key
+        - name: NODE_ENV
+          value: production
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+
+--- Horizontal Pod Autoscaler ---
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: svc-og-renderer-hpa
+  namespace: vantage-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: svc-og-renderer
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+--- Deployment Regions ---
+
+  us-east-1: 2 replicas
+  eu-west-1: 1 replica
+  Total: 3 replicas at launch
+
+--- Health Check ---
+
+  Endpoint: GET /healthz
+  Returns: 200 OK with Puppeteer browser pool status
+  Response body includes: status (healthy or unhealthy), browser pool availability
+  (total, available, busy), R2 connection status, and uptime in seconds
+
+--- Cache Configuration ---
+
+  Storage: Cloudflare R2 bucket vantage-social-assets
+  Cache key: SHA256 hash of wishlist_id concatenated with sorted item_ids and template_version
+  TTL: 24 hours
+  Cache invalidation: on wishlist item add or remove, the cache entry is deleted and
+  regenerated on next share view
+
+--- Rollback Plan ---
+
+  ArgoCD manual sync to previous commit if health checks fail for more than 5 minutes
+  continuously. Since this is the initial deployment, rollback means removing the
+  deployment entirely. The wishlist sharing feature flag must remain OFF until the
+  renderer is verified stable.
+
+--- Post-Deployment Verification ---
+
+  Verification checklist:
+  One: health check endpoint returns 200 with healthy status
+  Two: browser pool initializes with 3 available browsers per pod
+  Three: R2 connectivity test succeeds (write and read a test image)
+  Four: sample render request completes within 5 seconds
+  Five: Datadog metrics flowing for render duration, pool utilization, and error count
+  Six: no OOM kills or pod restarts in first 30 minutes
+  Seven: ArgoCD sync status shows healthy and synced
+
+  All 7 verification steps completed successfully at 2025-09-29T12:00:00Z by deepak.patel.
+
+--- Slack Thread: #checkout-team QA Results Review ---
+
+[2025-09-29T10:00:00Z] tomas.rivera:
+  QA report for guest checkout v2 at 25 percent rollout is complete. overall status is
+  PASS with two minor observations. full report is attached as QA-2025-0922 in Confluence.
+
+[2025-09-29T10:01:30Z] carlos.medina:
+  nice work tomas. what are the two observations?
+
+[2025-09-29T10:02:15Z] tomas.rivera:
+  first one is the Safari iOS payment form flicker. during the Stripe element mount on
+  Safari iOS, the payment form occasionally flickers for about 200 milliseconds. it is
+  purely cosmetic and does not affect functionality. users can still complete payment
+  normally. this is a known Stripe SDK issue and they have a fix coming in their next
+  minor release.
+
+[2025-09-29T10:03:45Z] tomas.rivera:
+  second one is the cart recovery email delay for abandoned guest checkouts. when a guest
+  session expires without completing checkout, we publish a Kafka event which triggers a
+  cart recovery email. for registered users this takes about 1 second. for guest users
+  it takes about 4 seconds because we need to look up the cart contents from Redis before
+  the session key expires and then resolve the email address from the session data.
+
+[2025-09-29T10:05:00Z] priya.nakamura:
+  the Safari flicker is definitely the Stripe SDK issue. i checked their GitHub issues
+  and they have it tracked as stripe-js issue 847. the fix is in version 12.5.0 which
+  should be released next week. we can update the SDK then.
+
+[2025-09-29T10:06:30Z] carlos.medina:
+  the 4 second delay on cart recovery is acceptable for now. guest checkout is inherently
+  a more complex flow for session recovery since we do not have a persistent user record.
+  if it becomes an issue for conversion we can optimize later by pre-caching the email
+  address outside the session TTL.
+
+[2025-09-29T10:08:00Z] tomas.rivera:
+  agreed. neither observation is a blocker. my recommendation is to proceed to 50 percent
+  rollout in Sprint 38. the load test showed the system handles 2x peak traffic with no
+  degradation and the conversion rate at 25 percent is within noise of the legacy flow.
+
+[2025-09-29T10:09:15Z] carlos.medina:
+  i concur. let us plan for 50 percent rollout on Monday October 6. priya can you update
+  the LaunchDarkly targeting rule?
+
+[2025-09-29T10:10:00Z] priya.nakamura:
+  will do. i will update the targeting to 50 percent and remove the us-east-1 region
+  restriction so both regions get the new flow. the rollback plan stays the same: disable
+  the flag for instant revert.
+
+[2025-09-29T10:11:30Z] janet.okoye:
+  great results. one thing to note for the 50 percent ramp: we should make sure the
+  Redis cluster monitoring dashboard is set up with alerts before ramping. at 50 percent
+  we will have roughly 8000 concurrent sessions at peak which is still well within the
+  8GB memory limit but i want the alerts in place.
+
+[2025-09-29T10:12:45Z] carlos.medina:
+  good point. tomas can you verify the Datadog monitors are active before Monday?
+
+[2025-09-29T10:13:30Z] tomas.rivera:
+  already verified. the checkout-guest-v2-rollout dashboard in Grafana has all 6 panels
+  active and the 4 alert rules are configured and tested. i tested each alert by
+  temporarily lowering the threshold and verifying the notification fired correctly in
+  the Slack channel and PagerDuty.
+
+[2025-09-29T10:14:15Z] carlos.medina:
+  perfect. we are good to go for 50 percent on Monday then.
+
+--- Slack Thread: #discovery-eng OG Renderer Deployment ---
+
+[2025-09-29T11:35:00Z] deepak.patel:
+  just deployed svc-og-renderer v1.0.0 to production. 2 replicas in us-east-1 and 1 in
+  eu-west-1. all health checks passing. going to monitor for 24 hours before enabling
+  the wishlist sharing feature flag.
+
+[2025-09-29T11:36:30Z] maya.chen:
+  great. what does the monitoring look like?
+
+[2025-09-29T11:37:15Z] deepak.patel:
+  i have a Datadog dashboard tracking render latency, browser pool utilization, memory
+  usage, and R2 upload success rate. i also set up alerts for circuit breaker state
+  changes and high error rates.
+
+[2025-09-29T11:38:45Z] kwame.asante:
+  i can see the health check endpoint responding correctly. browser pool shows 3 available
+  per pod. looks healthy.
+
+[2025-09-29T11:40:00Z] deepak.patel:
+  i ran 50 test renders through the service and all completed within 2 seconds. the
+  images look correct in R2. cache key generation is working as expected with the
+  SHA256 hash of wishlist ID plus item IDs plus template version.
+
+[2025-09-29T11:41:30Z] maya.chen:
+  when is the load test scheduled?
+
+[2025-09-29T11:42:15Z] deepak.patel:
+  tuesday after hours. i will run 500 concurrent render requests for 15 minutes and
+  measure latency, error rate, and memory usage. if it passes, we enable the flag
+  wednesday morning for internal users first.
+
+[2025-09-29T11:43:00Z] maya.chen:
+  sounds good. keep me posted on the load test results.
+
+[2025-09-29T11:44:15Z] deepak.patel:
+  one concern is memory. Puppeteer with 3 browser instances takes about 510 MB per pod
+  and our limit is 512 MB. that is cutting it very close. if we see any OOM kills during
+  the load test i will bump the limit to 768 MB and reduce the pool to 2 browsers per
+  pod.
+
+[2025-09-29T11:45:30Z] kwame.asante:
+  can we increase the pod count instead? more pods with smaller pools might be more
+  resilient.
+
+[2025-09-29T11:46:45Z] deepak.patel:
+  that is actually a good idea. 4 pods with 2 browsers each gives us 8 concurrent
+  renders instead of 6 with 3 pods and 3 browsers each. and each pod would use only
+  about 400 MB. let me test that configuration during the load test.
+
+[2025-09-29T11:48:00Z] angela.russo:
+  make sure the R2 credentials are stored in Vault and rotated. i see the deployment
+  manifest references a Kubernetes secret called r2-credentials. who provisioned that?
+
+[2025-09-29T11:49:15Z] deepak.patel:
+  i did. the credentials are stored in HashiCorp Vault and synced to Kubernetes via
+  the External Secrets Operator. rotation is automatic every 90 days. i verified the
+  R2 access key has write permissions only to the vantage-social-assets bucket and
+  nothing else.
+
+[2025-09-29T11:50:30Z] angela.russo:
+  good. principle of least privilege. approved from a security standpoint.
+
+--- Slack Thread: #discovery-eng Notification Preferences Mobile Blocker ---
+
+[2025-09-29T14:00:00Z] kwame.asante:
+  notification preferences backend is deployed and the API is live. however the mobile
+  app update is blocked on james from the mobile team. he committed to merging the
+  mobile SDK changes by Wednesday but i have not seen a PR yet.
+
+[2025-09-29T14:01:30Z] maya.chen:
+  i will follow up with james directly. the notification preferences UI on mobile is
+  important for the sprint goal. without it, users can only change preferences on web.
+
+[2025-09-29T14:03:00Z] kwame.asante:
+  the backend is fully functional and tested. the GET and PUT endpoints are working
+  correctly in production. i verified FCM topic subscription and unsubscription works
+  with test accounts. the batch scheduler for deals notifications is also live — deals
+  notifications are now queued in SQS and delivered at the user's preferred time window.
+
+[2025-09-29T14:04:30Z] maya.chen:
+  good. can we launch the web UI for notification preferences independently of mobile?
+
+[2025-09-29T14:05:15Z] kwame.asante:
+  yes. the web UI is in PR 4695 by priya. it uses the same API endpoints. we can ship
+  web first and mobile whenever james is ready.
+
+[2025-09-29T14:06:30Z] maya.chen:
+  let us do that. web notification preferences this sprint, mobile next sprint if
+  needed. update the sprint board accordingly.
+
+[2025-09-29T14:07:45Z] kwame.asante:
+  done. DISC-2355 is split into DISC-2355A (web, this sprint) and DISC-2355B (mobile,
+  next sprint). DISC-2360 for analytics events is on track for this week.
+
+--- Runbook: Notification Preferences Service ---
+
+Runbook identifier: RB-NOTIF-003
+Owner: kwame.asante
+Last updated: 2025-09-29
+Service: svc-notification-hub v3.2.0
+
+Overview:
+  The notification preferences service allows users to manage their push notification,
+  email, and SMS preferences at a per-category granularity. Categories include orders,
+  deals, wishlist, and social. The service integrates with Firebase Cloud Messaging for
+  push notification topic management and SQS plus Lambda for batch deals notification
+  scheduling.
+
+Common issues and resolution:
+
+  Issue one: FCM topic subscription failures
+    Symptom: users change their preferences on the web or mobile app but do not start
+    or stop receiving notifications for the changed category.
+    Diagnosis: check the Datadog dashboard for FCM API error rates. Common causes
+    include expired FCM server key, FCM API rate limiting (500 requests per second per
+    project), or network connectivity issues between the notification hub and FCM servers.
+    Resolution: if the FCM server key is expired, rotate it in Google Cloud Console and
+    update the Vault secret. If rate limited, the service has built-in retry with
+    exponential backoff. If network issue, check the Kubernetes network policies and
+    egress rules. FCM topic subscription failures are not user-facing because the
+    preference change is saved in PostgreSQL regardless of FCM success. The subscription
+    is retried in a background job every 5 minutes.
+
+  Issue two: SQS batch delivery delays
+    Symptom: deals notifications are delivered outside the user's preferred time window.
+    Diagnosis: check the SQS queue depth in AWS CloudWatch. If the queue depth is high,
+    the Lambda consumer may be falling behind. Check Lambda invocation errors and
+    concurrent execution count.
+    Resolution: increase Lambda concurrency from 10 to 20 if queue depth exceeds 10,000
+    messages. If Lambda is throwing errors, check the error logs in CloudWatch Logs for
+    the deals-notification-sender function. Common errors include FCM device token expiry
+    (resolved by refreshing tokens from the user profile service) and APNs certificate
+    expiry (resolved by rotating the certificate in Apple Developer portal).
+
+  Issue three: preference migration data inconsistency
+    Symptom: existing users see incorrect notification preferences after the migration.
+    Diagnosis: query the notification_preferences table for the affected user and compare
+    with their pre-migration settings in the users table (email_notifications and
+    sms_notifications columns).
+    Resolution: run the preference migration repair script which recomputes preferences
+    from the source-of-truth columns in the users table. The script can be run for a
+    single user or in batch mode. It is idempotent and safe to run multiple times.
+
+  Issue four: quiet hours timezone mismatch
+    Symptom: notifications delivered during hours the user considers quiet.
+    Diagnosis: check the user's timezone setting in svc-user-profile. The quiet hours
+    are stored as local time in the notification_preferences table and converted to UTC
+    at delivery time using the timezone from the user profile.
+    Resolution: verify the user's timezone is correctly set. If the user recently changed
+    timezones (for example while traveling), the quiet hours may not have been recalculated.
+    The recalculation happens once per day at midnight UTC.
+
+================================================================================
+END OF LOG — 2025-09-29
+================================================================================

@@ -1,0 +1,533 @@
+{
+  "episodes": [
+    {
+      "index": 1,
+      "date": "2025-09-08",
+      "theme": "infrastructure_ops",
+      "documents": [
+        {
+          "type": "k8s_config",
+          "metadata": {
+            "timestamp": "2025-09-08T06:15:00Z",
+            "service": "cluster-autoscaler",
+            "environment": "production",
+            "cluster": "prod-us-east-1"
+          },
+          "entities": [
+            "cluster-autoscaler v1.28.2 running in kube-system namespace",
+            "Node pool worker-general-v5 (m6i.4xlarge): min 12, max 40, current 18 nodes",
+            "Node pool worker-memory-v3 (r6i.2xlarge): min 4, max 16, current 7 nodes",
+            "Node pool worker-spot-v2 (m6i.2xlarge): min 0, max 30, current 11 nodes"
+          ],
+          "actions": [
+            "Scaled worker-general-v5 from 16 to 18 nodes at 05:48 UTC due to pending pod backlog (14 pods unschedulable)",
+            "Cordon and drain of node ip-10-42-17-209 completed; replacement node ip-10-42-19-88 joined at 06:02 UTC"
+          ],
+          "quotes": [],
+          "details": [
+            "PodDisruptionBudget for checkout-service allows maxUnavailable=1; respected during drain",
+            "Spot interruption notice received for ip-10-42-8-141 at 05:31 UTC; pod rescheduling completed in 47 seconds",
+            "Total cluster capacity: 312 vCPU, 1.18 TiB memory; current utilization 68% CPU, 54% memory"
+          ]
+        },
+        {
+          "type": "deploy_manifest",
+          "metadata": {
+            "timestamp": "2025-09-08T14:30:00Z",
+            "service": "redis-cluster",
+            "environment": "production",
+            "version": "7.2.5"
+          },
+          "entities": [
+            "Redis cluster redis-prod-main: 6 nodes (3 primaries, 3 replicas) across 3 AZs",
+            "Operator: redis-operator v2.4.1 in redis-system namespace"
+          ],
+          "actions": [
+            "Rolling upgrade from Redis 7.2.4 to 7.2.5 initiated; replica redis-prod-main-2-replica upgraded first",
+            "Failover test on shard-0: promoted replica in 1.8 seconds, zero client errors observed"
+          ],
+          "quotes": [
+            "#platform-infra @drew.park: redis 7.2.5 rolling out now, patch fixes the WAITAOF edge case we hit in staging last week. ETA 45 min for full cluster."
+          ],
+          "details": [
+            "Backup snapshot taken before upgrade: rdb size 14.2 GB, upload to s3://vantage-backups/redis/prod/ completed in 3m12s",
+            "Client connection count during upgrade: peak 8,412 connections; no CLUSTERDOWN errors in sentinel logs",
+            "Memory fragmentation ratio stable at 1.08 across all shards post-upgrade"
+          ]
+        },
+        {
+          "type": "grafana_alert",
+          "metadata": {
+            "timestamp": "2025-09-08T09:22:00Z",
+            "alert_name": "NodeDiskPressure",
+            "environment": "production",
+            "severity": "warning"
+          },
+          "entities": [
+            "Node ip-10-42-22-56 (worker-general-v5 pool)"
+          ],
+          "actions": [
+            "Alert fired at 09:22 UTC: disk usage on /var/lib/kubelet reached 87% (threshold 85%)",
+            "Image garbage collection freed 18.4 GB of unused container images; disk usage dropped to 71% by 09:41 UTC"
+          ],
+          "quotes": [],
+          "details": [
+            "Root cause: stale image layers from 23 previous deployments of inventory-service accumulated over 19 days",
+            "imageGCHighThresholdPercent set to 85%, imageGCLowThresholdPercent set to 70% in kubelet config"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "date": "2025-09-14",
+      "theme": "infrastructure_ops",
+      "documents": [
+        {
+          "type": "runbook_entry",
+          "metadata": {
+            "timestamp": "2025-09-14T11:00:00Z",
+            "runbook": "DB-MIG-042: PostgreSQL Major Version Upgrade",
+            "service": "order-database",
+            "environment": "production",
+            "author": "jenna.liu"
+          },
+          "entities": [
+            "RDS instance orders-prod-primary (db.r6g.4xlarge): PostgreSQL 15.7 target 16.4",
+            "Read replicas: orders-prod-read-east, orders-prod-read-west",
+            "Blue-green deployment managed by AWS RDS Blue/Green Deployments"
+          ],
+          "actions": [
+            "Pre-upgrade validation: pg_upgrade --check passed on staging clone; 0 incompatible objects found",
+            "Extension audit completed: 8 extensions verified compatible with PG 16 (postgis 3.4, pg_stat_statements 1.10, pgcrypto 1.3, uuid-ossp 1.1, pg_trgm 1.6, btree_gist 1.7, hstore 1.8, pglogical 2.4.4)",
+            "Blue environment provisioned: orders-prod-green-primary synchronized via logical replication; lag steady at 12ms"
+          ],
+          "quotes": [
+            "RUNBOOK NOTE @jenna.liu: Switchover window confirmed for 2025-09-16 03:00 UTC. order-service team acknowledged 5-minute read-only window. Rollback plan: revert DNS CNAME to blue endpoint within 30 seconds.",
+            "#database-ops @carlos.mendez: Ran EXPLAIN ANALYZE on top 50 queries against green — no plan regressions. Three queries improved due to PG16 incremental sort optimization."
+          ],
+          "details": [
+            "Current WAL generation rate: 2.4 GB/hr; logical replication slot retained 890 MB during test pause",
+            "Connection pool (PgBouncer): max_client_conn=600, default_pool_size=40, reserve_pool_size=10"
+          ]
+        },
+        {
+          "type": "pagerduty_incident",
+          "metadata": {
+            "timestamp": "2025-09-14T03:18:00Z",
+            "incident_id": "PD-2025-09-14-0042",
+            "service": "payment-gateway",
+            "environment": "production",
+            "severity": "P3",
+            "resolved_at": "2025-09-14T03:34:00Z"
+          },
+          "entities": [
+            "payment-gateway pods (6 replicas) in namespace payments-prod",
+            "On-call engineer: @samira.hassan (Platform SRE)"
+          ],
+          "actions": [
+            "NLB health checks failed for 2 of 6 targets at 03:18 UTC; traffic shifted to remaining 4 healthy targets",
+            "Node ip-10-42-11-73 rebooted via SSM at 03:27 UTC; kubelet recovered, pods rescheduled, all 6 targets healthy by 03:34 UTC"
+          ],
+          "quotes": [
+            "#incidents @samira.hassan: payment-gateway P3 — two targets down on nlb health check. Traced to single node kubelet issue, not application. Rebooting node now.",
+            "#incidents @samira.hassan: Resolved. Node back, all payment pods healthy. No customer-facing impact — NLB drained cleanly. RCA: PLEG not responding for 6m due to container runtime deadlock."
+          ],
+          "details": [
+            "Duration: 16 minutes. Customer impact: none (NLB cross-zone load balancing maintained throughput at 1,240 TPS)",
+            "containerd version on affected node: 1.7.18; upgrading to 1.7.20 in next maintenance window"
+          ]
+        },
+        {
+          "type": "grafana_alert",
+          "metadata": {
+            "timestamp": "2025-09-14T18:45:00Z",
+            "alert_name": "CertificateExpiryWarning",
+            "environment": "production",
+            "severity": "warning"
+          },
+          "entities": [
+            "cert-manager v1.15.1 in cert-manager namespace",
+            "Certificate vantage-api-wildcard (*.api.vantagecommerce.com): expires 2025-10-14"
+          ],
+          "actions": [
+            "cert-manager detected certificate expiring in 30 days; automatic renewal initiated via ACME DNS-01 challenge",
+            "New certificate issued by Let's Encrypt at 18:52 UTC; secret tls-vantage-api-wildcard updated in 4 namespaces"
+          ],
+          "quotes": [],
+          "details": [
+            "Ingress controllers (nginx-ingress-controller, 3 replicas) reloaded TLS context within 8 seconds of secret update"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "date": "2025-09-20",
+      "theme": "infrastructure_ops",
+      "documents": [
+        {
+          "type": "k8s_config",
+          "metadata": {
+            "timestamp": "2025-09-20T02:00:00Z",
+            "service": "kube-apiserver",
+            "environment": "production",
+            "cluster": "prod-us-east-1",
+            "operation": "Kubernetes Control Plane Upgrade"
+          },
+          "entities": [
+            "EKS cluster prod-us-east-1: upgrading from Kubernetes 1.29.6 to 1.30.4",
+            "Managed node groups: worker-general-v5, worker-memory-v3, worker-spot-v2",
+            "VPC CNI plugin v1.18.3, CoreDNS v1.11.3, kube-proxy v1.30.4"
+          ],
+          "actions": [
+            "Control plane upgrade initiated at 02:00 UTC during maintenance window; API server rolling update completed by 02:14 UTC with zero downtime",
+            "CoreDNS addon upgraded from v1.11.1 to v1.11.3; DNS resolution validated with in-cluster dig tests (avg 2.1ms)",
+            "kube-proxy DaemonSet rolled out to 36 nodes; iptables rules regenerated on each node"
+          ],
+          "quotes": [
+            "#platform-infra @drew.park: control plane at 1.30.4 now. Starting managed node group rolling updates. worker-general-v5 first, 2-node surge. ~90 min for full rollout.",
+            "#platform-infra @tanya.okonkwo: FYI — deprecated PodSecurityPolicy resources removed in 1.30. We migrated to Pod Security Standards admission in Q2, so no impact."
+          ],
+          "details": [
+            "API server audit log rate: 340 events/sec during upgrade; no rejected requests",
+            "Node group upgrade strategy: maxUnavailable=1, maxSurge=2; ensures capacity headroom during rolling replacement",
+            "worker-general-v5 upgrade: 18 nodes replaced over 87 minutes; all PodDisruptionBudgets respected"
+          ]
+        },
+        {
+          "type": "slack_transcript",
+          "metadata": {
+            "timestamp": "2025-09-20T15:30:00Z",
+            "channel": "#platform-infra",
+            "environment": "production"
+          },
+          "entities": [
+            "CDN provider: CloudFront distribution E1A2B3C4D5E6F7",
+            "WAF WebACL: vantage-prod-waf-v3"
+          ],
+          "actions": [
+            "CloudFront cache invalidation triggered for /static/* after frontend release v4.12.0; 12,400 objects invalidated",
+            "Origin response timeout increased from 30s to 60s for /api/v2/search/* paths due to slow query reports"
+          ],
+          "quotes": [
+            "@nina.patel: hey team, product wants to enable Brotli compression on CloudFront for the new SPA bundle. Currently serving gzip only. Any concerns?",
+            "@drew.park: no issues from infra side. Brotli gives ~15-20% better compression on JS bundles. I'll update the behavior policy."
+          ],
+          "details": [
+            "CloudFront monthly bandwidth: 48.2 TB egress, $3,860 estimated cost; 94.1% cache hit ratio",
+            "WAF blocked 14,200 requests in past 24h: 62% SQL injection patterns, 28% known bot signatures, 10% rate limiting"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "date": "2025-09-27",
+      "theme": "infrastructure_ops",
+      "documents": [
+        {
+          "type": "runbook_entry",
+          "metadata": {
+            "timestamp": "2025-09-27T08:00:00Z",
+            "runbook": "NET-017: VPC Peering and Transit Gateway Audit",
+            "service": "network-infrastructure",
+            "environment": "production",
+            "author": "marcus.wright"
+          },
+          "entities": [
+            "Transit Gateway tgw-0a1b2c3d4e5f6 connecting 4 VPCs (prod, staging, shared-services, data-warehouse)",
+            "VPC prod-us-east-1 CIDR 10.42.0.0/16 with 12 subnets across 3 AZs",
+            "AWS Network Firewall nfw-prod-perimeter in inspection VPC"
+          ],
+          "actions": [
+            "Quarterly network audit completed: 47 security group rules reviewed, 3 overly permissive rules tightened (removed 0.0.0.0/0 ingress on ports 8080, 8443 from legacy SGs)",
+            "Transit Gateway route table updated: removed stale route to decommissioned staging-v1 VPC (10.50.0.0/16)"
+          ],
+          "quotes": [
+            "#platform-infra @marcus.wright: Quarterly network audit done. Three legacy SGs had 0.0.0.0/0 on non-standard ports — tightened to VPC CIDR only. No services affected.",
+            "#platform-infra @drew.park: good catch. Let's add a Config Rule to flag any new 0.0.0.0/0 ingress automatically."
+          ],
+          "details": [
+            "Transit Gateway throughput: avg 2.8 Gbps, peak 6.1 Gbps; inter-VPC latency p50=0.8ms, p99=2.4ms",
+            "Network Firewall processed 94M flows in past 30 days; 12,400 stateful drops (0.013%)",
+            "VPC Flow Logs: 2.1 TB stored in S3 for past quarter; Athena queries for audit averaged 14 seconds"
+          ]
+        },
+        {
+          "type": "pagerduty_incident",
+          "metadata": {
+            "timestamp": "2025-09-27T14:55:00Z",
+            "incident_id": "PD-2025-09-27-0078",
+            "service": "elasticsearch-cluster",
+            "environment": "production",
+            "severity": "P2",
+            "resolved_at": "2025-09-27T15:42:00Z"
+          },
+          "entities": [
+            "Elasticsearch cluster es-prod-logs (7 nodes: 3 master-eligible, 3 data-hot, 1 data-warm)",
+            "Index pattern vantage-app-logs-2025.09.*: 380 GB across 120 shards",
+            "On-call engineers: @alex.greenfield (Search Platform), @samira.hassan (Platform SRE)"
+          ],
+          "actions": [
+            "Alert fired: es-prod-logs cluster status RED at 14:55 UTC; primary shard [vantage-app-logs-2025.09.27][shard-14] unassigned",
+            "Root cause: data-hot-02 disk reached 92% watermark; Elasticsearch refused shard allocation to the node",
+            "Emergency action: deleted indices older than 21 days (freed 140 GB), increased data-hot EBS volumes from 1 TB to 1.5 TB via online resize"
+          ],
+          "quotes": [
+            "#incidents @alex.greenfield: ES cluster RED — unassigned primary on shard 14. data-hot-02 hit disk watermark. Cleaning old indices now.",
+            "#incidents @samira.hassan: Resizing EBS volumes on all 3 data-hot nodes to 1.5 TB. Online resize, no restart needed.",
+            "#incidents @alex.greenfield: Cluster GREEN again. All shards allocated. Adding Grafana alert for disk usage > 80% on ES nodes."
+          ],
+          "details": [
+            "Duration: 47 minutes. Impact: log ingestion buffered in Kafka (consumer lag peaked at 2.1M messages) but no data loss",
+            "ILM policy updated: rollover condition changed from 50 GB / 1 day to 30 GB / 1 day"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "date": "2025-10-03",
+      "theme": "infrastructure_ops",
+      "documents": [
+        {
+          "type": "deploy_manifest",
+          "metadata": {
+            "timestamp": "2025-10-03T16:00:00Z",
+            "service": "kafka-cluster",
+            "environment": "production",
+            "version": "Apache Kafka 3.7.1 (Strimzi operator 0.42.0)"
+          },
+          "entities": [
+            "Kafka cluster kafka-prod: 5 brokers (broker-0 through broker-4) on dedicated node pool worker-kafka-v2 (i3en.2xlarge)",
+            "Schema Registry confluent-schema-registry v7.6.0 (3 replicas)",
+            "Kafka Connect cluster connect-prod (4 workers) with S3 sink and JDBC source connectors"
+          ],
+          "actions": [
+            "Broker rolling restart for JVM tuning: -Xmx 12g to 14g, G1 GC MaxGCPauseMillis 20ms to 15ms; restarted one at a time with 5-minute stabilization delay",
+            "Topic vantage-order-events partition count increased from 24 to 36 to accommodate 40% throughput growth; reassignment completed via cruise-control in 22 minutes"
+          ],
+          "quotes": [
+            "#platform-infra @ravi.shankar: Kafka broker rolling restart done. GC pause times dropped from p99 42ms to p99 18ms with the new tuning. Producer ack latency improved across the board.",
+            "#platform-infra @drew.park: nice. Cruise control balanced partitions on the new 36-partition topic — all brokers within 3% of equal leader count."
+          ],
+          "details": [
+            "Cluster throughput: 48,000 messages/sec ingest, 890 MB/sec aggregate; replication factor 3 on all production topics",
+            "Under-replicated partitions during restart: peak 24 (broker-2 restart window), returned to 0 within 90 seconds per broker"
+          ]
+        },
+        {
+          "type": "grafana_alert",
+          "metadata": {
+            "timestamp": "2025-10-03T04:12:00Z",
+            "alert_name": "HighMemoryPressure",
+            "environment": "production",
+            "severity": "critical"
+          },
+          "entities": [
+            "Node ip-10-42-31-142 (worker-memory-v3 pool, r6i.2xlarge)",
+            "OOMKilled pod: analytics-batch-processor-7b8c9d (container memory limit 8Gi)"
+          ],
+          "actions": [
+            "Alert fired at 04:12 UTC: node memory usage 94%, OOMKilled event on analytics-batch-processor pod",
+            "Pod automatically restarted by kubelet; memory request increased from 4Gi to 6Gi, limit from 8Gi to 12Gi"
+          ],
+          "quotes": [
+            "#incidents @alex.greenfield: analytics-batch-processor OOMKilled overnight. Monthly aggregation job processing 2.1M order records. Bumped memory limits."
+          ],
+          "details": [
+            "analytics-batch-processor runs daily at 04:00 UTC; end-of-month run processes 30x normal volume",
+            "Node memory: 64 GiB total, 14 pods running, 58.2 GiB requested; headroom only 5.8 GiB before OOM event"
+          ]
+        },
+        {
+          "type": "runbook_entry",
+          "metadata": {
+            "timestamp": "2025-10-03T10:30:00Z",
+            "runbook": "CERT-009: TLS Certificate Rotation — Internal mTLS",
+            "service": "istio-system",
+            "environment": "production",
+            "author": "tanya.okonkwo"
+          },
+          "entities": [
+            "Istio service mesh v1.22.4 with Citadel CA issuing workload certificates",
+            "Intermediate CA: istio-ca-prod, rotated quarterly, current cert valid until 2025-12-28"
+          ],
+          "actions": [
+            "Quarterly mTLS intermediate CA rotation initiated; new intermediate cert generated and distributed to all 36 nodes via istiod",
+            "mTLS STRICT mode verified across all production namespaces; 0 plaintext connections detected in peer authentication audit"
+          ],
+          "quotes": [
+            "#security-ops @tanya.okonkwo: Quarterly Istio CA rotation complete. All 412 workload certs have rolled to new intermediate. No connection errors during rotation."
+          ],
+          "details": [
+            "Envoy sidecar SDS hot-reload: average certificate swap time 180ms, no connection drops",
+            "Peer authentication policy audit: 38 namespaces in STRICT mode, 2 namespaces (legacy-integrations, vendor-webhooks) in PERMISSIVE mode with migration planned for Q4"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "date": "2025-10-09",
+      "theme": "infrastructure_ops",
+      "documents": [
+        {
+          "type": "deploy_manifest",
+          "metadata": {
+            "timestamp": "2025-10-09T03:00:00Z",
+            "service": "postgres-operator",
+            "environment": "production",
+            "version": "Zalando Postgres Operator v1.12.2"
+          },
+          "entities": [
+            "PostgreSQL cluster user-profile-db: 1 primary + 2 replicas (8 vCPU 64 GiB each)",
+            "Patroni v3.3.2 managing failover with etcd-prod cluster (3 nodes) as DCS",
+            "WAL-G v3.0.0 for continuous WAL archiving to S3"
+          ],
+          "actions": [
+            "Automated failover drill: killed primary pod user-profile-db-0; Patroni promoted replica user-profile-db-1 in 4.2 seconds",
+            "pg_repack executed on table user_profiles (480M rows, 112 GB): reclaimed 8.4 GB of bloat in 47 minutes"
+          ],
+          "quotes": [
+            "#database-ops @carlos.mendez: Failover drill on user-profile-db completed. 4.2s promotion time, PgBouncer reconnected in under 1 second. Zero errors in application logs.",
+            "#database-ops @jenna.liu: pg_repack on user_profiles done. 8.4 GB freed. Sequential scan times improved from 14s to 11s on the analytics query set."
+          ],
+          "details": [
+            "Replication lag during normal operation: sync replica 0.3ms, async replica 12ms (cross-AZ)",
+            "Connection stats: 340 active connections via PgBouncer, 28 direct connections for admin/monitoring"
+          ]
+        },
+        {
+          "type": "slack_transcript",
+          "metadata": {
+            "timestamp": "2025-10-09T14:20:00Z",
+            "channel": "#platform-infra",
+            "environment": "production"
+          },
+          "entities": [
+            "Terraform Cloud workspace vantage-infra-prod",
+            "AWS Cost Explorer monthly report: September 2025"
+          ],
+          "actions": [
+            "Terraform state review: 1,842 managed resources, 0 drift detected in nightly reconciliation",
+            "Cost optimization: identified 4 unattached EBS volumes (total 2 TB, $200/month) from decommissioned staging instances"
+          ],
+          "quotes": [
+            "@marcus.wright: September AWS bill landed at $127,400. Up 6% from August. Main drivers: EC2 +$4,200 (added 2 nodes for K8s upgrade headroom), data transfer +$1,800 (CDN traffic spike during fall sale).",
+            "@drew.park: the K8s headroom nodes are temporary — scaling back down this week. Should save ~$2,100/month.",
+            "@nina.patel: also found 4 orphaned EBS volumes from old staging. Deleting after snapshot. Another $200/month saved."
+          ],
+          "details": [
+            "Top cost centers: EC2 $68,200 (54%), RDS $22,400 (18%), S3 $12,100 (10%), data transfer $9,800 (8%), other $14,900 (12%)",
+            "Reserved Instance coverage: 72% of steady-state EC2; 3 RI renewals due in November"
+          ]
+        },
+        {
+          "type": "http_log",
+          "metadata": {
+            "timestamp": "2025-10-09T11:00:00Z",
+            "service": "shipping-service",
+            "environment": "production"
+          },
+          "entities": [
+            "shipping-service v2.6.3 (4 replicas) in namespace logistics-prod"
+          ],
+          "actions": [
+            "POST /api/v2/shipments/rate-quote — 200 OK, 340ms, request 1.2 KB, response 3.8 KB",
+            "GET /api/v2/shipments/VNT-2025-8847291/tracking — 200 OK, 45ms, response 1.1 KB (cached)"
+          ],
+          "quotes": [],
+          "details": [
+            "Request rate: 420 req/s; error rate 0.12% (HTTP 5xx); p95 latency 680ms, p99 1,240ms",
+            "Carrier API call breakdown: UPS 48%, FedEx 31%, USPS 21%; avg carrier response time 620ms"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "date": "2025-10-16",
+      "theme": "infrastructure_ops",
+      "documents": [
+        {
+          "type": "k8s_config",
+          "metadata": {
+            "timestamp": "2025-10-16T07:00:00Z",
+            "service": "karpenter",
+            "environment": "production",
+            "cluster": "prod-us-east-1",
+            "operation": "Cluster Autoscaler Migration to Karpenter"
+          },
+          "entities": [
+            "Karpenter v0.37.0 replacing cluster-autoscaler v1.28.2",
+            "NodePool default-nodepool: instance families [m6i, m7i, c6i, c7i], capacity types [on-demand, spot]",
+            "NodePool memory-optimized: instance families [r6i, r7i], capacity types [on-demand]"
+          ],
+          "actions": [
+            "Karpenter deployed alongside cluster-autoscaler with 0 weight initially; gradually shifted node provisioning over 4 hours",
+            "Karpenter consolidated 3 underutilized m6i.4xlarge nodes into 2 m7i.4xlarge nodes, saving 1 instance ($0.768/hr)",
+            "cluster-autoscaler scaled to 0 replicas and ConfigMap annotations removed from managed node groups"
+          ],
+          "quotes": [
+            "#platform-infra @drew.park: Karpenter migration complete. Replaced cluster-autoscaler. Node provisioning time dropped from ~120s to ~45s. Consolidation already saved us a node.",
+            "#platform-infra @tanya.okonkwo: nice. One thing to watch — I've set minAvailable=80% on the default NodePool disruption policy to be safe."
+          ],
+          "details": [
+            "Node provisioning latency comparison: cluster-autoscaler avg 118s vs Karpenter avg 43s (direct EC2 fleet API)",
+            "Current node count post-consolidation: 34 nodes (was 36); total cluster cost estimated at $12,400/month EC2"
+          ]
+        },
+        {
+          "type": "pagerduty_incident",
+          "metadata": {
+            "timestamp": "2025-10-16T12:08:00Z",
+            "incident_id": "PD-2025-10-16-0091",
+            "service": "redis-cluster",
+            "environment": "production",
+            "severity": "P3",
+            "resolved_at": "2025-10-16T12:26:00Z"
+          },
+          "entities": [
+            "Redis cluster redis-prod-sessions: 3 primaries, 3 replicas (session store for all user-facing services)",
+            "On-call engineer: @ravi.shankar (Platform SRE)"
+          ],
+          "actions": [
+            "Alert fired: redis-prod-sessions primary-1 memory usage 93% (threshold 90%); eviction count spiked to 840/sec",
+            "Immediate fix: increased maxmemory from 28gb to 36gb on all primaries via CONFIG SET (no restart); eviction rate dropped to 0 within 2 minutes"
+          ],
+          "quotes": [
+            "#incidents @ravi.shankar: redis-prod-sessions P3 — memory at 93%, evictions spiking. Flash sale traffic. Bumping maxmemory live.",
+            "#incidents @ravi.shankar: Resolved. maxmemory now 36gb. Eviction stopped. Filing capacity ticket to upsize to r6g.4xlarge before Black Friday."
+          ],
+          "details": [
+            "Duration: 18 minutes. Customer impact: ~1,200 sessions evicted; affected users experienced cart reset requiring re-login",
+            "Session TTL: 30 minutes sliding window; peak active sessions during incident: 2.4M (normal peak 1.6M)"
+          ]
+        },
+        {
+          "type": "grafana_alert",
+          "metadata": {
+            "timestamp": "2025-10-16T20:30:00Z",
+            "alert_name": "EtcdHighLatency",
+            "environment": "production",
+            "severity": "warning"
+          },
+          "entities": [
+            "etcd cluster etcd-prod (3 members) backing Kubernetes API server and Patroni"
+          ],
+          "actions": [
+            "Alert fired: etcd commit latency p99 reached 180ms (threshold 150ms) at 20:30 UTC",
+            "Alert auto-resolved at 20:38 UTC after nightly compaction completed; p99 latency returned to 12ms baseline"
+          ],
+          "quotes": [],
+          "details": [
+            "etcd DB size: 4.8 GB (alarm threshold 8 GB); total keys: 142,000; compaction freed 1.2 GB of storage",
+            "Compaction runs nightly at 20:30 UTC; duration typically 6-8 minutes; brief latency spike documented in runbook OPS-022"
+          ]
+        }
+      ]
+    }
+  ]
+}

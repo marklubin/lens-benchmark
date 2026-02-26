@@ -1,0 +1,1014 @@
+================================================================================
+INFRASTRUCTURE OPERATIONS LOG — VANTAGE COMMERCE PLATFORM
+Date: 2025-10-16
+Cluster: prod-us-east-1
+Classification: Internal — Operations Team Only
+================================================================================
+
+--- SECTION 1: CLUSTER AUTOSCALER MIGRATION TO KARPENTER ---
+
+Timestamp: 2025-10-16T07:00:00Z
+Service: karpenter
+Environment: production
+Cluster: prod-us-east-1
+Operation: Cluster Autoscaler Migration to Karpenter
+Change Record: CHG-2025-10-16-001
+Implementer: drew.park
+Secondary: tanya.okonkwo
+
+MIGRATION OVERVIEW:
+
+  Current Autoscaler: cluster-autoscaler v1.28.2
+  Target: Karpenter v0.37.0
+  Migration Strategy: Gradual cutover — Karpenter deployed alongside cluster-autoscaler,
+    traffic shifted incrementally over 4 hours, then cluster-autoscaler decommissioned
+
+  Motivation:
+    1. Faster node provisioning (cluster-autoscaler avg 118s vs Karpenter avg 43s)
+    2. Better bin-packing and consolidation (Karpenter uses direct EC2 Fleet API)
+    3. Automatic instance type selection based on pod requirements
+    4. Node consolidation to reduce waste (Karpenter actively consolidates underutilized nodes)
+
+KARPENTER CONFIGURATION:
+
+  Karpenter Version: v0.37.0
+  Namespace: karpenter
+  Service Account: karpenter (IRSA with EC2, IAM, SQS permissions)
+  Interruption Queue: karpenter-interruption-prod (SQS)
+
+  NodePool: default-nodepool
+    Instance Families: [m6i, m7i, c6i, c7i]
+    Instance Sizes: [xlarge, 2xlarge, 4xlarge]
+    Capacity Types: [on-demand, spot]
+    Architecture: [amd64]
+    Zones: [us-east-1a, us-east-1b, us-east-1c]
+    OS: Amazon Linux 2023
+    AMI Family: AL2023
+    Tags:
+      karpenter.sh/managed-by: karpenter
+      environment: production
+      team: platform-infra
+    Limits:
+      cpu: 500
+      memory: 2000Gi
+    Disruption:
+      consolidationPolicy: WhenUnderutilized
+      consolidateAfter: 30s
+      minAvailable: 80%
+      expireAfter: 720h
+    Weight: 100 (initially set to 0 during gradual migration)
+
+  NodePool: memory-optimized
+    Instance Families: [r6i, r7i]
+    Instance Sizes: [xlarge, 2xlarge, 4xlarge]
+    Capacity Types: [on-demand]
+    Zones: [us-east-1a, us-east-1b, us-east-1c]
+    Labels:
+      workload-type: memory-intensive
+    Taints:
+      - key: dedicated
+        value: memory-workloads
+        effect: PreferNoSchedule
+    Limits:
+      cpu: 200
+      memory: 1600Gi
+    Disruption:
+      consolidationPolicy: WhenUnderutilized
+      consolidateAfter: 60s
+      minAvailable: 80%
+    Weight: 50
+
+  EC2NodeClass: default
+    AMI Selector:
+      alias: al2023@latest
+    Subnet Selector:
+      karpenter.sh/discovery: prod-us-east-1
+    Security Group Selector:
+      karpenter.sh/discovery: prod-us-east-1
+    Instance Profile: KarpenterNodeInstanceProfile-prod-us-east-1
+    Block Device Mappings:
+      - deviceName: /dev/xvda
+        ebs:
+          volumeSize: 200Gi
+          volumeType: gp3
+          iops: 3000
+          throughput: 125
+          encrypted: true
+          kmsKeyId: arn:aws:kms:us-east-1:123456789012:key/ebs-key
+          deleteOnTermination: true
+    Tags:
+      Name: karpenter-prod-us-east-1
+    MetadataOptions:
+      httpEndpoint: enabled
+      httpProtocolIPv6: disabled
+      httpPutResponseHopLimit: 2
+      httpTokens: required
+
+MIGRATION EXECUTION TIMELINE:
+
+  Phase 1: Deploy Karpenter (weight=0)
+    [07:00:00Z] Karpenter Helm chart installed
+      Release: karpenter
+      Chart: karpenter/karpenter v0.37.0
+      Namespace: karpenter
+      Status: Deployed
+      Pods: 2 replicas (HA)
+
+    [07:02:00Z] NodePools and EC2NodeClass created
+      default-nodepool: Created (weight=0, inactive)
+      memory-optimized: Created (weight=0, inactive)
+
+    [07:03:00Z] Karpenter health verification
+      Controller: Running, 2/2 pods Ready
+      Webhook: Running, TLS certificates valid
+      SQS Queue: Connected, interruption handler active
+      EC2 Fleet API: Authenticated, permissions verified
+
+  Phase 2: Gradual Traffic Shift (07:15 — 10:00)
+    [07:15:00Z] Set default-nodepool weight=25 (Karpenter handles 25% of new provisioning)
+    [07:15:30Z] Verified: Karpenter picked up pending pod request for analytics-batch-processor
+      Provisioning Time: 44 seconds (vs cluster-autoscaler typical 118 seconds)
+      Instance Selected: m7i.2xlarge (Karpenter chose newer generation for better price-performance)
+
+    [08:00:00Z] Set default-nodepool weight=50 (50/50 split)
+    [08:05:00Z] Karpenter provisioned 1 node during morning traffic ramp
+      Instance: m7i.4xlarge (consolidating what cluster-autoscaler would have done as 2 smaller nodes)
+      Total Time: 42 seconds from pending pod to Running
+
+    [09:00:00Z] Set default-nodepool weight=75 (Karpenter primary)
+    [09:15:00Z] Cluster-autoscaler handled 1 scale event (spot pool)
+    [09:16:00Z] Karpenter handled 2 scale events (general pool)
+
+    [10:00:00Z] Set default-nodepool weight=100 (Karpenter fully active)
+    [10:00:00Z] Set memory-optimized weight=100
+
+  Phase 3: Decommission cluster-autoscaler
+    [10:15:00Z] cluster-autoscaler scaled to 0 replicas
+      kubectl scale deployment cluster-autoscaler -n kube-system --replicas=0
+
+    [10:15:30Z] ConfigMap annotations removed from managed node groups
+      Annotations removed:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: removed
+        cluster-autoscaler.kubernetes.io/scale-down-disabled: removed
+
+    [10:16:00Z] Verified: No cluster-autoscaler pods running
+    [10:16:30Z] Verified: Karpenter handling all provisioning decisions
+
+  Phase 4: Node Consolidation (automatic, 10:30 — 11:00)
+    [10:30:00Z] Karpenter consolidation engine activated
+      Analysis: 36 nodes evaluated for consolidation opportunities
+
+    [10:32:00Z] Consolidation Action 1:
+      Identified: 3 underutilized m6i.4xlarge nodes
+        ip-10-42-19-87: CPU 22%, Memory 28% — 8 pods
+        ip-10-42-19-88: CPU 18%, Memory 24% — 6 pods
+        ip-10-42-19-91: CPU 25%, Memory 31% — 9 pods
+      Action: Replace 3x m6i.4xlarge with 2x m7i.4xlarge
+      Savings: 1 instance ($0.768/hr = ~$562/month)
+
+    [10:32:15Z] Replacement nodes provisioned
+      ip-10-42-19-201: m7i.4xlarge, us-east-1a — Ready in 43 seconds
+      ip-10-42-19-202: m7i.4xlarge, us-east-1b — Ready in 45 seconds
+
+    [10:32:58Z] Drain started on first underutilized node
+      Node: ip-10-42-19-87
+      PodDisruptionBudgets: All respected
+      Pods Rescheduled: 8
+      Drain Duration: 2 minutes 42 seconds
+
+    [10:35:40Z] First node terminated
+    [10:36:00Z] Second node drain started (ip-10-42-19-88)
+    [10:38:30Z] Second node terminated
+    [10:39:00Z] Third node drain started (ip-10-42-19-91)
+    [10:41:45Z] Third node terminated
+
+    Consolidation Complete: 3 old nodes removed, 2 new nodes added
+    Net Result: 36 nodes reduced to 35, then to 34 (1 additional consolidation at 10:50)
+
+    [10:50:00Z] Consolidation Action 2:
+      Identified: 1 additional m6i.4xlarge with low utilization (CPU 20%, Memory 22%)
+      Pods redistributed to existing nodes with available capacity
+      No replacement needed — existing nodes had sufficient headroom
+      Result: 34 nodes total (down from 36)
+
+MIGRATION RESULTS:
+
+  Previous Autoscaler: cluster-autoscaler v1.28.2
+    Node Provisioning Latency (avg): 118 seconds
+    Instance Selection: Fixed per node group (m6i.4xlarge only for general)
+    Consolidation: None (scale-down only when all pods can be rescheduled)
+
+  New Autoscaler: Karpenter v0.37.0
+    Node Provisioning Latency (avg): 43 seconds (direct EC2 Fleet API)
+    Instance Selection: Dynamic (m6i, m7i, c6i, c7i — best fit for pod requirements)
+    Consolidation: Active — reduced cluster from 36 to 34 nodes
+    Cost Savings: $0.768/hr (1 fewer m6i.4xlarge) + better instance selection
+
+  Node Provisioning Latency Comparison:
+    cluster-autoscaler: 118 seconds average
+      Breakdown: ASG API call 8s + instance launch 45s + AMI boot 30s + kubelet registration 35s
+    Karpenter: 43 seconds average
+      Breakdown: EC2 Fleet API call 4s + instance launch 12s + AMI boot 12s + kubelet registration 15s
+      Speedup: 2.7x faster
+
+  Current Node Count Post-Consolidation: 34 nodes (was 36)
+  Total Cluster Cost Estimated: $12,400/month EC2 (was $12,800/month)
+  Monthly Savings: $400/month from consolidation alone
+
+--- SLACK TRANSCRIPT: #platform-infra ---
+
+Timestamp Range: 2025-10-16T06:55:00Z — 2025-10-16T11:05:00Z
+Channel: #platform-infra
+
+[06:55:00] @drew.park: Starting Karpenter migration in 5 minutes. Plan: deploy alongside cluster-autoscaler with weight=0, gradually shift over 3 hours, then decommission cluster-autoscaler
+[06:55:30] @tanya.okonkwo: I'm online. I'll watch pod scheduling and node health
+[07:00:15] @drew.park: Karpenter deployed. 2 pods running in HA mode. NodePools created with weight=0 (inactive)
+[07:03:00] @drew.park: health checks passed. SQS interruption queue connected. EC2 permissions verified. Starting gradual shift now
+[07:15:10] @drew.park: weight set to 25. Karpenter is now eligible for 25% of provisioning decisions
+[07:15:45] @tanya.okonkwo: first Karpenter provision just happened — analytics-batch-processor pending pod. Provisioned m7i.2xlarge in 44 seconds. That's almost 3x faster than cluster-autoscaler
+[07:16:00] @drew.park: nice. And it chose m7i instead of m6i — better price-performance ratio
+[08:00:10] @drew.park: bumping to 50/50. Both autoscalers active
+[08:05:15] @tanya.okonkwo: Karpenter provisioned another node for the morning traffic ramp. m7i.4xlarge, 42 seconds. It's consolidating what cluster-autoscaler would have split across 2 smaller nodes
+[09:00:10] @drew.park: 75% to Karpenter now. cluster-autoscaler mostly idle
+[10:00:15] @drew.park: Karpenter migration complete. Replaced cluster-autoscaler. Node provisioning time dropped from ~120s to ~45s. Consolidation already saved us a node.
+[10:01:00] @tanya.okonkwo: nice. One thing to watch — I've set minAvailable=80% on the default NodePool disruption policy to be safe.
+[10:01:30] @drew.park: good call. That prevents Karpenter from being too aggressive with consolidation during peak hours
+[10:02:00] @ravi.shankar: what happened to the cluster-autoscaler deployment?
+[10:02:30] @drew.park: scaled to 0 replicas. I'll delete the deployment entirely next week after we're confident Karpenter is stable
+[10:32:30] @tanya.okonkwo: Karpenter consolidation is running. It found 3 underutilized m6i.4xlarge nodes and is replacing them with 2 m7i.4xlarge. Net savings of 1 instance
+[10:42:00] @tanya.okonkwo: consolidation done. 3 old nodes removed, 2 new ones added. Cluster at 35 nodes
+[10:50:30] @tanya.okonkwo: and another consolidation — redistributed pods from a 4th underutilized node to existing capacity. Down to 34 nodes total
+[10:51:00] @drew.park: nice. 34 nodes from 36. That's about $400/month savings just from better bin-packing
+[10:52:00] @ravi.shankar: Kafka brokers weren't affected right? Those are on the dedicated worker-kafka-v2 pool
+[10:52:30] @drew.park: correct. Karpenter NodePools only manage general and memory-optimized workloads. Kafka's dedicated node pool is managed separately via ASG (not Karpenter or cluster-autoscaler)
+[11:00:00] @tanya.okonkwo: all services healthy post-migration. Pod scheduling working correctly. Node provisioning tested with a manual scale event — 44 seconds for a new m7i.2xlarge
+[11:05:00] @drew.park: great work team. I'll monitor for the rest of the week and write up the migration report
+
+--- SECTION 2: PAGERDUTY INCIDENT — PD-2025-10-16-0091 ---
+
+Incident ID: PD-2025-10-16-0091
+Timestamp: 2025-10-16T12:08:00Z
+Service: redis-cluster
+Environment: production
+Severity: P3
+Status: RESOLVED
+Resolved At: 2025-10-16T12:26:00Z
+Duration: 18 minutes
+Customer Impact: ~1,200 sessions evicted; affected users experienced cart reset requiring re-login
+
+ON-CALL:
+
+  Primary: @ravi.shankar (Platform SRE)
+  Notification Time: 12:08:06Z
+  Acknowledgment Time: 12:08:28Z (22 seconds)
+
+AFFECTED INFRASTRUCTURE:
+
+  Redis Cluster: redis-prod-sessions
+  Purpose: Session store for all user-facing services
+  Topology: 3 primaries, 3 replicas
+  Instance Type: r6g.2xlarge equivalent (Kubernetes pods on worker-memory-v3)
+  maxmemory (before fix): 28 GB per primary
+  Eviction Policy: allkeys-lru
+
+  Normal Operating Metrics:
+    Peak Active Sessions: 1.6M
+    Average Memory Usage: 72% of maxmemory
+    Session TTL: 30 minutes sliding window
+    Hit Rate: 98.4%
+
+INCIDENT TIMELINE:
+
+  [12:00:00Z] Flash sale started
+    Marketing campaign: "Flash Friday 50% Off" — sent to 2.4M email subscribers
+    Traffic Spike: Normal traffic 1.6M concurrent sessions → 2.4M within 8 minutes
+    Session Creation Rate: From 400/sec to 1,200/sec
+
+  [12:05:00Z] Redis primary-1 memory at 88%
+    Eviction starting: allkeys-lru removing least recently used keys
+    Eviction Rate: 120/sec (manageable, expected under LRU policy)
+
+  [12:08:00Z] ALERT FIRED: redis-prod-sessions primary-1 memory usage 93%
+    Threshold: 90%
+    Eviction Rate: 840/sec (accelerating rapidly)
+    Source: Prometheus alert redis_memory_used_bytes / redis_memory_max_bytes > 0.90
+    Notification: PagerDuty (P3), Slack #incidents
+
+  [12:08:28Z] Acknowledged by @ravi.shankar
+
+  [12:09:00Z] Memory Assessment:
+    Primary-0: 26.2 GB / 28 GB (93.6%) — evicting at 780/sec
+    Primary-1: 26.1 GB / 28 GB (93.2%) — evicting at 840/sec
+    Primary-2: 25.8 GB / 28 GB (92.1%) — evicting at 620/sec
+
+  [12:10:00Z] Immediate Fix Applied:
+    Command executed on all 3 primaries:
+      CONFIG SET maxmemory 36gb
+    Execution: Via redis-cli to each primary, no restart required
+    Time to Execute: 2 seconds per primary
+
+  [12:10:10Z] Eviction Rate Response:
+    Primary-0: 780/sec → 0/sec (within 30 seconds of maxmemory increase)
+    Primary-1: 840/sec → 0/sec (within 25 seconds)
+    Primary-2: 620/sec → 0/sec (within 20 seconds)
+
+  [12:12:00Z] Eviction stopped completely across all primaries
+    Memory Usage Post-Fix:
+      Primary-0: 26.2 GB / 36 GB (72.8%)
+      Primary-1: 26.1 GB / 36 GB (72.5%)
+      Primary-2: 25.8 GB / 36 GB (71.7%)
+
+  [12:26:00Z] Incident resolved
+    Memory stabilized
+    Session creation rate normalizing as flash sale initial surge passed
+    All metrics within healthy ranges
+
+CUSTOMER IMPACT ASSESSMENT:
+
+  Duration: 18 minutes
+  Sessions Evicted: ~1,200 (out of 2.4M active)
+  Affected Users: ~1,200 (0.05% of active users)
+  Impact: Users experienced cart reset and required re-login
+  Revenue Impact: Estimated $4,800 in abandoned carts (based on avg cart value $42, 50% recovery rate, 1,200 affected * 0.5 * $42 * 0.19 margin)
+  Apology: Customer support team notified to handle complaints proactively
+
+  Session Eviction Breakdown by Time Window:
+    12:05 - 12:06: 120 sessions evicted
+    12:06 - 12:07: 240 sessions evicted
+    12:07 - 12:08: 360 sessions evicted
+    12:08 - 12:09: 480 sessions evicted (alert fired during this window)
+    12:09 - 12:10: 0 (fix applied at 12:10)
+    12:10 - 12:12: 0 (eviction stopped)
+    Total: ~1,200 sessions
+
+  Peak Active Sessions During Incident: 2.4M (normal peak 1.6M, 50% increase)
+
+--- SLACK TRANSCRIPT: #incidents ---
+
+Timestamp Range: 2025-10-16T12:08:00Z — 2025-10-16T12:30:00Z
+Channel: #incidents
+
+[12:08:08] @pagerduty-bot: :rotating_light: PD-2025-10-16-0091 | redis-cluster | P3 | redis-prod-sessions primary-1 memory 93%, evictions spiking | Assigned: @ravi.shankar
+[12:08:30] @ravi.shankar: ack. Checking redis memory now
+[12:09:00] @ravi.shankar: redis-prod-sessions P3 — memory at 93%, evictions spiking. Flash sale traffic. Bumping maxmemory live.
+[12:09:30] @ravi.shankar: all 3 primaries above 92%. This is the flash sale surge. Current maxmemory is 28gb, bumping to 36gb via CONFIG SET
+[12:10:15] @ravi.shankar: CONFIG SET maxmemory 36gb applied to all 3 primaries. No restart needed. Eviction rate dropping
+[12:12:00] @ravi.shankar: eviction rate at 0 across all primaries. Memory usage now at ~72% of 36gb. Crisis averted
+[12:12:30] @samira.hassan: how many sessions were evicted?
+[12:13:00] @ravi.shankar: approximately 1,200 sessions based on the eviction counter delta. Those users would have experienced cart reset and needed to re-login
+[12:13:30] @samira.hassan: I'll notify the customer support team so they're ready for complaints
+[12:14:00] @drew.park: good quick fix. What's the permanent solution?
+[12:14:30] @ravi.shankar: Resolved. maxmemory now 36gb. Eviction stopped. Filing capacity ticket to upsize to r6g.4xlarge before Black Friday.
+[12:15:00] @drew.park: yeah, Black Friday will be way worse than this flash sale. We need to plan for 3x normal peak
+[12:15:30] @ravi.shankar: agreed. I'll file a capacity planning ticket. We should also look at session compression — we might be storing more data per session than necessary
+[12:16:00] @ravi.shankar: also adding a Grafana alert at 85% memory for redis-prod-sessions. Current alert at 90% doesn't give enough reaction time
+[12:26:00] @ravi.shankar: incident resolved. Memory stable, flash sale traffic normalizing. All metrics healthy
+
+--- SECTION 3: GRAFANA ALERT — ETCD HIGH LATENCY ---
+
+Timestamp: 2025-10-16T20:30:00Z
+Alert Name: EtcdHighLatency
+Alert UID: grafana-alert-etcd-7b2c1d
+Environment: production
+Severity: WARNING
+Status: RESOLVED (auto-resolved after nightly compaction)
+Duration: 8 minutes
+
+ALERT DETAILS:
+
+  Datasource: Prometheus (prometheus-prod)
+  Expression: histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])) > 0.15
+  Evaluation Interval: 30 seconds
+  For Duration: 2 minutes
+
+  Firing Instance:
+    Cluster: etcd-prod (3 members)
+    Backing Services: Kubernetes API server, Patroni (PostgreSQL HA)
+    Alert Fired At: 2025-10-16T20:30:14Z
+
+  Metrics at Time of Alert:
+    etcd commit latency p99: 180ms (threshold: 150ms)
+    etcd DB size: 4.8 GB (alarm threshold 8 GB)
+    etcd total keys: 142,000
+    Leader: etcd-prod-0
+
+COMPACTION EVENT:
+
+  [20:30:00Z] Nightly compaction started (scheduled CronJob)
+    Compaction Type: Revision-based
+    Revisions Compacted: 842,000
+    Storage Freed: 1.2 GB
+    Duration: 6 minutes 22 seconds
+
+  Latency During Compaction:
+    20:30: p99 = 180ms (alert fired)
+    20:31: p99 = 165ms
+    20:32: p99 = 142ms
+    20:33: p99 = 98ms
+    20:34: p99 = 42ms
+    20:35: p99 = 18ms
+    20:36: p99 = 14ms (compaction completing)
+    20:38: p99 = 12ms (baseline restored)
+
+  [20:38:00Z] Alert auto-resolved
+    p99 latency returned to 12ms baseline
+    DB Size Post-Compaction: 3.6 GB (down from 4.8 GB, freed 1.2 GB)
+
+DOCUMENTED BEHAVIOR:
+
+  Runbook Reference: OPS-022 — etcd Nightly Compaction
+  Note: Brief latency spike during compaction is expected and documented.
+  Compaction runs nightly at 20:30 UTC; duration typically 6-8 minutes.
+  The latency spike has no operational impact — Kubernetes API server handles
+  transient etcd latency increases gracefully, and Patroni's etcd operations
+  are read-heavy with generous timeouts.
+
+  Metrics Post-Compaction:
+    DB Size: 3.6 GB (alarm at 8 GB — 45% utilized)
+    Defrag Not Needed: DB size well below 50% of alarm threshold
+    Keys: 142,000
+    Compaction Revision: 8,421,947
+
+--- SECTION 4: NODE INVENTORY — PRE AND POST MIGRATION ---
+
+Timestamp: 2025-10-16T11:00:00Z
+Source: kubectl get nodes -o wide + Karpenter controller logs
+
+PRE-MIGRATION NODE LIST (36 nodes, 06:50 UTC):
+
+  Node                    Instance Type    AZ           CPU   Memory   Pods   Managed By            Status
+  ip-10-42-19-05          m6i.4xlarge      us-east-1a   16    64 GiB   42     cluster-autoscaler    Ready
+  ip-10-42-19-06          m6i.4xlarge      us-east-1a   16    64 GiB   38     cluster-autoscaler    Ready
+  ip-10-42-19-07          m6i.4xlarge      us-east-1a   16    64 GiB   45     cluster-autoscaler    Ready
+  ip-10-42-19-08          m6i.4xlarge      us-east-1b   16    64 GiB   41     cluster-autoscaler    Ready
+  ip-10-42-19-09          m6i.4xlarge      us-east-1b   16    64 GiB   36     cluster-autoscaler    Ready
+  ip-10-42-19-10          m6i.4xlarge      us-east-1b   16    64 GiB   44     cluster-autoscaler    Ready
+  ip-10-42-19-11          m6i.4xlarge      us-east-1c   16    64 GiB   40     cluster-autoscaler    Ready
+  ip-10-42-19-12          m6i.4xlarge      us-east-1c   16    64 GiB   39     cluster-autoscaler    Ready
+  ip-10-42-19-13          m6i.4xlarge      us-east-1c   16    64 GiB   43     cluster-autoscaler    Ready
+  ip-10-42-19-14          m6i.4xlarge      us-east-1a   16    64 GiB   37     cluster-autoscaler    Ready
+  ip-10-42-19-15          m6i.4xlarge      us-east-1b   16    64 GiB   35     cluster-autoscaler    Ready
+  ip-10-42-19-16          m6i.4xlarge      us-east-1c   16    64 GiB   41     cluster-autoscaler    Ready
+  ip-10-42-19-17          m6i.4xlarge      us-east-1a   16    64 GiB   38     cluster-autoscaler    Ready
+  ip-10-42-19-18          m6i.4xlarge      us-east-1b   16    64 GiB   42     cluster-autoscaler    Ready
+  ip-10-42-19-19          m6i.4xlarge      us-east-1c   16    64 GiB   40     cluster-autoscaler    Ready
+  ip-10-42-19-20          m6i.4xlarge      us-east-1a   16    64 GiB   36     cluster-autoscaler    Ready
+  ip-10-42-19-21          m6i.4xlarge      us-east-1b   16    64 GiB   39     cluster-autoscaler    Ready
+  ip-10-42-19-22          m6i.4xlarge      us-east-1c   16    64 GiB   44     cluster-autoscaler    Ready
+  ip-10-42-19-23          m6i.4xlarge      us-east-1a   16    64 GiB   41     cluster-autoscaler    Ready
+  ip-10-42-19-24          m6i.4xlarge      us-east-1b   16    64 GiB   37     cluster-autoscaler    Ready
+  ip-10-42-19-25          m6i.4xlarge      us-east-1c   16    64 GiB   40     cluster-autoscaler    Ready
+  ip-10-42-19-26          r6i.4xlarge      us-east-1a   16    128 GiB  18     cluster-autoscaler    Ready
+  ip-10-42-19-27          r6i.4xlarge      us-east-1b   16    128 GiB  16     cluster-autoscaler    Ready
+  ip-10-42-19-28          r6i.4xlarge      us-east-1c   16    128 GiB  17     cluster-autoscaler    Ready
+  ip-10-42-19-29          r6i.2xlarge      us-east-1a   8     64 GiB   12     cluster-autoscaler    Ready
+  ip-10-42-19-30          r6i.2xlarge      us-east-1b   8     64 GiB   14     cluster-autoscaler    Ready
+  ip-10-42-19-31          r6i.2xlarge      us-east-1c   8     64 GiB   11     cluster-autoscaler    Ready
+  ip-10-42-19-60          m6i.4xlarge      us-east-1a   16    64 GiB   29     cluster-autoscaler    Ready
+  ip-10-42-19-61          m6i.4xlarge      us-east-1b   16    64 GiB   33     cluster-autoscaler    Ready
+  ip-10-42-19-62          m6i.4xlarge      us-east-1c   16    64 GiB   31     cluster-autoscaler    Ready
+  ip-10-42-19-87          m6i.4xlarge      us-east-1a   16    64 GiB   8      cluster-autoscaler    Ready   ← underutilized (CPU 22%)
+  ip-10-42-19-88          m6i.4xlarge      us-east-1b   16    64 GiB   6      cluster-autoscaler    Ready   ← underutilized (CPU 18%)
+  ip-10-42-19-91          m6i.4xlarge      us-east-1c   16    64 GiB   9      cluster-autoscaler    Ready   ← underutilized (CPU 25%)
+  worker-kafka-v2-1       m6i.4xlarge      us-east-1a   16    64 GiB   5      ASG (dedicated)       Ready
+  worker-kafka-v2-2       m6i.4xlarge      us-east-1b   16    64 GiB   5      ASG (dedicated)       Ready
+  worker-kafka-v2-3       m6i.4xlarge      us-east-1c   16    64 GiB   5      ASG (dedicated)       Ready
+
+  Total CPU: 564 vCPUs allocated across 36 nodes
+  Total Memory: 2,432 GiB allocated across 36 nodes
+  Total Pods: 1,137 running
+
+POST-MIGRATION NODE LIST (34 nodes, 11:00 UTC):
+
+  Changes:
+    REMOVED: ip-10-42-19-87 (m6i.4xlarge, us-east-1a) — consolidated
+    REMOVED: ip-10-42-19-88 (m6i.4xlarge, us-east-1b) — consolidated
+    REMOVED: ip-10-42-19-91 (m6i.4xlarge, us-east-1c) — consolidated
+    REMOVED: ip-10-42-19-60 (m6i.4xlarge, us-east-1a) — consolidated (Action 2, redistributed)
+    ADDED:   ip-10-42-19-201 (m7i.4xlarge, us-east-1a) — Karpenter provisioned
+    ADDED:   ip-10-42-19-202 (m7i.4xlarge, us-east-1b) — Karpenter provisioned
+
+  Net Change: -4 nodes removed, +2 nodes added = -2 net = 34 total
+  Managed By Karpenter: 23 nodes (21 general, 2 replacement m7i.4xlarge)
+  Managed By ASG (Kafka): 5 nodes (unchanged, not managed by Karpenter)
+  Legacy Node Groups: 6 nodes (to be migrated next sprint)
+
+  Cost Impact:
+    Removed: 4x m6i.4xlarge at $0.768/hr each = $3.072/hr
+    Added:   2x m7i.4xlarge at $0.8064/hr each = $1.6128/hr
+    Net Savings: $1.4592/hr = $1,065.22/month
+    Note: Previous estimate of $400/month was conservative (counted only 1 instance savings)
+
+--- SECTION 5: KARPENTER CONTROLLER LOG EXCERPTS ---
+
+Timestamp Range: 2025-10-16T07:00:00Z — 2025-10-16T11:00:00Z
+Source: kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter --since=4h
+
+[07:00:02Z] controller/provisioner INFO  "registered nodepools" {"nodepools": ["default-nodepool", "memory-optimized"]}
+[07:00:03Z] controller/provisioner INFO  "watching for pending pods" {"namespace": "all"}
+[07:00:04Z] controller/interruption INFO  "connected to SQS queue" {"queue": "karpenter-interruption-prod", "region": "us-east-1"}
+[07:15:31Z] controller/provisioner INFO  "found pending pod" {"pod": "analytics-batch-processor-7b8f9c4d2-xk4qm", "namespace": "analytics", "resource_requests": {"cpu": "4000m", "memory": "16Gi"}}
+[07:15:32Z] controller/provisioner INFO  "launching instance" {"nodepool": "default-nodepool", "instance_type": "m7i.2xlarge", "zone": "us-east-1b", "capacity_type": "on-demand"}
+[07:16:15Z] controller/provisioner INFO  "instance launched" {"node": "ip-10-42-19-195", "instance_id": "i-0a8b7c6d5e4f3a2b1", "launch_time_seconds": 44}
+[07:16:16Z] controller/provisioner INFO  "node registered" {"node": "ip-10-42-19-195", "ready": true}
+[08:05:01Z] controller/provisioner INFO  "found pending pods" {"count": 3, "total_cpu_request": "12000m", "total_memory_request": "48Gi"}
+[08:05:02Z] controller/provisioner INFO  "launching instance" {"nodepool": "default-nodepool", "instance_type": "m7i.4xlarge", "zone": "us-east-1a", "capacity_type": "on-demand"}
+[08:05:44Z] controller/provisioner INFO  "instance launched" {"node": "ip-10-42-19-197", "instance_id": "i-0c9d8e7f6a5b4c3d2", "launch_time_seconds": 42}
+[08:05:45Z] controller/provisioner INFO  "bin-packed 3 pods onto 1 node" {"node": "ip-10-42-19-197", "cpu_utilization": "75%", "memory_utilization": "75%"}
+[10:30:01Z] controller/consolidation INFO  "evaluating nodes for consolidation" {"total_nodes": 36, "karpenter_managed": 23}
+[10:32:00Z] controller/consolidation INFO  "consolidation opportunity found" {"action": "replace", "removing": ["ip-10-42-19-87", "ip-10-42-19-88", "ip-10-42-19-91"], "adding": 2, "savings": "$0.768/hr"}
+[10:32:01Z] controller/consolidation INFO  "checking PodDisruptionBudgets" {"nodes": 3, "pdbs_evaluated": 12, "all_satisfied": true}
+[10:32:15Z] controller/consolidation INFO  "replacement nodes provisioned" {"nodes": ["ip-10-42-19-201", "ip-10-42-19-202"], "instance_type": "m7i.4xlarge"}
+[10:32:58Z] controller/consolidation INFO  "draining node" {"node": "ip-10-42-19-87", "pods_to_evict": 8}
+[10:35:40Z] controller/consolidation INFO  "node terminated" {"node": "ip-10-42-19-87", "instance_id": "i-0f1e2d3c4b5a6978"}
+[10:36:00Z] controller/consolidation INFO  "draining node" {"node": "ip-10-42-19-88", "pods_to_evict": 6}
+[10:38:30Z] controller/consolidation INFO  "node terminated" {"node": "ip-10-42-19-88", "instance_id": "i-0a2b3c4d5e6f7890"}
+[10:39:00Z] controller/consolidation INFO  "draining node" {"node": "ip-10-42-19-91", "pods_to_evict": 9}
+[10:41:45Z] controller/consolidation INFO  "node terminated" {"node": "ip-10-42-19-91", "instance_id": "i-0d4e5f6a7b8c9d0e"}
+[10:50:00Z] controller/consolidation INFO  "consolidation opportunity found" {"action": "delete", "removing": ["ip-10-42-19-60"], "adding": 0, "reason": "pods fit on existing nodes"}
+[10:50:01Z] controller/consolidation INFO  "draining node" {"node": "ip-10-42-19-60", "pods_to_evict": 4}
+[10:52:30Z] controller/consolidation INFO  "node terminated" {"node": "ip-10-42-19-60", "instance_id": "i-0e5f6a7b8c9d0e1f"}
+[10:52:31Z] controller/consolidation INFO  "consolidation complete" {"nodes_before": 36, "nodes_after": 34, "monthly_savings_estimate": "$1,065"}
+
+--- SECTION 6: KARPENTER DEPLOY MANIFEST ---
+
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: default-nodepool
+spec:
+  template:
+    metadata:
+      labels:
+        karpenter.sh/managed-by: karpenter
+        environment: production
+    spec:
+      nodeClassRef:
+        name: default
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand", "spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["m6i.xlarge", "m6i.2xlarge", "m6i.4xlarge", "m7i.xlarge", "m7i.2xlarge", "m7i.4xlarge", "c6i.xlarge", "c6i.2xlarge", "c6i.4xlarge", "c7i.xlarge", "c7i.2xlarge", "c7i.4xlarge"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-east-1a", "us-east-1b", "us-east-1c"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+      kubelet:
+        maxPods: 110
+        systemReserved:
+          cpu: 500m
+          memory: 1Gi
+        kubeReserved:
+          cpu: 200m
+          memory: 512Mi
+  limits:
+    cpu: 500
+    memory: 2000Gi
+  disruption:
+    consolidationPolicy: WhenUnderutilized
+    consolidateAfter: 30s
+    expireAfter: 720h
+  weight: 100
+
+---
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: memory-optimized
+spec:
+  template:
+    metadata:
+      labels:
+        workload-type: memory-intensive
+    spec:
+      nodeClassRef:
+        name: default
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["r6i.xlarge", "r6i.2xlarge", "r6i.4xlarge", "r7i.xlarge", "r7i.2xlarge", "r7i.4xlarge"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["us-east-1a", "us-east-1b", "us-east-1c"]
+      taints:
+        - key: dedicated
+          value: memory-workloads
+          effect: PreferNoSchedule
+  limits:
+    cpu: 200
+    memory: 1600Gi
+  disruption:
+    consolidationPolicy: WhenUnderutilized
+    consolidateAfter: 60s
+    expireAfter: 720h
+  weight: 100
+
+---
+apiVersion: karpenter.k8s.aws/v1beta1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  amiFamily: AL2023
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-us-east-1
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-us-east-1
+  instanceProfile: KarpenterNodeInstanceProfile-prod-us-east-1
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 200Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
+  tags:
+    Name: karpenter-prod-us-east-1
+    environment: production
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 2
+    httpTokens: required
+
+--- SECTION 7: REDIS FORENSIC DETAIL — SESSION EVICTION ANALYSIS ---
+
+Timestamp: 2025-10-16T12:30:00Z
+Author: ravi.shankar
+Reference: PD-2025-10-16-0091
+
+REDIS INFO MEMORY (captured during incident at 12:09:00Z):
+
+  Primary-0 (redis-prod-sessions-0):
+    used_memory: 28,147,843,072 (26.2 GB)
+    used_memory_rss: 29,360,128,000 (27.3 GB)
+    used_memory_peak: 28,362,481,664 (26.4 GB)
+    mem_fragmentation_ratio: 1.043
+    maxmemory: 30,064,771,072 (28 GB)
+    maxmemory_policy: allkeys-lru
+    evicted_keys: 412 (cumulative since restart)
+    keyspace_hits: 14,827,391
+    keyspace_misses: 238,412
+    instantaneous_ops_per_sec: 18,422
+    connected_clients: 842
+
+  Primary-1 (redis-prod-sessions-1):
+    used_memory: 28,024,612,864 (26.1 GB)
+    used_memory_rss: 29,108,224,000 (27.1 GB)
+    used_memory_peak: 28,201,918,464 (26.3 GB)
+    mem_fragmentation_ratio: 1.039
+    maxmemory: 30,064,771,072 (28 GB)
+    maxmemory_policy: allkeys-lru
+    evicted_keys: 486 (cumulative since restart)
+    keyspace_hits: 15,102,847
+    keyspace_misses: 251,038
+    instantaneous_ops_per_sec: 19,107
+    connected_clients: 856
+
+  Primary-2 (redis-prod-sessions-2):
+    used_memory: 27,701,324,800 (25.8 GB)
+    used_memory_rss: 28,789,760,000 (26.8 GB)
+    used_memory_peak: 27,917,287,424 (26.0 GB)
+    mem_fragmentation_ratio: 1.039
+    maxmemory: 30,064,771,072 (28 GB)
+    maxmemory_policy: allkeys-lru
+    evicted_keys: 302 (cumulative since restart)
+    keyspace_hits: 14,289,104
+    keyspace_misses: 224,916
+    instantaneous_ops_per_sec: 17,856
+    connected_clients: 831
+
+REDIS INFO MEMORY (captured post-fix at 12:15:00Z):
+
+  Primary-0 (redis-prod-sessions-0):
+    used_memory: 26,214,400,000 (24.4 GB)
+    maxmemory: 38,654,705,664 (36 GB)
+    evicted_keys: 412 (no additional evictions)
+    mem_fragmentation_ratio: 1.041
+
+  Primary-1 (redis-prod-sessions-1):
+    used_memory: 25,996,800,000 (24.2 GB)
+    maxmemory: 38,654,705,664 (36 GB)
+    evicted_keys: 486 (no additional evictions)
+    mem_fragmentation_ratio: 1.038
+
+  Primary-2 (redis-prod-sessions-2):
+    used_memory: 25,702,400,000 (23.9 GB)
+    maxmemory: 38,654,705,664 (36 GB)
+    evicted_keys: 302 (no additional evictions)
+    mem_fragmentation_ratio: 1.037
+
+SESSION SIZE ANALYSIS:
+
+  Sample of 10,000 sessions (random keyspace scan):
+    Min Session Size: 1.2 KB
+    Max Session Size: 18.4 KB
+    Average Session Size: 4.8 KB
+    Median Session Size: 3.9 KB
+    P95 Session Size: 9.2 KB
+    P99 Session Size: 14.1 KB
+
+  Session Payload Breakdown (average 4.8 KB):
+    Authentication Token: 0.8 KB
+    Cart State: 1.4 KB
+    User Preferences: 0.6 KB
+    Browse History (last 20 items): 1.2 KB
+    CSRF Token + Metadata: 0.4 KB
+    Feature Flags: 0.2 KB
+    A/B Test Assignments: 0.2 KB
+
+  Compression Test (LZ4, 10,000 session sample):
+    Average Compressed Size: 2.4 KB (50% reduction)
+    Compression Ratio: 2.0x
+    Compression Latency Overhead: 0.3ms per SET operation
+    Decompression Latency Overhead: 0.1ms per GET operation
+    Estimated Memory Savings at 2.4M sessions: 5.76 GB across cluster
+
+EVICTION PATTERN ANALYSIS:
+
+  Sessions Evicted by Age:
+    0-5 minutes old: 42 sessions (3.5%)
+    5-10 minutes old: 156 sessions (13.0%)
+    10-20 minutes old: 384 sessions (32.0%)
+    20-30 minutes old: 618 sessions (51.5%)
+  Note: LRU eviction correctly targeted oldest sessions first
+
+  Sessions Evicted by Service:
+    web-frontend: 720 (60.0%)
+    mobile-api: 312 (26.0%)
+    partner-portal: 168 (14.0%)
+
+  Eviction Impact by Service:
+    web-frontend: Users redirected to login page, cart contents lost
+    mobile-api: App displayed "session expired" modal, required re-authentication
+    partner-portal: Partner dashboard session terminated, required SSO re-auth
+
+--- SECTION 8: REDIS CAPACITY PLANNING ---
+
+Timestamp: 2025-10-16T13:00:00Z
+Author: ravi.shankar
+Trigger: PD-2025-10-16-0091
+
+CURRENT STATE:
+
+  Cluster: redis-prod-sessions
+  Purpose: User session store
+  Topology: 3 primaries, 3 replicas
+  Instance: Kubernetes pods on r6i.2xlarge nodes (8 vCPU, 64 GiB)
+  maxmemory: 36 GB per primary (just increased from 28 GB)
+  Eviction Policy: allkeys-lru
+  Session TTL: 30 minutes sliding window
+
+  Normal Metrics:
+    Peak Active Sessions: 1.6M
+    Peak Memory per Primary: 72% of maxmemory
+    Average Session Size: 4.8 KB
+    Keyspace: ~5.3M keys total across 3 primaries
+
+  Flash Sale Metrics (2025-10-16):
+    Peak Active Sessions: 2.4M (50% above normal)
+    Peak Memory per Primary: 93% of 28 GB maxmemory (before fix)
+    Sessions Evicted: ~1,200
+
+BLACK FRIDAY PROJECTIONS:
+
+  Expected Peak Sessions: 4.8M (3x normal peak)
+  Expected Memory per Primary: 4.8M * 4.8 KB / 3 primaries = 7.68 GB per primary
+  Current maxmemory: 36 GB — sufficient for 3x normal
+  Headroom at 3x Peak: 36 GB - 7.68 GB = 28.32 GB (78.7% available)
+  Assessment: With 36 GB maxmemory, even 5x normal peak fits comfortably
+
+RECOMMENDATIONS:
+
+  1. Upsize to r6g.4xlarge (128 GiB per node)
+     Cost Increase: ~$200/month per node (6 nodes = $1,200/month)
+     Benefit: Room for maxmemory 64 GB per primary — handles 10x normal peak
+     Decision: Proceed if Black Friday projections increase beyond 5x
+     Jira: PLAT-4945
+
+  2. Session Data Compression
+     Current Session Size: 4.8 KB average
+     Estimated Compressed: 2.4 KB (50% reduction with LZ4)
+     Implementation: Application-side compression before SET
+     Jira: PLAT-4946
+
+  3. Redis Cluster Sharding Expansion
+     Add 4th shard (4 primaries + 4 replicas)
+     Benefit: 33% more capacity without upsizing instances
+     Complexity: Resharding requires slot migration
+     Jira: PLAT-4947
+
+  4. Monitoring Enhancement
+     New Alert: redis_memory_used_percent > 85% (warning)
+     New Alert: redis_evicted_keys_total rate > 100/sec (critical)
+     New Dashboard: Session capacity planning with trend projection
+     Jira: PLAT-4948
+
+--- SECTION 9: ETCD OPERATIONS DETAIL ---
+
+Timestamp: 2025-10-16T20:30:00Z — 2025-10-16T20:38:00Z
+Source: etcd controller logs, Prometheus metrics
+
+ETCD CLUSTER STATUS (pre-compaction, 20:29:00Z):
+
+  Member: etcd-prod-0 (leader)
+    Endpoint: https://10.42.19.40:2379
+    Health: healthy
+    DB Size: 4.8 GB
+    Raft Term: 847
+    Raft Index: 8,421,947
+    Keys: 47,832
+    Version: 3.5.12
+
+  Member: etcd-prod-1 (follower)
+    Endpoint: https://10.42.19.41:2379
+    Health: healthy
+    DB Size: 4.8 GB
+    Raft Term: 847
+    Raft Index: 8,421,947
+    Keys: 47,114
+    Version: 3.5.12
+
+  Member: etcd-prod-2 (follower)
+    Endpoint: https://10.42.19.42:2379
+    Health: healthy
+    DB Size: 4.8 GB
+    Raft Term: 847
+    Raft Index: 8,421,947
+    Keys: 47,054
+    Version: 3.5.12
+
+  Total Keys Across Cluster: 142,000
+  Leader Elections (last 24h): 0
+  Snapshot Interval: 10,000 revisions
+  Last Snapshot: 20:28:47Z
+
+COMPACTION CRONJOB:
+
+  Name: etcd-compaction
+  Namespace: kube-system
+  Schedule: "30 20 * * *" (daily 20:30 UTC)
+  Image: bitnami/etcd:3.5.12
+  Command:
+    etcdctl compact $(etcdctl endpoint status --write-out json | jq -r '.[0].Status.header.revision') \
+      --endpoints=https://etcd-prod-0:2379,https://etcd-prod-1:2379,https://etcd-prod-2:2379 \
+      --cacert=/etc/etcd/pki/ca.crt \
+      --cert=/etc/etcd/pki/server.crt \
+      --key=/etc/etcd/pki/server.key
+  ServiceAccount: etcd-compaction-sa
+  Resource Limits:
+    cpu: 500m
+    memory: 256Mi
+
+COMPACTION EXECUTION LOG:
+
+  [20:30:00Z] CronJob triggered: etcd-compaction-28312430
+  [20:30:01Z] Pod created: etcd-compaction-28312430-7h4xq
+  [20:30:02Z] etcdctl connecting to endpoints
+  [20:30:03Z] Current revision: 8,421,947
+  [20:30:03Z] Last compacted revision: 7,579,947
+  [20:30:03Z] Revisions to compact: 842,000
+  [20:30:04Z] Compaction started
+  [20:33:22Z] Compaction 50% complete (421,000 revisions processed)
+  [20:36:22Z] Compaction completed successfully
+  [20:36:23Z] DB size before: 4.8 GB
+  [20:36:23Z] DB size after: 3.6 GB
+  [20:36:23Z] Storage freed: 1.2 GB
+  [20:36:24Z] Pod completed with exit code 0
+  [20:38:00Z] Grafana alert EtcdHighLatency auto-resolved
+
+ETCD PERFORMANCE BASELINE (last 7 days):
+
+  Date        Pre-Compact DB   Post-Compact DB   Compact Duration   Peak p99 Latency
+  2025-10-10  4.2 GB           3.1 GB            5m 48s             162ms
+  2025-10-11  4.3 GB           3.2 GB            5m 52s             168ms
+  2025-10-12  4.4 GB           3.2 GB            6m 01s             171ms
+  2025-10-13  4.5 GB           3.3 GB            6m 08s             174ms
+  2025-10-14  4.6 GB           3.4 GB            6m 14s             176ms
+  2025-10-15  4.7 GB           3.5 GB            6m 18s             178ms
+  2025-10-16  4.8 GB           3.6 GB            6m 22s             180ms
+
+  Trend: DB growth ~100 MB/day, compaction freeing ~1.1-1.2 GB/night
+  Assessment: Growth rate stable. At current rate, defrag recommended when post-compact size exceeds 6 GB (projected ~30 days)
+
+--- SECTION 10: INFRASTRUCTURE METRICS SNAPSHOT ---
+
+Timestamp: 2025-10-16T00:00:00Z — 2025-10-16T23:59:59Z
+Source: Prometheus / Grafana
+
+COMPUTE METRICS (24-hour):
+
+  Nodes: 34 (reduced from 36 via Karpenter consolidation)
+  All Nodes Ready: 34/34
+  Karpenter-Managed Nodes: 23
+  ASG-Managed Nodes: 5 (Kafka dedicated pool)
+  Legacy Node Groups: 6 (being migrated to Karpenter)
+
+  CPU: avg 66%, peak 78% (flash sale)
+  Memory: avg 58%, peak 72% (flash sale)
+
+  Karpenter Metrics:
+    Nodes Provisioned (24h): 3
+    Nodes Terminated (24h): 5 (3 consolidation + 2 replaced with better-fit instances)
+    Provisioning Latency: avg 43 seconds
+    Consolidation Events: 2
+    Disruption Budget Respected: 100%
+
+REDIS METRICS (redis-prod-sessions, 24-hour):
+
+  Peak Memory: 93% of 28 GB (before fix), 72% of 36 GB (after fix)
+  Evictions: 1,200 total (12:05-12:10 window only)
+  Peak Active Sessions: 2.4M (flash sale)
+  Session Hit Rate: 98.4% (normal), 97.8% (during eviction window)
+  maxmemory: 28 GB (00:00-12:10), 36 GB (12:10-23:59)
+
+ETCD METRICS (24-hour):
+
+  Commit Latency p99: 12ms baseline, 180ms peak (during compaction)
+  DB Size: 4.8 GB pre-compaction, 3.6 GB post-compaction
+  Leader Elections: 0
+  Compaction Duration: 6 minutes 22 seconds
+
+--- SECTION 10: CHANGE MANAGEMENT LOG ---
+
+Change Record: CHG-2025-10-16-001
+  Title: Cluster Autoscaler Migration to Karpenter
+  Type: Standard Change (pre-approved migration)
+  Risk Level: Medium
+  Implementer: drew.park
+  Secondary: tanya.okonkwo
+  Start Time: 07:00 UTC
+  End Time: 11:00 UTC
+  Duration: 4 hours
+  Result: Successful
+  Outcome: Karpenter v0.37.0 deployed, cluster-autoscaler decommissioned, node count reduced from 36 to 34 via consolidation
+
+Change Record: CHG-2025-10-16-002
+  Title: Redis Session Store Emergency maxmemory Increase
+  Type: Emergency Change (P3 incident)
+  Risk Level: Low
+  Implementer: ravi.shankar
+  Start Time: 12:10 UTC
+  End Time: 12:12 UTC
+  Duration: 2 minutes
+  Result: Successful — evictions stopped
+  Customer Impact: ~1,200 sessions evicted before fix applied
+
+Change Record: CHG-2025-10-16-003
+  Title: etcd Nightly Compaction (automated)
+  Type: Automated Change
+  Risk Level: Low
+  Start Time: 20:30 UTC
+  End Time: 20:38 UTC
+  Result: Successful — 1.2 GB freed, latency returned to baseline
+
+--- SECTION 11: DAILY OPERATIONS CHECKLIST ---
+
+Date: 2025-10-16
+Completed By: @drew.park (morning/Karpenter), @ravi.shankar (afternoon/Redis), @tanya.okonkwo (monitoring)
+
+Morning Checks:
+  [x] Karpenter migration — completed successfully, all pods scheduling correctly through Karpenter NodePools
+  [x] Node count — 34 (down from 36, consolidation savings estimated at $1,065/month after second consolidation action)
+  [x] cluster-autoscaler — decommissioned (scaled to 0 replicas), Helm release to be deleted next week after stability confirmation
+  [x] All DaemonSets — healthy on all 34 nodes (kube-proxy, calico-node, datadog-agent, fluent-bit, node-exporter)
+  [x] Karpenter interruption queue — connected to SQS karpenter-interruption-prod, processing events, zero pending messages
+  [x] Pod scheduling — verified with test deployment of nginx replica set, 43 second node provision for new m7i.2xlarge instance
+
+Afternoon Checks:
+  [x] Redis incident — resolved, maxmemory 36 GB, evictions stopped
+  [x] Session store health — all 3 primaries healthy, memory 72%
+  [x] Flash sale traffic — normalizing, back to baseline by 16:00 UTC
+  [x] Customer support — briefed on 1,200 affected sessions
+  [x] Capacity planning — Black Friday projections initiated
+  [x] New Grafana alerts — redis memory 85% warning threshold, eviction rate critical threshold at 100/sec
+
+Evening Checks:
+  [x] etcd compaction — completed, 1.2 GB freed (4.8 GB → 3.6 GB), latency baseline restored to 12ms
+  [x] Cluster health — 34/34 nodes Ready, all DaemonSets running (kube-proxy, calico-node, datadog-agent, fluent-bit)
+  [x] Karpenter consolidation — stable, no additional actions after morning (2 consolidation events total for the day)
+  [x] Karpenter SQS queue — interruption handler active, 0 spot interruptions today, queue depth 0
+  [x] Kafka — 5 brokers healthy, under-replicated partitions 0, consumer lag 0, disk usage avg 62%
+  [x] PostgreSQL — user-profile-db healthy, replication lag 0.2s, WAL generation 4.2 GB/hr
+  [x] Backup verification — Velero daily backup completed at 03:00 UTC (all 47 namespaces), WAL-G delta backups current (last: 20:00 UTC)
+  [x] Cost projection — October estimate $124,200 ($12,400/month EC2, remainder is RDS/ElastiCache/data transfer), on track for 2.5% reduction vs September ($127,400)
+  [x] Certificate expiry scan — next expiry: api-gateway TLS cert on 2025-11-14 (29 days), cert-manager renewal scheduled
+  [x] Ingress controller — NGINX ingress healthy, 2 replicas, active connections avg 4,200, p99 latency 8ms
+  [x] PersistentVolume usage — all PVCs below 80% capacity, largest: elasticsearch-data-0 at 72% (800 GB / 1.1 TB)
+  [x] DNS resolution — CoreDNS healthy, 3 pods, query latency p99 1.2ms, NXDOMAIN rate 0.3%
+
+================================================================================
+END OF INFRASTRUCTURE OPERATIONS LOG — 2025-10-16
+================================================================================

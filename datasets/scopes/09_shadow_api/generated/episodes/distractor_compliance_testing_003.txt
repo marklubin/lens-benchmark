@@ -1,0 +1,1116 @@
+================================================================================
+VANTAGE COMMERCE — COMPLIANCE & SECURITY TESTING LOG
+Date: 2025-09-26
+Classification: INTERNAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Load Test Post-Mortem — Checkout Flow Capacity Validation
+────────────────────────────────────────────────────────────────────────────────
+
+Title: Load Test Post-Mortem: Checkout Flow Capacity Validation (LT-2025-Q3-CHECKOUT)
+Author: Kai Johannsen (QA Performance Engineering)
+Date: 2025-09-26
+Test Date: 2025-09-22 through 2025-09-24
+Environment: staging-perf
+Reference: LT-2025-Q3-CHECKOUT
+
+--- Executive Summary ---
+
+Kai ran 48-hour sustained load test simulating Black Friday traffic levels on checkout flow. Overall result: checkout flow meets Black Friday capacity targets with minor inventory-lock scaling concern and cart-service memory issue.
+
+Test Summary: 48-hour sustained load. Peak: 12,000 concurrent users. Total orders processed: 3,847,291. Success rate: 99.94%. Mean latency: 342ms. p95: 612ms. p99: 890ms. Max: 2,104ms.
+
+--- Test Configuration ---
+
+Services under test:
+  1. checkout-service v2.18.3 — 6 replicas in staging-perf
+  2. payment-gateway v4.7.1 — 4 replicas in staging-perf
+  3. inventory-lock-service v1.6.0 — 2 replicas (HPA enabled, max 5)
+  4. cart-service v3.4.2 — 3 replicas in staging-perf
+
+Environment: staging-perf (8-node Kubernetes cluster)
+  Node specification: 8x m5.2xlarge (8 vCPU, 32GB RAM each)
+  Total cluster capacity: 64 vCPU, 256 GB RAM
+  Node spec matches production node configuration
+  Kubernetes version: 1.28.4
+  CNI: Calico v3.26
+  Service mesh: Istio v1.19.3
+
+Load generator: Locust v2.20.1
+  Worker pods: 3 (locust-worker-01, locust-worker-02, locust-worker-03)
+  Worker node spec: m5.xlarge (4 vCPU, 16GB RAM each)
+  Master pod: locust-master-01
+
+Locust script: scenarios/checkout_flow_bf2025.py
+  User flow simulation:
+    Step 1: Browse product catalog (GET /api/v2/products — random category)
+    Step 2: View product detail (GET /api/v2/products/{id})
+    Step 3: Add to cart (POST /api/v2/cart/items)
+    Step 4: Apply coupon (POST /api/v2/checkout/apply-coupon — 30% of users)
+    Step 5: Initiate checkout (POST /api/v2/checkout/start)
+    Step 6: Submit payment (POST /api/v2/payments/charge)
+    Step 7: Confirm order (POST /api/v2/orders/confirm)
+  Think time between steps: 2-5 seconds (random uniform)
+  Session duration: 3-8 minutes per simulated user
+
+Test phases:
+  Phase 1 (T+0h to T+2h): Ramp-up from 0 to 12,000 concurrent users
+    Rate: 100 users/minute
+    Purpose: Gradual load to identify early breaking points
+  Phase 2 (T+2h to T+44h): Sustained peak at 12,000 concurrent users
+    Duration: 42 hours
+    Purpose: Soak test for memory leaks, connection pool exhaustion, resource degradation
+  Phase 3 (T+44h to T+48h): Ramp-down from 12,000 to 0
+    Rate: 50 users/minute
+    Purpose: Verify graceful degradation and resource reclamation
+
+Payment processor: Stripe test mode (no real transactions)
+  Stripe test API key: sk_test_...redacted
+  Test card numbers used: 4242424242424242 (success), 4000000000000002 (decline), 4000000000009995 (insufficient funds)
+  Decline rate simulated: 3%
+
+--- Results Summary ---
+
+Overall:
+  Duration: 48 hours
+  Peak concurrent users: 12,000
+  Peak orders per minute: 2,800
+  Total orders processed: 3,847,291
+  Success rate: 99.94% (2,309 failures out of 3,847,291)
+  Mean latency: 342ms
+  p50 latency: 298ms
+  p95 latency: 612ms
+  p99 latency: 890ms
+  Max latency: 2,104ms (single outlier at T+6h14m during inventory-lock pool exhaustion)
+
+  SLA target: p99 < 1000ms → PASS (890ms < 1000ms)
+
+--- Service-Level Results ---
+
+checkout-service v2.18.3:
+  p99 latency at peak: 890ms (SLA target: <1000ms) — PASS
+  Error rate: 0.02%
+  CPU utilization (peak): 72% average across 6 replicas
+  Memory utilization (peak): 1.4 GB / 2 GB limit (70%)
+  GC pauses: p99 12ms (acceptable)
+  Connection pool: 200 max, 180 peak active
+  Notes: Stable throughout test. No scaling events needed.
+
+payment-gateway v4.7.1:
+  Sustained TPS: 3,100
+  Success rate: 99.97%
+  Failures: 0.03% (all gateway timeouts to payment processor sandbox — Stripe test mode rate limiting)
+  p99 latency: 445ms
+  CPU utilization (peak): 58%
+  Memory utilization (peak): 1.1 GB / 2 GB limit
+  Connection pool to Stripe: 100 max, 87 peak active
+  Notes: Best performing service. No issues observed.
+
+inventory-lock-service v1.6.0:
+  Issue identified: Connection pool exhaustion at T+6h14m
+
+  inventory-lock-service: Connection pool exhausted at T+6h14m. Pool config: max_connections=2000, wait_timeout=5s. HPA scaled from 2 to 3 replicas at T+6h16m. Pool pressure resolved by T+6h19m. Recommend: increase base pool to 2500 or set HPA threshold lower.
+
+  Timeline:
+    T+0h: 2 replicas, pool utilization 45%
+    T+2h: Peak load reached, pool utilization 78%
+    T+4h: Pool utilization 89%
+    T+6h00m: Pool utilization 96%
+    T+6h14m: Pool exhausted — 2,400 concurrent lock requests, pool max 2,000
+      Error: "ConnectionPoolExhausted: no available connections, waited 5000ms"
+      Affected requests: 147 failures over 2-minute window
+    T+6h16m: HPA triggered — scaling from 2 to 3 replicas
+      HPA metric: cpu > 80% for 2 minutes
+      New replica ready: T+6h18m
+    T+6h19m: Pool pressure resolved, utilization dropped to 62% across 3 replicas
+    T+6h19m through T+48h: No further pool issues with 3 replicas
+
+  Recommendation: Increase base connection pool to max_connections=2500 per replica, or lower HPA CPU threshold from 80% to 65% to trigger earlier scaling.
+
+  HTTP log during pool exhaustion:
+    [2025-09-22 14:14:22.401 UTC] REQUEST
+      Method: POST
+      Path: /api/v1/locks/acquire
+      Body: {"sku":"SKU-28471","quantity":1,"ttl_seconds":300}
+      X-Request-ID: lt-req-2025-09-22-847291
+
+    [2025-09-22 14:14:27.401 UTC] RESPONSE
+      Status: 503 Service Unavailable
+      Body: {"error":"ConnectionPoolExhausted","message":"no available connections, waited 5000ms","pool_max":2000,"pool_active":2000,"pool_waiting":147}
+      X-Response-Time: 5001ms
+
+    [2025-09-22 14:14:28.102 UTC] REQUEST
+      Method: POST
+      Path: /api/v1/locks/acquire
+      Body: {"sku":"SKU-39582","quantity":2,"ttl_seconds":300}
+      X-Request-ID: lt-req-2025-09-22-847292
+
+    [2025-09-22 14:14:33.102 UTC] RESPONSE
+      Status: 503 Service Unavailable
+      Body: {"error":"ConnectionPoolExhausted","message":"no available connections, waited 5000ms"}
+
+cart-service v3.4.2:
+  Issue identified: Memory leak under sustained load
+
+  cart-service: RSS memory growth observed. T+0h: 512MB. T+12h: 980MB. T+24h: 1.4GB. T+36h: 1.8GB. GC triggered at 1.8GB, dropped to 620MB. Suspect: session object cache not evicting expired entries. Bug filed: VC-QA-2891.
+
+  Memory timeline:
+    T+0h: RSS 512MB (baseline)
+    T+6h: RSS 720MB (+208MB, rate: 34.7 MB/hr)
+    T+12h: RSS 980MB (+260MB, rate: 43.3 MB/hr accelerating)
+    T+18h: RSS 1.2GB
+    T+24h: RSS 1.4GB
+    T+30h: RSS 1.6GB
+    T+36h: RSS 1.8GB — GC triggered (container memory limit: 2GB)
+    T+36h+2m: RSS 620MB (GC reclaimed 1.18GB)
+    T+42h: RSS 1.1GB (leak resumed post-GC)
+    T+48h: RSS 1.5GB (test ended)
+
+  Suspected root cause: Session object cache (in-memory HashMap) not evicting expired entries.
+    Cache implementation: com.vantage.cart.cache.SessionCache
+    TTL configured: 30 minutes
+    Eviction: lazy eviction on access only — no background eviction thread
+    Under sustained load, new sessions created faster than old sessions accessed and evicted
+    Result: unbounded growth until GC pressure triggers full collection
+
+  Bug filed: VC-QA-2891
+    Priority: P3 (Medium)
+    Assignee: Cart service team
+    Fix proposal: Add scheduled eviction thread running every 5 minutes, or switch to Caffeine cache with time-based eviction
+
+--- Database Performance ---
+
+orders-db-primary:
+  Engine: PostgreSQL 15.4
+  Instance: db.r6g.2xlarge (8 vCPU, 64GB RAM)
+  IOPS during peak: 14,200 (capacity: 20,000)
+  IOPS utilization: 71%
+  Replication lag to replica: 0.3 seconds (max observed)
+  Connection count (peak): 247 / 400 max
+  Disk usage: 824 GB / 2 TB provisioned
+  Deadlocks observed: 0
+  Slow queries (>1s): 14 over 48 hours (all during pool exhaustion window)
+
+orders-db-replica:
+  Replication lag: 0.3s max, 0.1s average
+  Read query distribution: 78% of SELECT queries routed to replica
+  Replica IOPS: 8,400
+
+Redis cache (product prices):
+  Cache hit rate during test: 97.2% (normal: 98.1%)
+  Hit rate drop: 0.9 percentage points due to increased unique product access patterns
+  Memory usage: 4.2 GB / 8 GB max
+  Eviction events: 0
+  Connection count (peak): 312 / 500 max
+
+--- Data Integrity Verification ---
+
+No data loss observed.
+Reconciliation method: Compare total orders in Locust report vs orders-db-primary count.
+  Locust reported orders: 3,847,291
+  Database order count: 3,847,253
+  Difference: 38 (0.001%)
+  Analysis: 38 orders were in-flight during test shutdown — all completed within 30 seconds of test end
+  Final reconciled count: 3,847,291 / 3,847,291 (100% match)
+
+--- Network Performance ---
+
+Inter-service latency in staging-perf:
+  Average: 0.4ms
+  p99: 1.2ms
+  Production comparison: 0.3ms average (staging slightly higher due to different AZ placement)
+
+Ingress controller (nginx-ingress):
+  Requests processed: 48.7M total
+  Error rate: 0.001% (502 Bad Gateway during inventory-lock pool exhaustion)
+  CPU utilization: 34%
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: Monthly SLA Review — August 2025 Platform Availability
+────────────────────────────────────────────────────────────────────────────────
+
+Title: Monthly SLA Review — August 2025 Platform Availability
+Owner: SRE Team
+Reviewer: Diana Flores (VP Engineering)
+Period: 2025-08-01 through 2025-08-31
+
+--- Platform Summary ---
+
+Platform Availability Summary — August 2025: Overall: 99.971%. Target: 99.95%. Status: PASS. Error budget remaining: 72.4% (was 68.1% at end of July).
+
+Total customer-facing requests served in August: 847M
+Error rate (5xx): 0.012% platform-wide (target: <0.05%)
+CDN cache hit rate: 94.7% (target: >90%)
+
+--- Per-Service Availability ---
+
+checkout-service:
+  Uptime: 99.985%
+  SLA target: 99.95% — PASS
+  Downtime: 6.5 minutes
+  Incidents: 1
+    INC-2025-0812: 6.5 min downtime during deploy rollback on 2025-08-12
+    Root cause: v2.17.2 deploy caused 500 errors on /api/v2/checkout/start
+    Detection: PagerDuty alert at 14:02 UTC, acknowledged at 14:03 UTC
+    Rollback: ArgoCD manual rollback to v2.17.1 completed at 14:08 UTC
+    Customer impact: ~2,100 checkout attempts failed during window
+    Post-mortem: COMPLETED (PM-2025-0812)
+
+payment-gateway:
+  Uptime: 99.998%
+  SLA target: 99.95% — PASS
+  Downtime: 0.9 minutes (single health check failure, auto-recovered)
+  Incidents: 0 (no P1/P2 incidents)
+  Best performing service in August
+  Transactions processed: 17.2M
+
+search-service:
+  Uptime: 99.942%
+  SLA target: 99.95% — BELOW TARGET
+  Downtime: 25 minutes degraded performance
+  Incidents: 1
+    2025-08-19: Elasticsearch reindex triggered by schema migration ran during peak hours
+    Impact: search latency p99 exceeded 5s for 25 minutes (normal: <500ms)
+    Customer impact: slow search results, estimated 12,000 users experienced degraded search
+    Root cause: Schema migration triggered full reindex at 11:00 UTC (peak traffic)
+    Mitigation: Reindex completed at 11:25 UTC
+    Action: Schedule reindex jobs for maintenance window (02:00-04:00 UTC). Owner: search-team. Deadline: 2025-09-30.
+    Post-mortem: COMPLETED (PM-2025-0819)
+
+  search-service SLA breach: 25 minutes degraded on 2025-08-19. Root cause: Elasticsearch reindex triggered by schema migration ran during peak hours. Action: schedule reindex jobs for maintenance window (02:00-04:00 UTC). Owner: search-team. Deadline: 2025-09-30.
+
+order-management-service:
+  Uptime: 99.974%
+  SLA target: 99.95% — PASS
+  Downtime: 11.2 minutes
+  Incidents: 0 P1, 1 P3 (brief spike in 503s during auto-scaling event)
+
+svc-notification-service:
+  Uptime: 99.96%
+  SLA target: 99.95% — PASS (marginal)
+  Incidents: 2
+    1. 2025-08-07: Email queue backup — 8,400 emails delayed 45 minutes
+       Root cause: Sendgrid rate limit hit during flash sale notification blast
+       Fix: Implemented queue throttling to stay within rate limits
+    2. 2025-08-22: Email queue backup — 3,200 emails delayed 20 minutes
+       Root cause: Retry storm after transient Sendgrid API timeout
+       Fix: Added circuit breaker to Sendgrid client
+  Post-mortems: Both COMPLETED
+
+--- PagerDuty Statistics ---
+
+Total PagerDuty pages in August: 47 (down from 63 in July)
+Trend: 25.4% reduction month-over-month
+
+Mean time to acknowledge: 3.2 minutes (target: <5 min) — PASS
+Mean time to resolve: 28 minutes (target: <60 min) — PASS
+
+Top 3 alert sources in August:
+  1) svc-notification-service email queue: 12 alerts
+  2) metrics-prometheus disk usage: 8 alerts
+  3) checkout-service deploy-related: 6 alerts
+
+Alert breakdown by severity:
+  P1 (critical): 2 alerts
+  P2 (high): 8 alerts
+  P3 (medium): 21 alerts
+  P4 (low): 16 alerts
+
+--- Action Items ---
+
+Diana Flores requested action plan for search-service SLA miss before October review.
+  Owner: search-team
+  Deliverable: Written plan for preventing peak-hour reindex
+  Deadline: 2025-09-30
+
+Database failover events: 1 (orders-db replica promoted Aug 14, 0 customer impact)
+  Root cause: Primary node memory pressure triggered automated failover
+  Failover duration: 12 seconds
+  Data loss: 0 (synchronous replication)
+  Post-mortem: COMPLETED (PM-2025-0814)
+
+SLA credit exposure: $0 (no SLA breaches at contract level; search-service miss is internal SLA only, not customer-facing SLA)
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: SOC 2 Type II — Evidence Collection Tracker (CC6: Logical and Physical Access)
+────────────────────────────────────────────────────────────────────────────────
+
+Title: SOC 2 Type II — Evidence Collection Tracker (CC6: Logical and Physical Access)
+Assessor: Nathan Osei (Internal Audit)
+Auditor Firm: Thornton-Kiley Associates
+Period: 2025-04-01 through 2025-09-30
+Auditor onsite for SOC 2 fieldwork scheduled: 2025-10-06 through 2025-10-10
+
+--- CC6.1: Logical Access — User Provisioning and Deprovisioning ---
+
+CC6.1 Evidence: Okta provisioning log sample (25 of 412 provisions reviewed). Average time from HR trigger to account creation: 2.4 hours. Average time from termination trigger to account deprovisioning: 4.1 hours. All within 24-hour SLA.
+
+Full statistics (April-September 2025):
+  Total provisions: 412
+  Total deprovisions: 89
+  Average provision time: 2.4 hours
+  Average deprovision time: 4.1 hours
+  Provision SLA (24 hours): 412/412 met (100%)
+  Deprovision SLA (24 hours): 86/89 met (96.6%)
+  SLA misses: 3 deprovisions (all contractor terminations — see access review findings)
+
+Sample provisions reviewed (5 of 25):
+  1. User: alex.rivera@vantage.com
+     Trigger: BambooHR new hire event 2025-04-14 09:00 UTC
+     Okta account created: 2025-04-14 10:24 UTC (1.4 hours)
+     Groups assigned: engineering, k8s-prod-readonly
+     Status: Active
+
+  2. User: jennifer.martinez@vantage.com
+     Trigger: BambooHR new hire event 2025-05-02 09:00 UTC
+     Okta account created: 2025-05-02 11:12 UTC (2.2 hours)
+     Groups assigned: customer-support, zendesk-agents
+     Status: Active
+
+  3. User: r.pham@vantage.com
+     Trigger: BambooHR new hire event 2025-08-19 09:00 UTC
+     Okta account created: 2025-08-19 10:45 UTC (1.75 hours)
+     Groups assigned: engineering, k8s-prod-deployer, cde-access
+     MFA enrolled: 2025-08-22 (FIDO2 hardware key)
+     Status: Active
+
+  4. User: james.wu@vantage.com
+     Trigger: BambooHR new hire event 2025-07-14 09:00 UTC
+     Okta account created: 2025-07-14 11:30 UTC (2.5 hours)
+     Groups assigned: sre, k8s-prod-admin, pagerduty-oncall
+     Status: Active
+
+  5. User: maria.gonzalez@vantage.com
+     Trigger: BambooHR new hire event 2025-04-28 09:00 UTC
+     Okta account created: 2025-04-28 12:18 UTC (3.3 hours)
+     Groups assigned: engineering, k8s-prod-deployer
+     Status: Active
+
+Evidence stored: AV-2025-SOC2-CC6-001 through CC6-005
+
+--- CC6.2: Authentication — MFA Enforcement ---
+
+MFA enforcement report:
+  Production access: 100% MFA required (Okta policy: "Require MFA for all production apps")
+  Corporate SSO: 99.6% MFA required
+  Exemptions: 4 service accounts with compensating controls
+    1. svc-monitoring-agent — cannot use interactive MFA, restricted to monitoring-read-only role
+    2. svc-backup-agent — restricted to backup-operator role, IP allowlisted to backup subnet
+    3. svc-log-collector — restricted to log-write-only role, IP allowlisted to SIEM subnet
+    4. batch-payment-reconciler — compensating control CC-2025-01 (jump host with session recording)
+
+  Evidence: AV-2025-SOC2-CC6-006 through CC6-008
+
+--- CC6.3: Authorization — Kubernetes RBAC Audit ---
+
+CC6.3 Finding: cluster-admin role had 12 principals. 8 were engineers who only need namespace-scoped access. Remediated: reduced to 4 principals (2 SRE leads, 2 platform engineers). Change ticket: CHG-2025-5301.
+
+ClusterRoles reviewed: 23
+  Roles with no issues: 20
+  Roles tightened: 3
+    1. cluster-admin: reduced from 12 to 4 principals
+       Removed: 6 backend engineers (moved to namespace-scoped developer role)
+       Removed: 2 QA engineers (moved to namespace-scoped readonly role)
+       Remaining: anna.petrov (SRE lead), rachel.kim (Platform), tom.nguyen (DevOps), carla.mendes (DevOps manager)
+       Change ticket: CHG-2025-5301
+
+    2. cluster-monitoring: reduced from 8 to 5 principals
+       Removed: 3 developers who had monitoring access for debugging but no longer needed
+       Change ticket: CHG-2025-5302
+
+    3. cluster-network-admin: reduced from 4 to 2 principals
+       Removed: 2 engineers who rotated off the networking team
+       Change ticket: CHG-2025-5303
+
+--- CC6.6: System Boundaries — Network Segmentation ---
+
+Network segmentation diagram updated: 2025-09-20 by Marcus Tran
+VPC flow logs sampled for 7-day period (2025-09-13 through 2025-09-19):
+  Total flow log records analyzed: 42.7M
+  Cross-boundary traffic violations detected: 0
+  Expected cross-boundary traffic (allowed by policy):
+    - production → CDE via fw-core-01 allowlist: 2.1M flows (payment-gateway to CDE services)
+    - corporate → production via VPN: 847K flows (engineer access via Teleport)
+  Unexpected cross-boundary traffic: 0
+
+Evidence: AV-2025-SOC2-CC6-020 through CC6-023
+
+--- CC6.7: Data Transmission — TLS Certificate Inventory ---
+
+CC6.7 Certificate Status: 187 tracked. 184 valid (>30 days). 3 expiring within 30 days: *.payments.vantage.com (exp 2025-10-14), api.vantage.com (exp 2025-10-21), cdn-origin.vantage.com (exp 2025-10-09). Renewal tickets: CERT-2025-091, CERT-2025-092, CERT-2025-093.
+
+Certificate inventory details:
+  Total certificates tracked: 187
+  Valid (>30 days from expiry): 184
+  Expiring within 30 days: 3
+  Expired: 0
+
+  Certificate authorities used:
+    DigiCert: 42 certificates (all CDE and payment-related)
+    Let's Encrypt: 128 certificates (non-CDE services, auto-renewed)
+    Internal CA (vault-pki-prod): 17 certificates (service-to-service mTLS)
+
+  Expiring certificates detail:
+    1. CN: *.payments.vantage.com
+       CA: DigiCert
+       Expiry: 2025-10-14
+       Days remaining: 18
+       Renewal ticket: CERT-2025-091
+       Status: Renewal in progress (auto-renewal failed, manual renewal initiated)
+
+    2. CN: api.vantage.com
+       CA: DigiCert
+       Expiry: 2025-10-21
+       Days remaining: 25
+       Renewal ticket: CERT-2025-092
+       Status: Renewal scheduled
+
+    3. CN: cdn-origin.vantage.com
+       CA: DigiCert
+       Expiry: 2025-10-09
+       Days remaining: 13
+       Renewal ticket: CERT-2025-093
+       Status: Renewal in progress (priority)
+
+Evidence stored in audit vault under references AV-2025-SOC2-CC6-001 through CC6-029.
+
+--- Additional Evidence Metadata ---
+
+Total evidence artifacts collected for CC6: 29 documents
+AWS IAM access keys older than 90 days: 7 (all service accounts, all with rotation tickets)
+  svc-monitoring-agent: key age 87 days, rotation ticket IAM-2025-341
+  svc-backup-agent: key age 82 days, rotation ticket IAM-2025-342
+  svc-log-collector: key age 91 days, rotation ticket IAM-2025-343 (OVERDUE by 1 day)
+  deploy-pipeline-prod: key age 89 days, rotation ticket IAM-2025-344
+  argocd-deployer-prod: key age 85 days, rotation ticket IAM-2025-345
+  sonarqube-scanner: key age 78 days, rotation ticket IAM-2025-346
+  qualys-scanner-sa: key age 91 days, rotation ticket IAM-2025-347 (OVERDUE by 1 day)
+
+Vault secret access audit (September):
+  Total secret reads: 2,847
+  Top consumer: deploy-pipeline-prod (1,203 reads — 42.3%)
+  Second: payment-gateway-prod (724 reads — 25.4%)
+  Third: tokenization-service-prod (412 reads — 14.5%)
+  Fourth: checkout-service-prod (287 reads — 10.1%)
+  Other: 221 reads (7.7%)
+  Unauthorized access attempts detected: 0
+
+No unauthorized access attempts detected in VPC flow log sample.
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX A: Locust Load Test — Configuration and Detailed Results
+────────────────────────────────────────────────────────────────────────────────
+
+Locust script: scenarios/checkout_flow_bf2025.py
+Load test configuration for Black Friday 2025 checkout flow simulation.
+
+Configuration parameters:
+  host: https://checkout.staging-perf.vc-internal.net
+  users: 12000
+  spawn-rate: 100 users per minute
+  run-time: 48 hours
+  headless: true
+  csv output: /results/lt-2025-q3-checkout
+  html report: /results/lt-2025-q3-checkout.html
+  log level: INFO
+  log file: /results/lt-2025-q3-checkout.log
+
+Grafana dashboard: perf-checkout-2025q3
+URL: https://grafana.internal.vantage.com/d/perf-checkout-2025q3
+
+Detailed per-endpoint latency results (at peak 12,000 concurrent users):
+
+  GET /api/v2/products (catalog browse):
+    Requests: 14,247,891
+    Mean: 89ms
+    p50: 72ms
+    p95: 187ms
+    p99: 312ms
+    Max: 891ms
+    Failures: 12 (0.00008%)
+    Requests per second (peak): 298
+
+  GET /api/v2/products/{id} (product detail):
+    Requests: 12,891,234
+    Mean: 112ms
+    p50: 98ms
+    p95: 234ms
+    p99: 401ms
+    Max: 1,204ms
+    Failures: 8 (0.00006%)
+    Requests per second (peak): 268
+
+  POST /api/v2/cart/items (add to cart):
+    Requests: 8,412,567
+    Mean: 156ms
+    p50: 134ms
+    p95: 312ms
+    p99: 498ms
+    Max: 1,521ms
+    Failures: 89 (0.001%)
+    Requests per second (peak): 175
+
+  POST /api/v2/checkout/apply-coupon (apply coupon, 30% of users):
+    Requests: 2,523,770
+    Mean: 134ms
+    p50: 112ms
+    p95: 278ms
+    p99: 442ms
+    Max: 987ms
+    Failures: 4 (0.0002%)
+    Requests per second (peak): 53
+
+  POST /api/v2/checkout/start (initiate checkout):
+    Requests: 4,201,412
+    Mean: 287ms
+    p50: 245ms
+    p95: 512ms
+    p99: 789ms
+    Max: 1,847ms
+    Failures: 892 (0.02%)
+    Requests per second (peak): 88
+
+  POST /api/v2/payments/charge (submit payment):
+    Requests: 3,891,247
+    Mean: 342ms
+    p50: 298ms
+    p95: 612ms
+    p99: 890ms
+    Max: 2,104ms
+    Failures: 1,201 (0.03%)
+    Requests per second (peak): 81
+    Note: Failures are mostly Stripe test mode rate limiting and gateway timeouts
+
+  POST /api/v2/orders/confirm (confirm order):
+    Requests: 3,847,291
+    Mean: 198ms
+    p50: 167ms
+    p95: 398ms
+    p99: 601ms
+    Max: 1,412ms
+    Failures: 103 (0.003%)
+    Requests per second (peak): 80
+
+Total requests across all endpoints: 50,015,412
+Total failures: 2,309 (0.005%)
+Requests per second (all endpoints, peak): 1,043
+
+Resource utilization during peak (T+6h to T+12h averages):
+  checkout-service: CPU 72%, Memory 70%, Network I/O 124 MB/s
+  payment-gateway: CPU 58%, Memory 55%, Network I/O 87 MB/s
+  inventory-lock-service: CPU 84% (triggered HPA), Memory 62%, Network I/O 45 MB/s
+  cart-service: CPU 41%, Memory growing (see memory leak analysis), Network I/O 67 MB/s
+
+Kubernetes HPA events during test:
+  inventory-lock-service: scaled from 2 to 3 replicas at T+6h16m (CPU > 80% for 2 min)
+  inventory-lock-service: remained at 3 replicas for remainder of test
+  All other services: no scaling events (adequate static replica count)
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX B: HTTP Log Excerpts — Load Test Traffic Samples
+────────────────────────────────────────────────────────────────────────────────
+
+Source: staging-perf gateway access log
+Date: 2025-09-22
+
+--- Normal Checkout Flow (Successful) ---
+
+[2025-09-22 10:00:01.104 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/checkout/start
+  Host: checkout.staging-perf.vc-internal.net
+  X-Request-ID: lt-req-2025-09-22-000001
+  X-Locust-Worker: locust-worker-01
+  Content-Type: application/json
+  Authorization: Bearer lt-user-token-00001
+  Body: {"cart_id":"cart-lt-00001","user_id":"lt-user-00001"}
+
+[2025-09-22 10:00:01.312 UTC] RESPONSE
+  Status: 200 OK
+  Content-Type: application/json
+  Body: {"checkout_id":"chk-lt-00001","status":"pending","total":"$89.99","items":3}
+  X-Response-Time: 208ms
+  X-Request-ID: lt-req-2025-09-22-000001
+
+[2025-09-22 10:00:01.501 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/payments/charge
+  X-Request-ID: lt-req-2025-09-22-000002
+  X-Locust-Worker: locust-worker-01
+  Content-Type: application/json
+  Body: {"checkout_id":"chk-lt-00001","payment_method":"card","card_token":"tok_test_visa_4242"}
+
+[2025-09-22 10:00:01.823 UTC] RESPONSE
+  Status: 200 OK
+  Body: {"payment_id":"pay-lt-00001","status":"succeeded","amount":"$89.99","card_last_four":"4242"}
+  X-Response-Time: 322ms
+
+[2025-09-22 10:00:02.001 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/orders/confirm
+  X-Request-ID: lt-req-2025-09-22-000003
+  Body: {"checkout_id":"chk-lt-00001","payment_id":"pay-lt-00001"}
+
+[2025-09-22 10:00:02.287 UTC] RESPONSE
+  Status: 201 Created
+  Body: {"order_id":"ord-lt-00001","status":"confirmed","estimated_delivery":"2025-09-27"}
+  X-Response-Time: 286ms
+
+--- Inventory Lock Pool Exhaustion (T+6h14m) ---
+
+[2025-09-22 14:14:18.201 UTC] REQUEST
+  Method: POST
+  Path: /api/v1/locks/acquire
+  Host: inventory-lock.staging-perf.vc-internal.net
+  X-Request-ID: lt-req-2025-09-22-847201
+  Body: {"sku":"SKU-28471","quantity":1,"ttl_seconds":300,"checkout_id":"chk-lt-423891"}
+
+[2025-09-22 14:14:18.412 UTC] RESPONSE
+  Status: 200 OK
+  Body: {"lock_id":"lock-847201","status":"acquired","sku":"SKU-28471","expires_at":"2025-09-22T14:19:18Z"}
+  X-Response-Time: 211ms
+  Note: This request succeeded — pool at 1,997/2,000
+
+[2025-09-22 14:14:22.401 UTC] REQUEST
+  Method: POST
+  Path: /api/v1/locks/acquire
+  X-Request-ID: lt-req-2025-09-22-847291
+  Body: {"sku":"SKU-39582","quantity":1,"ttl_seconds":300,"checkout_id":"chk-lt-423940"}
+
+[2025-09-22 14:14:27.401 UTC] RESPONSE
+  Status: 503 Service Unavailable
+  Body: {"error":"ConnectionPoolExhausted","message":"no available connections, waited 5000ms","pool_max":2000,"pool_active":2000,"pool_waiting":147}
+  X-Response-Time: 5001ms
+
+[2025-09-22 14:14:28.102 UTC] REQUEST
+  Method: POST
+  Path: /api/v1/locks/acquire
+  X-Request-ID: lt-req-2025-09-22-847292
+  Body: {"sku":"SKU-41093","quantity":2,"ttl_seconds":300,"checkout_id":"chk-lt-423941"}
+
+[2025-09-22 14:14:33.102 UTC] RESPONSE
+  Status: 503 Service Unavailable
+  Body: {"error":"ConnectionPoolExhausted","message":"no available connections, waited 5000ms"}
+  X-Response-Time: 5001ms
+
+[2025-09-22 14:14:34.501 UTC] REQUEST
+  Method: POST
+  Path: /api/v1/locks/acquire
+  X-Request-ID: lt-req-2025-09-22-847293
+  Body: {"sku":"SKU-28471","quantity":3,"ttl_seconds":300}
+
+[2025-09-22 14:14:39.501 UTC] RESPONSE
+  Status: 503 Service Unavailable
+  Body: {"error":"ConnectionPoolExhausted","message":"no available connections, waited 5000ms"}
+
+--- HPA Scale Event ---
+
+[2025-09-22 14:16:00 UTC] KUBERNETES EVENT
+  Type: Normal
+  Reason: SuccessfulRescale
+  Object: HorizontalPodAutoscaler/inventory-lock-service
+  Message: New size: 3; reason: cpu resource utilization (percentage of request) above target
+  Old replicas: 2
+  New replicas: 3
+  CPU metric: 84% (threshold: 80%)
+
+[2025-09-22 14:18:12 UTC] KUBERNETES EVENT
+  Type: Normal
+  Reason: Scheduled
+  Object: Pod/inventory-lock-service-6d4b8c7f9-xk2p4
+  Message: Successfully assigned staging-perf/inventory-lock-service-6d4b8c7f9-xk2p4 to staging-perf-node-03
+
+[2025-09-22 14:18:47 UTC] KUBERNETES EVENT
+  Type: Normal
+  Reason: Started
+  Object: Pod/inventory-lock-service-6d4b8c7f9-xk2p4
+  Message: Started container inventory-lock-service
+
+[2025-09-22 14:19:02 UTC] KUBERNETES EVENT
+  Type: Normal
+  Reason: Readiness
+  Object: Pod/inventory-lock-service-6d4b8c7f9-xk2p4
+  Message: Readiness probe succeeded, pod added to service endpoints
+
+--- Post-HPA Recovery ---
+
+[2025-09-22 14:19:15.201 UTC] REQUEST
+  Method: POST
+  Path: /api/v1/locks/acquire
+  X-Request-ID: lt-req-2025-09-22-847891
+  Body: {"sku":"SKU-28471","quantity":1,"ttl_seconds":300}
+
+[2025-09-22 14:19:15.398 UTC] RESPONSE
+  Status: 200 OK
+  Body: {"lock_id":"lock-847891","status":"acquired","sku":"SKU-28471"}
+  X-Response-Time: 197ms
+  Note: Pool pressure resolved — successful acquisition after HPA scaling
+
+--- Cart Service Memory Growth Sample ---
+
+[2025-09-22 10:00:00 UTC] METRICS cart-service-pod-01
+  container_memory_working_set_bytes: 536870912 (512MB)
+  container_cpu_usage_seconds_total: 1.24
+
+[2025-09-22 16:00:00 UTC] METRICS cart-service-pod-01
+  container_memory_working_set_bytes: 754974720 (720MB)
+  container_cpu_usage_seconds_total: 1.31
+
+[2025-09-22 22:00:00 UTC] METRICS cart-service-pod-01
+  container_memory_working_set_bytes: 1027604480 (980MB)
+  container_cpu_usage_seconds_total: 1.28
+
+[2025-09-23 04:00:00 UTC] METRICS cart-service-pod-01
+  container_memory_working_set_bytes: 1288490188 (1.2GB)
+  container_cpu_usage_seconds_total: 1.35
+
+[2025-09-23 10:00:00 UTC] METRICS cart-service-pod-01
+  container_memory_working_set_bytes: 1503238553 (1.4GB)
+  container_cpu_usage_seconds_total: 1.42
+
+[2025-09-23 16:00:00 UTC] METRICS cart-service-pod-01
+  container_memory_working_set_bytes: 1717986918 (1.6GB)
+  container_cpu_usage_seconds_total: 1.51
+
+[2025-09-23 22:00:00 UTC] METRICS cart-service-pod-01
+  container_memory_working_set_bytes: 1932735283 (1.8GB)
+  Note: GC triggered — next metric sample shows drop
+
+[2025-09-23 22:02:14 UTC] METRICS cart-service-pod-01
+  container_memory_working_set_bytes: 667483750 (620MB)
+  Note: Major GC completed, reclaimed 1.18GB
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX C: Runbook — Load Test Environment Setup and Teardown
+────────────────────────────────────────────────────────────────────────────────
+
+Runbook: RB-QA-005 — Load Test Environment Setup for Black Friday Capacity Validation
+Author: Kai Johannsen
+Created: 2025-09-20
+Last Updated: 2025-09-26
+
+Pre-test setup (1 day before):
+  Step 1: Verify staging-perf cluster is available and matches production node spec
+    kubectl get nodes -l node-pool=staging-perf -o wide
+    Expected: 8 nodes, m5.2xlarge, Ready status
+
+  Step 2: Deploy service versions matching production
+    argocd app sync staging-perf-checkout --revision v2.18.3
+    argocd app sync staging-perf-payment-gateway --revision v4.7.1
+    argocd app sync staging-perf-inventory-lock --revision v1.6.0
+    argocd app sync staging-perf-cart --revision v3.4.2
+
+  Step 3: Verify all services healthy
+    for svc in checkout-service payment-gateway inventory-lock-service cart-service; do
+      kubectl -n staging-perf rollout status deployment/$svc --timeout=120s
+    done
+
+  Step 4: Deploy Locust workers
+    kubectl apply -f k8s/load-test/locust-master.yaml
+    kubectl apply -f k8s/load-test/locust-workers.yaml
+    kubectl -n load-test wait --for=condition=ready pod -l app=locust-worker --timeout=120s
+
+  Step 5: Configure Stripe test mode
+    kubectl -n staging-perf set env deployment/payment-gateway STRIPE_API_KEY=sk_test_...
+    kubectl -n staging-perf rollout restart deployment/payment-gateway
+
+  Step 6: Seed test data
+    kubectl -n staging-perf exec deploy/data-seeder -- python3 /app/seed.py --users 50000 --products 10000 --coupons 500
+    Expected: 50,000 test user accounts, 10,000 products in catalog, 500 valid coupon codes
+
+  Step 7: Reset metrics baselines in Grafana
+    Navigate to perf-checkout-2025q3 dashboard, click "Reset Annotations"
+
+During test:
+  Monitor Grafana dashboard perf-checkout-2025q3 for:
+    - Service latency panels (p50, p95, p99 for each service)
+    - Error rate panel (target: <0.1%)
+    - Resource utilization panels (CPU, memory per pod)
+    - Database metrics (IOPS, connection count, replication lag)
+    - Redis metrics (hit rate, memory, connections)
+    - Locust stats (users, RPS, failure rate)
+
+  Alert thresholds during load test (modified from production):
+    - p99 > 2000ms for any service: investigate immediately
+    - Error rate > 1% for any service: pause test and investigate
+    - Database IOPS > 18,000 (90% capacity): prepare to pause test
+    - Any service OOMKilled: pause test, increase limits, restart
+
+Post-test teardown:
+  Step 8: Stop Locust workers
+    kubectl delete -f k8s/load-test/locust-workers.yaml
+    kubectl delete -f k8s/load-test/locust-master.yaml
+
+  Step 9: Export Locust results
+    kubectl cp load-test/locust-master-01:/results/ ./results/lt-2025-q3-checkout/
+
+  Step 10: Archive Grafana dashboard snapshots
+    Take snapshots of all panels for the 48-hour test window
+    Store in Confluence under QA/LoadTests/2025-Q3
+
+  Step 11: Clean up test data
+    kubectl -n staging-perf exec deploy/data-seeder -- python3 /app/cleanup.py --prefix lt-
+    Expected: All test users, orders, carts deleted from staging-perf databases
+
+  Step 12: Verify no resource leaks
+    kubectl -n staging-perf top pods
+    Compare with pre-test baseline — all pods should return to normal resource usage within 30 minutes
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX D: SLA Review — Incident Detail Summary (August 2025)
+────────────────────────────────────────────────────────────────────────────────
+
+Total P1/P2 incidents in August 2025: 10
+Post-mortem completion rate: 100% for August (10/10)
+
+Incident Detail:
+
+INC-2025-0807a: svc-notification-service email queue backup
+  Severity: P3
+  Duration: 45 minutes
+  Emails delayed: 8,400
+  Root cause: Sendgrid rate limit during flash sale blast
+  MTTA: 4 minutes
+  MTTR: 45 minutes
+  Customer impact: Email delivery delay only, no data loss
+  Post-mortem: PM-2025-0807a — COMPLETED
+
+INC-2025-0812: checkout-service deploy rollback
+  Severity: P2
+  Duration: 6.5 minutes
+  Root cause: v2.17.2 configuration error caused 500 on checkout start endpoint
+  MTTA: 1 minute (PagerDuty auto-alert)
+  MTTR: 6.5 minutes (ArgoCD rollback)
+  Customer impact: approximately 2,100 failed checkout attempts
+  Post-mortem: PM-2025-0812 — COMPLETED
+  Action items: Add integration test for checkout start endpoint configuration matrix
+
+INC-2025-0814: orders-db primary failover
+  Severity: P2
+  Duration: 12 seconds
+  Root cause: Primary node memory pressure from unoptimized query in batch reporting
+  MTTA: 0 seconds (automated failover, no human intervention needed)
+  MTTR: 12 seconds (automated promotion of replica)
+  Customer impact: 0 (failover transparent to application layer)
+  Post-mortem: PM-2025-0814 — COMPLETED
+  Action items: Optimize batch reporting query, add memory alerting threshold
+
+INC-2025-0819: search-service Elasticsearch reindex
+  Severity: P2
+  Duration: 25 minutes
+  Root cause: Schema migration triggered full reindex during peak hours
+  MTTA: 3 minutes
+  MTTR: 25 minutes (reindex completed naturally)
+  Customer impact: estimated 12,000 users experienced slow search (p99 exceeded 5 seconds)
+  Post-mortem: PM-2025-0819 — COMPLETED
+  Action items: Schedule reindex for maintenance window (02:00-04:00 UTC)
+
+INC-2025-0822: svc-notification-service email queue backup (second occurrence)
+  Severity: P3
+  Duration: 20 minutes
+  Emails delayed: 3,200
+  Root cause: Retry storm after transient Sendgrid API timeout
+  MTTA: 2 minutes
+  MTTR: 20 minutes
+  Post-mortem: PM-2025-0822 — COMPLETED
+  Action items: Implement circuit breaker in Sendgrid client library
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX E: AWS IAM Access Key Rotation Status (CC6.3 Evidence)
+────────────────────────────────────────────────────────────────────────────────
+
+Source: AWS IAM Credential Report, exported 2025-09-26
+Policy: Service account access keys must be rotated every 90 days per VC-SEC-POL-012
+
+Service Account             | Key ID         | Created          | Age (days) | Status    | Rotation Ticket
+----------------------------|----------------|------------------|------------|-----------|------------------
+svc-monitoring-agent        | AKIA...7X3Q    | 2025-07-01 10:00 | 87         | Active    | IAM-2025-341
+svc-backup-agent            | AKIA...9F2R    | 2025-07-06 14:00 | 82         | Active    | IAM-2025-342
+svc-log-collector           | AKIA...1M8P    | 2025-06-27 08:00 | 91         | OVERDUE   | IAM-2025-343
+deploy-pipeline-prod        | AKIA...4K7T    | 2025-06-29 16:00 | 89         | Active    | IAM-2025-344
+argocd-deployer-prod        | AKIA...2N5W    | 2025-07-03 12:00 | 85         | Active    | IAM-2025-345
+sonarqube-scanner           | AKIA...8J3V    | 2025-07-10 09:00 | 78         | Active    | IAM-2025-346
+qualys-scanner-sa           | AKIA...6H1Z    | 2025-06-27 11:00 | 91         | OVERDUE   | IAM-2025-347
+
+Summary:
+  Total service account keys reviewed: 7
+  Within 90-day policy: 5 (71.4%)
+  Overdue (>90 days): 2 (28.6%)
+    svc-log-collector: 1 day overdue — rotation ticket IAM-2025-343 scheduled for 2025-09-27
+    qualys-scanner-sa: 1 day overdue — rotation ticket IAM-2025-347 scheduled for 2025-09-27
+
+  Note: Both overdue keys are only 1 day past the 90-day threshold. Rotation was delayed due to the Qualys scanner cron job failure investigation (if qualys-scanner-sa key was rotated while troubleshooting the ImagePullBackOff issue, it could complicate the investigation). Rotation will proceed on 2025-09-27 after the rescheduled vulnerability scan on 2025-09-19 completes successfully.
+
+Human user access keys: 0 (policy prohibits long-lived access keys for human users; all human access via Okta SSO with short-lived STS tokens)
+
+Evidence reference: AV-2025-SOC2-CC6-024
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX F: Database Performance Metrics During Load Test (Extended)
+────────────────────────────────────────────────────────────────────────────────
+
+Source: CloudWatch metrics for orders-db-primary (db.r6g.2xlarge)
+Period: 2025-09-22 08:00 UTC through 2025-09-24 08:00 UTC
+
+Metric snapshots every 6 hours:
+
+  T+0h (2025-09-22 08:00 UTC — test start, ramp-up beginning):
+    Read IOPS: 1,200
+    Write IOPS: 400
+    Total IOPS: 1,600
+    CPU utilization: 12%
+    Freeable memory: 52 GB
+    Database connections: 48
+    Replication lag: 0.02s
+
+  T+6h (2025-09-22 14:00 UTC — approaching peak, pool exhaustion window):
+    Read IOPS: 8,400
+    Write IOPS: 4,800
+    Total IOPS: 13,200
+    CPU utilization: 54%
+    Freeable memory: 38 GB
+    Database connections: 201
+    Replication lag: 0.18s
+
+  T+12h (2025-09-22 20:00 UTC — sustained peak):
+    Read IOPS: 9,100
+    Write IOPS: 5,100
+    Total IOPS: 14,200
+    CPU utilization: 62%
+    Freeable memory: 34 GB
+    Database connections: 247 (peak observed)
+    Replication lag: 0.30s (max observed)
+
+  T+18h (2025-09-23 02:00 UTC — sustained peak):
+    Read IOPS: 8,900
+    Write IOPS: 4,900
+    Total IOPS: 13,800
+    CPU utilization: 59%
+    Freeable memory: 35 GB
+    Database connections: 238
+    Replication lag: 0.22s
+
+  T+24h (2025-09-23 08:00 UTC — sustained peak):
+    Read IOPS: 9,000
+    Write IOPS: 5,000
+    Total IOPS: 14,000
+    CPU utilization: 61%
+    Freeable memory: 34 GB
+    Database connections: 241
+    Replication lag: 0.25s
+
+  T+30h (2025-09-23 14:00 UTC — sustained peak):
+    Read IOPS: 8,800
+    Write IOPS: 4,700
+    Total IOPS: 13,500
+    CPU utilization: 58%
+    Freeable memory: 36 GB
+    Database connections: 234
+    Replication lag: 0.20s
+
+  T+36h (2025-09-23 20:00 UTC — sustained peak):
+    Read IOPS: 9,200
+    Write IOPS: 5,200
+    Total IOPS: 14,400
+    CPU utilization: 63%
+    Freeable memory: 33 GB
+    Database connections: 244
+    Replication lag: 0.28s
+
+  T+42h (2025-09-24 02:00 UTC — sustained peak, approaching ramp-down):
+    Read IOPS: 8,600
+    Write IOPS: 4,600
+    Total IOPS: 13,200
+    CPU utilization: 57%
+    Freeable memory: 37 GB
+    Database connections: 229
+    Replication lag: 0.19s
+
+  T+48h (2025-09-24 08:00 UTC — test complete, ramp-down finished):
+    Read IOPS: 1,100
+    Write IOPS: 300
+    Total IOPS: 1,400
+    CPU utilization: 10%
+    Freeable memory: 54 GB
+    Database connections: 42
+    Replication lag: 0.01s
+
+Peak IOPS: 14,400 at T+36h (72% of 20,000 capacity — adequate headroom)
+Peak connections: 247 at T+12h (61.75% of 400 max — adequate headroom)
+Peak replication lag: 0.30s at T+12h (well within 1s threshold)
+Deadlocks: 0 over entire 48-hour period
+Slow queries (>1s): 14 total, all during the T+6h pool exhaustion window when inventory-lock-service was returning 503s and checkout-service retries created burst query patterns
+
+Disk usage at test end: 824 GB (7.2 GB increase during test from 3,847,291 test orders)
+Cleanup: Test orders deleted during post-test teardown, disk reclaimed via VACUUM FULL on 2025-09-25
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX G: Grafana Dashboard Export — perf-checkout-2025q3 Panel Summary
+────────────────────────────────────────────────────────────────────────────────
+
+Dashboard URL: https://grafana.internal.vantage.com/d/perf-checkout-2025q3
+Dashboard Title: Black Friday 2025 Checkout Load Test
+Owner: Kai Johannsen (QA Performance Engineering)
+Data source: Prometheus (staging-perf)
+Time range: 2025-09-22 08:00 UTC to 2025-09-24 08:00 UTC
+
+Panel 1: Concurrent Users
+  Type: Time series graph
+  Query: locust_user_count{environment="staging-perf"}
+  Peak value: 12,000 users (reached at T+2h, sustained through T+44h)
+  Ramp-up rate: 100 users per minute (visible as linear increase from T+0h to T+2h)
+  Ramp-down rate: 50 users per minute (T+44h to T+48h)
+
+Panel 2: Requests Per Second (by endpoint)
+  Type: Stacked time series graph
+  Query: rate(http_requests_total{environment="staging-perf"}[1m])
+  Peak value: 1,043 RPS (aggregate all endpoints)
+  Breakdown at peak: checkout/start 88 RPS, payments/charge 81 RPS, orders/confirm 80 RPS, cart/items 175 RPS, products (browse+detail) 566 RPS, apply-coupon 53 RPS
+
+Panel 3: Latency Percentiles (per service)
+  Type: Multi-series time series with p50, p95, p99 lines
+  Most notable feature: p99 spike to 2,104ms at T+6h14m on payment-gateway (coincides with inventory-lock pool exhaustion causing upstream retry pressure)
+
+Panel 4: Error Rate (per service)
+  Type: Time series with threshold line at 0.1%
+  Spike visible: inventory-lock-service hit 2.3% error rate during 2-minute pool exhaustion window at T+6h14m, returned to 0% at T+6h19m after HPA scaling
+  All other services remained below 0.05% throughout test
+
+Panel 5: Pod Resource Utilization (CPU)
+  Type: Heatmap by pod
+  Notable: inventory-lock-service pods show steady CPU climb from 45% to 84% before HPA trigger
+  cart-service pods show stable CPU at 40-45% throughout (memory issue, not CPU issue)
+
+Panel 6: Pod Resource Utilization (Memory)
+  Type: Time series by pod
+  Notable: cart-service-pod-01 shows linear memory growth from 512MB to 1.8GB over 36 hours, then sharp drop to 620MB at GC event, then resumed growth
+
+Panel 7: Database Metrics (orders-db-primary)
+  Type: Multi-panel with IOPS, connections, replication lag, CPU
+  All metrics remained within safe operating range throughout test
+
+Panel 8: Redis Cache Metrics
+  Type: Multi-panel with hit rate, memory, connections, evictions
+  Hit rate: stable at 97.2% during test (0.9pp below normal 98.1%)
+  No eviction events
+
+Panel 9: Locust Aggregate Statistics
+  Type: Stats table (final values)
+  Total requests: 50,015,412
+  Total failures: 2,309
+  Failure rate: 0.005%
+  Average response time: 187ms (aggregate)
+  Orders completed: 3,847,291
+
+Annotations on dashboard:
+  T+6h14m: "Inventory lock pool exhaustion — 147 failures over 2 minutes"
+  T+6h16m: "HPA scaled inventory-lock-service from 2 to 3 replicas"
+  T+6h19m: "Pool pressure resolved"
+  T+36h: "Cart service GC event — 1.18GB reclaimed"
+
+All dashboard panels exported as PNG snapshots and stored in Confluence under QA/LoadTests/2025-Q3/Grafana-Snapshots.
+
+================================================================================
+END OF DOCUMENT — 2025-09-26
+================================================================================

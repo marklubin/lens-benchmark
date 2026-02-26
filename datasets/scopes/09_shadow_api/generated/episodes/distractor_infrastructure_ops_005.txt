@@ -1,0 +1,1178 @@
+================================================================================
+INFRASTRUCTURE OPERATIONS LOG — VANTAGE COMMERCE PLATFORM
+Date: 2025-10-03
+Cluster: prod-us-east-1
+Classification: Internal — Operations Team Only
+================================================================================
+
+--- SECTION 1: DEPLOY MANIFEST — KAFKA CLUSTER OPERATIONS ---
+
+Timestamp: 2025-10-03T16:00:00Z
+Service: kafka-cluster
+Environment: production
+Operator: Strimzi Operator v0.42.0
+Cluster Name: kafka-prod
+Version: Apache Kafka 3.7.1
+
+CLUSTER TOPOLOGY:
+
+  Brokers: 5 (broker-0 through broker-4)
+  Node Pool: worker-kafka-v2 (dedicated)
+  Instance Type: i3en.2xlarge (8 vCPU, 64 GiB, 2x 2.5 TB NVMe SSD)
+  Namespace: kafka-prod
+
+  Broker Details:
+
+    broker-0:
+      Pod: kafka-prod-kafka-0
+      Node: ip-10-42-30-101 (us-east-1a)
+      JVM Heap: 14g (-Xmx14g, previously 12g)
+      Disk Usage: 1.2 TB / 2.5 TB (48%)
+      Partitions Led: 142
+      Network In: 180 MB/s
+      Network Out: 320 MB/s (replication + consumers)
+      GC Pause p99: 18ms (previously 42ms with old tuning)
+
+    broker-1:
+      Pod: kafka-prod-kafka-1
+      Node: ip-10-42-30-103 (us-east-1a)
+      JVM Heap: 14g
+      Disk Usage: 1.1 TB / 2.5 TB (44%)
+      Partitions Led: 138
+      Network In: 175 MB/s
+      Network Out: 312 MB/s
+      GC Pause p99: 17ms
+
+    broker-2:
+      Pod: kafka-prod-kafka-2
+      Node: ip-10-42-31-88 (us-east-1b)
+      JVM Heap: 14g
+      Disk Usage: 1.3 TB / 2.5 TB (52%)
+      Partitions Led: 144
+      Network In: 182 MB/s
+      Network Out: 325 MB/s
+      GC Pause p99: 19ms
+
+    broker-3:
+      Pod: kafka-prod-kafka-3
+      Node: ip-10-42-31-90 (us-east-1b)
+      JVM Heap: 14g
+      Disk Usage: 1.0 TB / 2.5 TB (40%)
+      Partitions Led: 140
+      Network In: 178 MB/s
+      Network Out: 318 MB/s
+      GC Pause p99: 16ms
+
+    broker-4:
+      Pod: kafka-prod-kafka-4
+      Node: ip-10-42-32-54 (us-east-1c)
+      JVM Heap: 14g
+      Disk Usage: 1.2 TB / 2.5 TB (48%)
+      Partitions Led: 136
+      Network In: 176 MB/s
+      Network Out: 314 MB/s
+      GC Pause p99: 18ms
+
+  Schema Registry:
+    Component: confluent-schema-registry v7.6.0
+    Replicas: 3
+    Namespace: kafka-prod
+    Subjects Registered: 84
+    Compatibility Level: BACKWARD (default)
+    Storage: _schemas topic (compact, RF=3)
+    REST API: http://schema-registry.kafka-prod.svc.cluster.local:8081
+
+  Kafka Connect:
+    Cluster: connect-prod
+    Workers: 4
+    Connectors Active:
+      1. s3-sink-app-events (S3 Sink) — writing to s3://vantage-data-lake/events/
+         Status: RUNNING
+         Tasks: 4
+         Records Written (24h): 48.2M
+         Bytes Written (24h): 142 GB
+      2. jdbc-source-orders (JDBC Source) — reading from orders-prod-primary
+         Status: RUNNING
+         Tasks: 2
+         Records Read (24h): 2.4M
+         Lag: 800ms
+      3. s3-sink-logs (S3 Sink) — writing to s3://vantage-data-lake/logs/
+         Status: RUNNING
+         Tasks: 2
+         Records Written (24h): 84M
+      4. elasticsearch-sink-search (ES Sink) — writing to es-prod-search
+         Status: RUNNING
+         Tasks: 3
+         Records Written (24h): 12.8M
+
+JVM TUNING — BROKER ROLLING RESTART:
+
+  Previous Configuration:
+    -Xms12g -Xmx12g
+    -XX:+UseG1GC
+    -XX:MaxGCPauseMillis=20
+    -XX:G1HeapRegionSize=16M
+    -XX:InitiatingHeapOccupancyPercent=35
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+ParallelRefProcEnabled
+    -XX:+UseStringDeduplication
+
+  Updated Configuration:
+    -Xms14g -Xmx14g
+    -XX:+UseG1GC
+    -XX:MaxGCPauseMillis=15
+    -XX:G1HeapRegionSize=16M
+    -XX:InitiatingHeapOccupancyPercent=35
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+ParallelRefProcEnabled
+    -XX:+UseStringDeduplication
+    -XX:G1ReservePercent=15
+    -XX:ConcGCThreads=4
+    -XX:ParallelGCThreads=8
+
+  Changes:
+    1. Heap size: 12g to 14g (+2g for larger page cache with 36-partition topics)
+    2. MaxGCPauseMillis: 20ms to 15ms (tighter GC pause target)
+    3. Added G1ReservePercent=15 (prevent allocation failures during compaction)
+    4. Added ConcGCThreads=4, ParallelGCThreads=8 (match i3en.2xlarge core count)
+
+ROLLING RESTART EXECUTION:
+
+  Strategy: One broker at a time, 5-minute stabilization delay between restarts
+  Start Time: 2025-10-03T16:00:00Z
+  Controller Broker During Restart: broker-0 (KRaft controller)
+
+  [16:00:00Z] Broker-0 restart initiated
+    Under-Replicated Partitions (pre-restart): 0
+    Preferred Leader Partitions: 142
+    Controlled Shutdown: INITIATED
+    Producer Drain: 8 seconds (in-flight produce requests completed)
+    Consumer Rebalance: 3 consumer groups rebalanced (4.2 seconds)
+    Pod Restart: StatefulSet rolling update
+    Broker Back Online: 16:00:42Z (42 seconds restart time)
+    ISR Recovery: All 142 partitions in-sync within 28 seconds
+    Under-Replicated Partitions (during restart): peak 24
+    Under-Replicated Partitions (post-recovery): 0
+    Stabilization Wait: 5 minutes
+
+  [16:06:00Z] Broker-1 restart initiated
+    Controlled Shutdown: INITIATED
+    Producer Drain: 7 seconds
+    Pod Restart: 38 seconds
+    ISR Recovery: 26 seconds
+    Under-Replicated Partitions (peak): 22
+    Under-Replicated Partitions (post): 0
+    Stabilization Wait: 5 minutes
+
+  [16:12:00Z] Broker-2 restart initiated
+    Controlled Shutdown: INITIATED
+    Producer Drain: 9 seconds
+    Pod Restart: 44 seconds (slightly longer — larger log segments on disk)
+    ISR Recovery: 32 seconds
+    Under-Replicated Partitions (peak): 24 (this broker held most partitions)
+    Under-Replicated Partitions (post): 0
+    Stabilization Wait: 5 minutes
+
+  [16:18:00Z] Broker-3 restart initiated
+    Pod Restart: 36 seconds
+    ISR Recovery: 24 seconds
+    Under-Replicated Partitions (peak): 20
+    Under-Replicated Partitions (post): 0
+    Stabilization Wait: 5 minutes
+
+  [16:24:00Z] Broker-4 restart initiated
+    Pod Restart: 40 seconds
+    ISR Recovery: 28 seconds
+    Under-Replicated Partitions (peak): 18
+    Under-Replicated Partitions (post): 0
+
+  Total Restart Duration: 28 minutes (16:00 to 16:28)
+  Post-Restart GC Metrics (30-minute observation):
+    GC Pause p99 Before: 42ms
+    GC Pause p99 After: 18ms (57% improvement)
+    GC Pause p50 Before: 8ms
+    GC Pause p50 After: 4ms (50% improvement)
+    Full GC Events: 0 (none during observation period)
+
+TOPIC PARTITION EXPANSION:
+
+  Topic: vantage-order-events
+  Previous Partitions: 24
+  New Partitions: 36
+  Reason: 40% throughput growth in Q3 required additional parallelism
+  Replication Factor: 3 (unchanged)
+  Retention: 72 hours (unchanged)
+
+  Partition Reassignment:
+    Tool: Cruise Control (LinkedIn Kafka Cruise Control v2.5.142)
+    Reassignment Plan Generated: 2025-10-03T16:30:00Z
+    Reassignment Execution Started: 2025-10-03T16:32:00Z
+    Reassignment Completed: 2025-10-03T16:54:00Z
+    Duration: 22 minutes
+    Data Moved: 48 GB (12 new partitions populated via consumer offset reset)
+    Throttle Rate: 100 MB/s (to avoid impacting production traffic)
+
+  Post-Reassignment Leader Distribution:
+    Broker-0: 8 leader partitions (22.2%)
+    Broker-1: 7 leader partitions (19.4%)
+    Broker-2: 7 leader partitions (19.4%)
+    Broker-3: 7 leader partitions (19.4%)
+    Broker-4: 7 leader partitions (19.4%)
+    Balance: All brokers within 3% of equal leader count
+
+--- SLACK TRANSCRIPT: #platform-infra ---
+
+Timestamp Range: 2025-10-03T15:55:00Z — 2025-10-03T17:00:00Z
+Channel: #platform-infra
+
+[15:55:14] @ravi.shankar: starting Kafka broker rolling restart for JVM tuning. Going one broker at a time with 5 min stabilization. Heap 12g to 14g, tighter GC pause target
+[15:55:30] @drew.park: sounds good. I'll monitor producer ack latency
+[16:00:15] @ravi.shankar: broker-0 restarting. Under-replicated partitions at 24 — expected during restart
+[16:01:00] @ravi.shankar: broker-0 back, all partitions in-sync. GC pauses already looking better
+[16:06:10] @ravi.shankar: broker-1 restarting
+[16:07:00] @drew.park: producer ack latency holding steady. No client errors
+[16:12:15] @ravi.shankar: broker-2 restarting. This one might take a bit longer — most log segments
+[16:13:05] @ravi.shankar: broker-2 back, ISR caught up in 32 seconds. Continuing
+[16:28:30] @ravi.shankar: Kafka broker rolling restart done. GC pause times dropped from p99 42ms to p99 18ms with the new tuning. Producer ack latency improved across the board.
+[16:29:00] @drew.park: nice. What about the partition expansion for vantage-order-events?
+[16:29:30] @ravi.shankar: doing that now. Cruise control is generating the reassignment plan
+[16:32:10] @ravi.shankar: reassignment started. 24 to 36 partitions, throttled at 100 MB/s. ETA ~20 minutes
+[16:54:15] @ravi.shankar: done. Cruise control balanced partitions on the new 36-partition topic
+[16:55:00] @drew.park: nice. Cruise control balanced partitions on the new 36-partition topic — all brokers within 3% of equal leader count.
+[16:55:30] @ravi.shankar: yep. Consumer groups are picking up the new partitions. order-event-processor rebalanced cleanly
+[16:56:00] @drew.park: throughput looking good. 48k messages/sec ingest, 890 MB/s aggregate. Right where we want it
+[16:56:30] @ravi.shankar: I'll update the runbook with the new JVM settings and partition count
+[16:57:00] @alex.greenfield: quick q — does the partition expansion affect the ES sink connector?
+[16:57:30] @ravi.shankar: good catch. I'll need to bump the task count on elasticsearch-sink-search from 3 to 4 to handle the additional partitions. Doing that now
+[16:58:00] @ravi.shankar: done. Connector task count updated, rebalancing
+[16:59:00] @ravi.shankar: all clear. Connector running with 4 tasks, no lag
+
+--- SECTION 2: GRAFANA ALERT — HIGH MEMORY PRESSURE ---
+
+Timestamp: 2025-10-03T04:12:00Z
+Alert Name: HighMemoryPressure
+Alert UID: grafana-alert-mem-9c4d3e
+Alert Rule Group: node-health-checks
+Environment: production
+Severity: CRITICAL
+Status: RESOLVED (automatic pod restart, manual limit adjustment)
+
+ALERT CONFIGURATION:
+
+  Datasource: Prometheus (prometheus-prod)
+  Expression: |
+    (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 < 8
+  Evaluation Interval: 15 seconds
+  For Duration: 1 minute
+  Labels:
+    severity: critical
+    team: platform-infra
+    escalation: immediate
+
+FIRING INSTANCE:
+
+  Node: ip-10-42-31-142
+  Node Pool: worker-memory-v3
+  Instance Type: r6i.2xlarge
+  vCPU: 8
+  Total Memory: 64 GiB
+  Available Memory at Alert: 3.8 GiB (6%)
+  Node Memory Usage: 94%
+  Pods Running on Node: 14
+
+  Alert Fired At: 2025-10-03T04:12:08Z
+  Notification Channels:
+    - Slack #infra-alerts (delivered at 04:12:10Z)
+    - PagerDuty (P3 — critical but auto-recovery expected)
+    - Opsgenie
+
+OOM EVENT DETAILS:
+
+  OOMKilled Pod: analytics-batch-processor-7b8c9d
+  Container: analytics-processor
+  Namespace: analytics-prod
+  Previous Resource Configuration:
+    Memory Request: 4Gi
+    Memory Limit: 8Gi
+    CPU Request: 2
+    CPU Limit: 4
+  OOM Kill Timestamp: 2025-10-03T04:12:02Z
+  Exit Code: 137 (SIGKILL from OOM killer)
+
+  Process Memory at Kill:
+    RSS: 8.0 GiB (at limit)
+    Cache: 420 MiB
+    Swap: 0 (swap disabled on Kubernetes nodes)
+
+  Workload Context:
+    Job: Monthly aggregation — processing order analytics for September 2025
+    Records Being Processed: 2,100,000 order records
+    Normal Daily Run: ~70,000 records (4:00 UTC daily)
+    End-of-Month Run: 2,100,000 records (30x normal volume)
+    Processing Phase at OOM: In-memory DataFrame merge of 4 regional shards
+
+NODE MEMORY BREAKDOWN AT TIME OF OOM:
+
+  Total Node Memory: 64 GiB
+  Pods Memory Requested: 58.2 GiB
+  Pods Memory Used (actual): 60.2 GiB
+  Available Headroom: 3.8 GiB (6%)
+  System Reserved: 2 GiB
+
+  Top Memory Consumers on Node:
+    1. analytics-batch-processor-7b8c9d: 8.0 GiB / 8 GiB limit (OOMKilled)
+    2. elasticsearch-data-hot-02: 32.0 GiB / 64 GiB limit (JVM heap + native)
+    3. redis-exporter-4a2b1c: 128 MiB / 256 MiB limit
+    4. fluent-bit-8d7e6f: 96 MiB / 128 MiB limit
+    5. node-exporter-2c3d4e: 48 MiB / 64 MiB limit
+    6. kube-proxy-5f6a7b: 180 MiB / (no limit)
+    7. [8 other pods]: 19.7 GiB combined
+
+REMEDIATION:
+
+  Automatic Recovery:
+    [04:12:02Z] Pod OOMKilled — container terminated with exit code 137
+    [04:12:04Z] Kubelet detected container exit, initiated restart (RestartPolicy: Always)
+    [04:12:08Z] Container restarted — CrashLoopBackOff avoided (first failure)
+    [04:12:14Z] Container passed readiness probe
+    [04:12:14Z] Pod back to Running state
+
+  Manual Adjustment (by @alex.greenfield, acknowledged at 04:18):
+    [04:22:00Z] Memory request increased from 4Gi to 6Gi
+    [04:22:00Z] Memory limit increased from 8Gi to 12Gi
+    [04:22:05Z] Deployment updated, new pod scheduled
+    [04:22:30Z] New pod running with updated limits
+
+    Updated Resource Configuration:
+      Memory Request: 6Gi (was 4Gi)
+      Memory Limit: 12Gi (was 8Gi)
+      CPU Request: 2 (unchanged)
+      CPU Limit: 4 (unchanged)
+
+  Monthly Run Impact:
+    The initial run was killed at ~60% completion (1.26M of 2.1M records processed)
+    Restarted run with 12Gi limit completed successfully at 05:48 UTC
+    Total processing time (with restart): 1 hour 36 minutes
+    Normal monthly processing time: ~45 minutes with adequate memory
+
+--- SLACK TRANSCRIPT: #incidents ---
+
+Timestamp Range: 2025-10-03T04:12:00Z — 2025-10-03T04:30:00Z
+Channel: #incidents
+
+[04:12:12] @grafana-bot: CRITICAL: HighMemoryPressure on ip-10-42-31-142 — node memory at 94%
+[04:12:14] @grafana-bot: OOMKilled: analytics-batch-processor-7b8c9d in analytics-prod (exit code 137)
+[04:15:00] @alex.greenfield: ack. Checking — it's the monthly aggregation job
+[04:16:00] @alex.greenfield: analytics-batch-processor OOMKilled overnight. Monthly aggregation job processing 2.1M order records. Bumped memory limits.
+[04:17:00] @alex.greenfield: pod auto-restarted but it'll just OOM again with the same limits. Updating the deployment now
+[04:22:10] @alex.greenfield: deployment updated. Memory limit bumped from 8Gi to 12Gi. New pod scheduling
+[04:22:45] @alex.greenfield: new pod running on ip-10-42-20-103 (different node — more headroom). Monthly job restarting
+[04:25:00] @samira.hassan: do we need to worry about the node? Memory pressure resolved?
+[04:25:30] @alex.greenfield: yeah node is fine now. Once the OOMKilled pod was replaced, node memory dropped to 72%. The analytics pod was the outlier
+[04:28:00] @alex.greenfield: going back to sleep. Will check the monthly job completion in the morning
+[05:48:10] @analytics-bot: Monthly aggregation job completed. 2,100,000 records processed. Duration: 1h36m. Output written to s3://vantage-analytics/monthly/2025-09/
+
+--- SECTION 3: RUNBOOK EXECUTION — CERT-009: TLS CERTIFICATE ROTATION — INTERNAL mTLS ---
+
+Timestamp: 2025-10-03T10:30:00Z
+Runbook: CERT-009: TLS Certificate Rotation — Internal mTLS
+Service: istio-system
+Environment: production
+Author: tanya.okonkwo
+Schedule: Quarterly
+Status: Completed
+
+ISTIO SERVICE MESH CONFIGURATION:
+
+  Istio Version: v1.22.4
+  Installation Method: IstioOperator (istioctl)
+  Namespace: istio-system
+  Components:
+    istiod: 2 replicas (HA configuration)
+    istio-ingressgateway: 3 replicas (one per AZ)
+    istio-egressgateway: 2 replicas
+
+  Citadel Certificate Authority:
+    Type: Intermediate CA
+    CA Name: istio-ca-prod
+    Root CA: Vault PKI (offline root, stored in HSM)
+    Current Intermediate Cert Valid From: 2025-07-01
+    Current Intermediate Cert Valid Until: 2025-12-28
+    Key Algorithm: ECDSA P-256
+    Signature Algorithm: SHA256withECDSA
+
+  Workload Certificate Configuration:
+    Default TTL: 24 hours
+    Max TTL: 7 days
+    Minimum Grace Period: 2 hours before expiry
+    SDS (Secret Discovery Service): Enabled
+    Hot Reload: Envoy SDS — no connection drops
+
+QUARTERLY CA ROTATION PROCEDURE:
+
+  Step 1: Generate New Intermediate Certificate
+    [10:30:00Z] New intermediate cert generated from Vault PKI root
+    Vault Path: pki_int/issue/istio-intermediate
+    Serial: 5A:6B:7C:8D:9E:0F:1A:2B:3C:4D
+    Not Before: 2025-10-03T10:30:00Z
+    Not After: 2026-04-01T10:30:00Z (6-month validity)
+    Key: ECDSA P-256, generated in Vault HSM
+    Chain: Intermediate -> Root (ISRG-style chain)
+
+  Step 2: Distribute to istiod
+    [10:31:00Z] New intermediate cert and key stored in Kubernetes Secret istio-ca-secret
+    Secret Updated in: istio-system namespace
+    istiod Pod 1: Detected secret update at 10:31:04Z, loaded new CA cert
+    istiod Pod 2: Detected secret update at 10:31:06Z, loaded new CA cert
+    Verification: istiod logs show "CA certificate updated successfully"
+
+  Step 3: Workload Certificate Rollover
+    [10:31:10Z] istiod begins issuing new workload certs signed by new intermediate
+    Rollover Strategy: Graceful — existing certs honored until TTL expiry
+    Total Workload Certs to Roll: 412 (one per sidecar proxy)
+
+    Rollover Progress:
+      10:32:00Z: 48 certs rolled (pods with shortest remaining TTL)
+      10:35:00Z: 124 certs rolled
+      10:40:00Z: 248 certs rolled
+      10:50:00Z: 380 certs rolled
+      11:00:00Z: 412 certs rolled (100% complete)
+
+    Envoy Sidecar SDS Hot-Reload Statistics:
+      Average Certificate Swap Time: 180ms
+      Maximum Certificate Swap Time: 420ms
+      Connection Drops During Swap: 0
+      TLS Handshake Failures: 0
+      gRPC Errors During Rotation: 0
+
+  Step 4: Peer Authentication Audit
+    [11:05:00Z] mTLS mode verification across all namespaces
+
+    Namespaces in STRICT mTLS Mode (38):
+      api-gateway, checkout-prod, catalog-prod, orders-prod, payments-prod,
+      shipping-prod, inventory-prod, notification-prod, analytics-prod,
+      user-profile-prod, recommendation-prod, search-prod, redis-prod,
+      kafka-prod, elastic-system, monitoring, cert-manager, istio-system,
+      kube-system, batch-jobs, [and 18 additional service namespaces]
+
+    Namespaces in PERMISSIVE Mode (2):
+      legacy-integrations: Contains 3 legacy services that do not support mTLS
+        Migration Plan: Q4 2025 (adding Envoy sidecar to legacy containers)
+      vendor-webhooks: External webhook receivers (3 endpoints)
+        Migration Plan: Q4 2025 (implementing mTLS termination proxy)
+
+    Plaintext Connection Scan:
+      Tool: istioctl analyze + custom policy check
+      Plaintext Connections Detected: 0 (in STRICT namespaces)
+      PERMISSIVE Namespace Plaintext: 14 connections (expected, from legacy services)
+
+--- SLACK TRANSCRIPT: #security-ops ---
+
+Timestamp Range: 2025-10-03T10:25:00Z — 2025-10-03T11:10:00Z
+Channel: #security-ops
+
+[10:25:14] @tanya.okonkwo: Starting quarterly Istio CA rotation. New intermediate cert from Vault PKI, distributing to istiod now
+[10:31:10] @tanya.okonkwo: New cert loaded by istiod. Workload cert rollover starting. 412 sidecars to update
+[10:35:00] @tanya.okonkwo: 124 of 412 certs rolled so far. No connection errors
+[10:50:15] @tanya.okonkwo: 380 of 412 done. Almost complete
+[11:00:30] @tanya.okonkwo: Quarterly Istio CA rotation complete. All 412 workload certs have rolled to new intermediate. No connection errors during rotation.
+[11:01:00] @drew.park: nice. What about the PERMISSIVE namespaces?
+[11:01:30] @tanya.okonkwo: legacy-integrations and vendor-webhooks still in PERMISSIVE. Migration to STRICT is on the Q4 roadmap. Both have 14 plaintext connections from legacy services
+[11:02:00] @drew.park: ok, that's tracked in PLAT-4800. Any audit findings?
+[11:02:30] @tanya.okonkwo: zero plaintext connections in STRICT namespaces. All peer authentication policies enforced. Envoy SDS hot-reload worked perfectly — average swap time 180ms, zero drops
+[11:03:00] @marcus.wright: what's the new intermediate cert validity period?
+[11:03:30] @tanya.okonkwo: 6 months — expires 2026-04-01. Next rotation scheduled for Q1 2026
+
+--- SECTION 4: KAFKA DEPLOY MANIFEST ---
+
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: kafka-prod
+  namespace: kafka-prod
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: kafka-prod
+    environment: production
+    team: platform-infra
+spec:
+  kafka:
+    version: 3.7.1
+    replicas: 5
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: tls
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      log.retention.hours: 72
+      log.segment.bytes: 1073741824
+      log.cleanup.policy: delete
+      num.partitions: 12
+      num.network.threads: 8
+      num.io.threads: 16
+      socket.send.buffer.bytes: 102400
+      socket.receive.buffer.bytes: 102400
+      socket.request.max.bytes: 104857600
+      group.max.session.timeout.ms: 300000
+      auto.create.topics.enable: false
+      delete.topic.enable: true
+      compression.type: lz4
+    jvmOptions:
+      -Xms: 14g
+      -Xmx: 14g
+      gcLoggingEnabled: true
+      javaSystemProperties:
+        - name: com.sun.management.jmxremote.port
+          value: "9999"
+    resources:
+      requests:
+        memory: 20Gi
+        cpu: "4"
+      limits:
+        memory: 20Gi
+        cpu: "8"
+    storage:
+      type: persistent-claim
+      size: 2500Gi
+      class: local-nvme
+      deleteClaim: false
+    metricsConfig:
+      type: jmxPrometheusExporter
+      valueFrom:
+        configMapKeyRef:
+          name: kafka-metrics-config
+          key: kafka-metrics-config.yml
+    template:
+      pod:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: node.kubernetes.io/pool
+                      operator: In
+                      values: ["worker-kafka-v2"]
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    strimzi.io/name: kafka-prod-kafka
+                topologyKey: kubernetes.io/hostname
+  zookeeper:
+    replicas: 0
+  entityOperator:
+    topicOperator:
+      resources:
+        requests:
+          memory: 256Mi
+          cpu: 100m
+        limits:
+          memory: 512Mi
+          cpu: 500m
+    userOperator:
+      resources:
+        requests:
+          memory: 256Mi
+          cpu: 100m
+        limits:
+          memory: 512Mi
+          cpu: 500m
+  cruiseControl:
+    config:
+      goals: >
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.PotentialNwOutGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.TopicReplicaDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderReplicaDistributionGoal
+
+--- SECTION 5: CLUSTER THROUGHPUT METRICS ---
+
+Timestamp: 2025-10-03T17:00:00Z (post-tuning snapshot)
+Source: Kafka JMX metrics via Prometheus
+
+AGGREGATE CLUSTER METRICS:
+
+  Messages In (all topics): 48,000 messages/sec
+  Bytes In (all topics): 890 MB/sec
+  Messages Out (all topics): 142,000 messages/sec (consumers read 3x due to replication and multiple consumer groups)
+  Bytes Out (all topics): 2.4 GB/sec
+  Active Controller: broker-0
+  Under-Replicated Partitions: 0
+  Offline Partitions: 0
+  ISR Shrink Rate: 0 events/sec
+  ISR Expand Rate: 0 events/sec
+
+  Topic Inventory (production topics, top 10 by throughput):
+    1. vantage-order-events: 36 partitions, RF=3, 12,000 msg/s, 220 MB/s
+    2. vantage-application-logs: 36 partitions, RF=3, 18,000 msg/s, 340 MB/s
+    3. vantage-page-views: 24 partitions, RF=3, 8,000 msg/s, 142 MB/s
+    4. vantage-inventory-updates: 12 partitions, RF=3, 4,200 msg/s, 78 MB/s
+    5. vantage-payment-events: 12 partitions, RF=3, 2,800 msg/s, 52 MB/s
+    6. vantage-shipping-events: 12 partitions, RF=3, 1,400 msg/s, 26 MB/s
+    7. vantage-user-activity: 12 partitions, RF=3, 800 msg/s, 14 MB/s
+    8. vantage-notification-events: 6 partitions, RF=3, 400 msg/s, 8 MB/s
+    9. vantage-search-queries: 6 partitions, RF=3, 200 msg/s, 4 MB/s
+    10. vantage-recommendation-feedback: 6 partitions, RF=3, 200 msg/s, 6 MB/s
+
+  Consumer Group Lag (all groups):
+    order-event-processor: 0 messages (caught up)
+    analytics-consumer: 420 messages (normal, batch processing)
+    notification-consumer: 0 messages
+    es-log-ingestion: 0 messages (recovered from last week's incident)
+    search-indexer: 12 messages (near real-time)
+    s3-archiver: 0 messages
+
+--- SECTION 6: HTTP LOG EXCERPTS — KAFKA AND ISTIO OPERATIONS ---
+
+Timestamp Range: 2025-10-03T04:00:00Z — 2025-10-03T17:00:00Z
+Source: Internal service mesh traces and Kafka admin API logs
+
+[04:00:02Z] POST /api/v1/namespaces/analytics-prod/pods/analytics-batch-processor-7b8c9d/exec HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: analytics-scheduler/v1.4.0
+  X-Request-ID: monthly-agg-start
+  Status: 101 Switching Protocols
+  Command: python3 /app/aggregate.py --month 2025-09 --full
+  Note: This exec triggered the monthly aggregation job
+
+[04:12:04Z] GET /api/v1/namespaces/analytics-prod/pods/analytics-batch-processor-7b8c9d HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: kubelet/v1.30.4
+  X-Request-ID: pod-status-update-oom
+  Status: 200 OK
+  Response-Time: 3ms
+  Response-Body: {
+    "status": {
+      "phase": "Running",
+      "containerStatuses": [{
+        "name": "analytics-processor",
+        "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+        "lastState": {"terminated": {"exitCode": 137, "reason": "OOMKilled", "finishedAt": "2025-10-03T04:12:02Z"}},
+        "restartCount": 1
+      }]
+    }
+  }
+
+[10:30:05Z] PUT /api/v1/namespaces/istio-system/secrets/istio-ca-secret HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: vault-k8s-agent/1.4.0
+  Content-Type: application/json
+  X-Request-ID: istio-ca-rotation-2025q4
+  Status: 200 OK
+  Response-Time: 8ms
+  Request-Body: {
+    "metadata": {"name": "istio-ca-secret", "namespace": "istio-system"},
+    "data": {
+      "ca-cert.pem": "[BASE64_ENCODED_CERT]",
+      "ca-key.pem": "[BASE64_ENCODED_KEY]",
+      "cert-chain.pem": "[BASE64_ENCODED_CHAIN]",
+      "root-cert.pem": "[BASE64_ENCODED_ROOT]"
+    }
+  }
+
+[10:31:06Z] GET /debug/endpointz HTTP/1.1
+  Host: istiod.istio-system.svc.cluster.local:15014
+  User-Agent: istio-health-check/v1.22.4
+  X-Request-ID: istiod-health-post-rotation
+  Status: 200 OK
+  Response-Time: 4ms
+  Response-Body: {"total_endpoints": 412, "connected": 412, "disconnected": 0}
+
+[16:00:05Z] POST /apis/apps/v1/namespaces/kafka-prod/statefulsets/kafka-prod-kafka/scale HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: strimzi-cluster-operator/0.42.0
+  X-Request-ID: kafka-rolling-restart-init
+  Status: 200 OK
+  Response-Time: 12ms
+  Note: Strimzi operator initiating rolling restart for broker-0
+
+[16:00:42Z] GET /apis/kafka.strimzi.io/v1beta2/namespaces/kafka-prod/kafkas/kafka-prod/status HTTP/1.1
+  Host: kube-apiserver.prod-us-east-1:443
+  User-Agent: strimzi-cluster-operator/0.42.0
+  X-Request-ID: kafka-status-check-post-b0
+  Status: 200 OK
+  Response-Time: 6ms
+  Response-Body: {
+    "conditions": [{"type": "Ready", "status": "True"}],
+    "kafkaMetadataState": "KRaft",
+    "clusterId": "kafka-prod-cluster-id-abc123",
+    "operatorLastSuccessfulVersion": "0.42.0"
+  }
+
+[16:30:10Z] POST /kafkacruisecontrol/add_broker HTTP/1.1
+  Host: cruise-control.kafka-prod.svc.cluster.local:9090
+  User-Agent: curl/8.4.0
+  Content-Type: application/json
+  X-Request-ID: cc-rebalance-order-events
+  Status: 200 OK
+  Response-Time: 4200ms
+  Request-Body: {
+    "topic": "vantage-order-events",
+    "partition_count": 36,
+    "replication_throttle": 104857600,
+    "goals": ["RackAwareGoal", "ReplicaDistributionGoal", "LeaderReplicaDistributionGoal"]
+  }
+
+[16:54:08Z] GET /kafkacruisecontrol/state HTTP/1.1
+  Host: cruise-control.kafka-prod.svc.cluster.local:9090
+  User-Agent: curl/8.4.0
+  X-Request-ID: cc-state-check-final
+  Status: 200 OK
+  Response-Time: 22ms
+  Response-Body: {
+    "ExecutorState": {
+      "state": "NO_TASK_IN_PROGRESS",
+      "recentlyDemotedBrokers": [],
+      "recentlyRemovedBrokers": []
+    },
+    "MonitorState": {
+      "state": "RUNNING",
+      "numValidWindows": 12
+    },
+    "AnalyzerState": {
+      "isProposalReady": true,
+      "readyGoals": ["RackAwareGoal", "ReplicaDistributionGoal", "LeaderReplicaDistributionGoal"]
+    }
+  }
+
+--- SECTION 7: NODE MEMORY ANALYSIS — POST-OOM ---
+
+Timestamp: 2025-10-03T04:30:00Z
+Node: ip-10-42-31-142
+Analysis Trigger: OOMKill event on analytics-batch-processor
+
+NODE MEMORY TIMELINE (04:00 — 04:30 UTC):
+
+  Time     | Total  | Used   | Available | Pct Used | Event
+  04:00:00 | 64 GiB | 46 GiB | 18 GiB   | 72%      | Monthly job starts
+  04:02:00 | 64 GiB | 48 GiB | 16 GiB   | 75%      | Job loading data
+  04:04:00 | 64 GiB | 52 GiB | 12 GiB   | 81%      | DataFrame construction
+  04:06:00 | 64 GiB | 55 GiB |  9 GiB   | 86%      | Merge phase starting
+  04:08:00 | 64 GiB | 58 GiB |  6 GiB   | 91%      | Memory pressure building
+  04:10:00 | 64 GiB | 60 GiB |  4 GiB   | 94%      | Near limit
+  04:12:00 | 64 GiB | 60.2GiB|  3.8GiB  | 94%      | OOMKill triggered
+  04:12:10 | 64 GiB | 52 GiB | 12 GiB   | 81%      | Pod killed, memory freed
+  04:13:00 | 64 GiB | 48 GiB | 16 GiB   | 75%      | Pod restarted (smaller footprint)
+  04:22:30 | 64 GiB | 46 GiB | 18 GiB   | 72%      | Pod rescheduled to different node
+
+ANALYTICS-BATCH-PROCESSOR JOB DETAILS:
+
+  Job Type: Monthly Order Analytics Aggregation
+  Schedule: Daily at 04:00 UTC (small run), monthly on 1st (full run, today triggered manually on 3rd)
+  Normal Daily Volume: ~70,000 order records
+  End-of-Month Volume: 2,100,000 order records (September 2025)
+  Processing Phases:
+    Phase 1: Load order data from PostgreSQL (streaming cursor, 10,000 batch)
+    Phase 2: Load inventory joins from Redis cache
+    Phase 3: Construct pandas DataFrames (4 regional shards)
+    Phase 4: In-memory merge of regional shards (OOM occurred here)
+    Phase 5: Aggregation computations (revenue, units, margins)
+    Phase 6: Write results to S3 and update Redshift summary tables
+
+  Memory Profile (2.1M records):
+    Phase 1-2: 2.4 GiB (streaming, efficient)
+    Phase 3: 5.8 GiB (4 DataFrames)
+    Phase 4: 8.2 GiB peak (merge creates temporary copy)
+    Phase 5: 6.4 GiB (after merge, original DataFrames freed)
+    Phase 6: 4.1 GiB (result set only)
+
+  With Old Limit (8 GiB): Phase 4 exceeds limit, OOMKill at 8.0 GiB
+  With New Limit (12 GiB): Phase 4 peak at 8.2 GiB, 3.8 GiB headroom
+
+RECOMMENDATIONS FOR FUTURE:
+
+  1. Implement chunked merge in analytics-batch-processor to cap memory at 6 GiB
+     Owner: analytics-team
+     Jira: PLAT-4932
+     Priority: P3 (nice-to-have, not urgent with new 12 GiB limit)
+
+  2. Consider scheduling monthly jobs on dedicated burst node pool
+     Owner: platform-infra
+     Jira: PLAT-4933
+     Notes: c6i.4xlarge spot instances, scale to 0 when not in use
+
+  3. Add memory profiling to monthly job for trend analysis
+     Owner: analytics-team
+     Jira: PLAT-4934
+
+--- SECTION 8: INFRASTRUCTURE METRICS SNAPSHOT ---
+
+Timestamp: 2025-10-03T00:00:00Z — 2025-10-03T23:59:59Z
+Source: Prometheus / Grafana
+
+COMPUTE METRICS (24-hour):
+  CPU: avg 62%, peak 72% (14:00 UTC business peak)
+  Memory: avg 56%, peak 94% (04:12 UTC OOM event on ip-10-42-31-142)
+  Nodes: 36/36 Ready
+  Pods: 498 running, 0 pending, 1 restart (OOMKill)
+
+KAFKA METRICS (24-hour):
+  Throughput: 48,000 msg/sec ingest, 890 MB/sec aggregate
+  Under-Replicated Partitions (max during restart window): 24
+  Under-Replicated Partitions (steady state): 0
+  Consumer Lag (max across all groups): 420 messages
+  Broker Disk Usage (avg): 46%
+  GC Pause p99 (post-tuning): 18ms
+
+ISTIO METRICS (24-hour):
+  Total Proxies: 412
+  Proxies Connected: 412
+  Certificate Rotations: 412 (quarterly CA rotation)
+  mTLS Connections: 100% (STRICT namespaces)
+  Plaintext Connections: 14 (PERMISSIVE namespaces, expected)
+  4xx Errors (mesh): 0.3%
+  5xx Errors (mesh): 0.02%
+
+--- SECTION 9: CHANGE MANAGEMENT LOG ---
+
+Change Record: CHG-2025-10-03-001
+  Title: Kafka Broker JVM Tuning and Rolling Restart
+  Type: Standard Change
+  Risk Level: Low
+  Implementer: ravi.shankar
+  Start Time: 2025-10-03T16:00:00Z
+  End Time: 2025-10-03T16:28:00Z
+  Duration: 28 minutes
+  Result: Successful — GC pause p99 dropped from 42ms to 18ms
+
+Change Record: CHG-2025-10-03-002
+  Title: vantage-order-events Partition Expansion (24 to 36)
+  Type: Standard Change
+  Risk Level: Low
+  Implementer: ravi.shankar
+  Start Time: 2025-10-03T16:30:00Z
+  End Time: 2025-10-03T16:54:00Z
+  Duration: 22 minutes
+  Result: Successful — balanced across all 5 brokers
+
+Change Record: CHG-2025-10-03-003
+  Title: analytics-batch-processor Memory Limit Increase
+  Type: Emergency Change (OOMKill recovery)
+  Risk Level: Low
+  Implementer: alex.greenfield
+  Start Time: 2025-10-03T04:22:00Z
+  End Time: 2025-10-03T04:22:30Z
+  Result: Successful — limit increased 8Gi to 12Gi, monthly job completed
+
+Change Record: CHG-2025-10-03-004
+  Title: Quarterly Istio Intermediate CA Certificate Rotation
+  Type: Standard Change (quarterly security)
+  Risk Level: Medium
+  Implementer: tanya.okonkwo
+  Start Time: 2025-10-03T10:30:00Z
+  End Time: 2025-10-03T11:00:00Z
+  Duration: 30 minutes
+  Result: Successful — 412 workload certs rolled, 0 connection errors
+
+--- SECTION 10: STRIMZI OPERATOR STATUS REPORT ---
+
+Timestamp: 2025-10-03T17:00:00Z
+Operator: Strimzi Cluster Operator v0.42.0
+Namespace: kafka-prod
+Managed Resources: 1 Kafka cluster, 1 KafkaConnect, 3 KafkaTopic, 2 KafkaUser
+
+OPERATOR METRICS:
+
+  Reconciliation Count (24h): 48 (2 per hour, normal)
+  Reconciliation Duration (avg): 2.4 seconds
+  Reconciliation Duration (max): 18.2 seconds (during rolling restart)
+  Failed Reconciliations: 0
+  Stalled Reconciliations: 0
+  Operator CPU Usage: 120m avg, 400m peak (during rolling restart)
+  Operator Memory Usage: 384 MiB avg, 420 MiB peak
+
+  Managed CRD Status:
+    Kafka/kafka-prod: Ready
+    KafkaConnect/connect-prod: Ready
+    KafkaTopic/vantage-order-events: Ready (partition count: 36)
+    KafkaTopic/vantage-application-logs: Ready (partition count: 36)
+    KafkaTopic/vantage-page-views: Ready (partition count: 24)
+    KafkaUser/kafka-app-user: Ready (ACLs applied)
+    KafkaUser/kafka-connect-user: Ready (ACLs applied)
+
+  KRaft Migration Status:
+    Mode: KRaft (ZooKeeper removed in Strimzi 0.40.0 migration)
+    Controller Quorum: 3 brokers (broker-0, broker-1, broker-2)
+    Controller Active: broker-0
+    Metadata Log End Offset: 142,847
+    Metadata Log Size: 48 MB
+
+CRUISE CONTROL STATUS:
+
+  State: RUNNING
+  Last Self-Healing Action: None (no anomaly detected)
+  Broker Failures Detected (30d): 0
+  Metric Windows Available: 12 (out of 12 required for proposals)
+  Last Optimization Proposal: 2025-10-03T16:54:00Z (partition rebalance)
+  Optimization Goals Met: All 11 configured goals satisfied
+
+  Cluster Balance Score:
+    Disk Usage Balance: 97.2% (all brokers within 3% of mean)
+    Leader Distribution: 98.1% (all brokers within 2% of equal share)
+    Network In Balance: 96.8%
+    Network Out Balance: 97.4%
+    CPU Balance: 95.2%
+
+--- SECTION 11: KAFKA BROKER DETAILED JMX METRICS ---
+
+Timestamp: 2025-10-03T17:00:00Z (post-tuning observation)
+Source: JMX via Prometheus JMX Exporter
+
+BROKER-0 METRICS:
+
+  JVM:
+    jvm_memory_heap_used_bytes: 8.4 GiB (60% of 14 GiB)
+    jvm_memory_heap_max_bytes: 14 GiB
+    jvm_memory_non_heap_used_bytes: 420 MiB
+    jvm_gc_collection_seconds_count{gc="G1 Young Generation"}: 14,842 (24h)
+    jvm_gc_collection_seconds_sum{gc="G1 Young Generation"}: 62.4s (24h)
+    jvm_gc_collection_seconds_count{gc="G1 Old Generation"}: 0 (24h — no full GCs)
+    jvm_threads_current: 284
+    jvm_threads_peak: 312
+
+  Network:
+    kafka_server_BrokerTopicMetrics_MessagesInPerSec: 9,600
+    kafka_server_BrokerTopicMetrics_BytesInPerSec: 178 MB/s
+    kafka_server_BrokerTopicMetrics_BytesOutPerSec: 320 MB/s
+    kafka_network_RequestMetrics_TotalTimeMs{request="Produce"} p99: 4.2ms
+    kafka_network_RequestMetrics_TotalTimeMs{request="FetchConsumer"} p99: 2.8ms
+    kafka_network_RequestMetrics_TotalTimeMs{request="FetchFollower"} p99: 3.1ms
+    kafka_network_RequestChannel_RequestQueueSize: 0
+    kafka_network_RequestChannel_ResponseQueueSize: 2
+
+  Disk:
+    kafka_log_LogManager_LogDirectorySize: 1.2 TB
+    kafka_log_LogManager_LogSegmentCount: 4,218
+    kafka_log_Log_LogEndOffset{topic="vantage-order-events",partition="0"}: 89,421,847
+    kafka_server_ReplicaManager_UnderReplicatedPartitions: 0
+    kafka_server_ReplicaManager_PartitionCount: 420
+    kafka_server_ReplicaManager_LeaderCount: 142
+
+  Request Handling:
+    kafka_server_KafkaRequestHandlerPool_RequestHandlerAvgIdlePercent: 78.4%
+    kafka_network_SocketServer_NetworkProcessorAvgIdlePercent: 82.1%
+
+[Brokers 1-4 show similar metrics — omitted for brevity, all healthy]
+
+--- SECTION 12: ANALYTICS-BATCH-PROCESSOR RUNBOOK UPDATE ---
+
+Runbook: ANALYTICS-001: Monthly Order Analytics Aggregation
+Last Updated: 2025-10-03T06:00:00Z (post-OOM update)
+Author: alex.greenfield
+
+OVERVIEW:
+  The analytics-batch-processor runs daily at 04:00 UTC to aggregate order data.
+  On the 1st-3rd of each month, a full-month aggregation is triggered processing
+  all orders from the previous month.
+
+RESOURCE REQUIREMENTS:
+
+  Daily Run (~70K records):
+    Memory: 2-3 GiB peak
+    CPU: 2 cores
+    Duration: 5-8 minutes
+
+  Monthly Run (~2M records):
+    Memory: 8-10 GiB peak (UPDATED — was incorrectly listed as 6 GiB)
+    CPU: 4 cores
+    Duration: 45-60 minutes
+    Note: Phase 4 (DataFrame merge) is the memory bottleneck
+
+CURRENT POD CONFIGURATION (updated 2025-10-03):
+    Memory Request: 6Gi
+    Memory Limit: 12Gi
+    CPU Request: 2
+    CPU Limit: 4
+    Node Pool: worker-memory-v3 (r6i.2xlarge, 64 GiB nodes)
+
+TROUBLESHOOTING — OOMKill:
+  If the pod is OOMKilled during monthly aggregation:
+  1. Check exit code: 137 = OOMKill, 1 = application error
+  2. Check node memory: `kubectl top node <node-name>`
+  3. If limit is too low, increase memory limit (max 16 GiB on r6i.2xlarge)
+  4. Pod will auto-restart and re-run from beginning (not resumable)
+  5. Verify completion by checking S3 output: aws s3 ls s3://vantage-analytics/monthly/
+
+KNOWN ISSUES:
+  - End-of-month runs process 30x daily volume (not 10x as originally estimated)
+  - DataFrame merge phase creates temporary copy, doubling memory usage briefly
+  - Job is not resumable — OOMKill requires full restart from scratch
+
+--- SECTION 13: ISTIO CERTIFICATE ROTATION DETAILED TELEMETRY ---
+
+Timestamp: 2025-10-03T10:30:00Z — 2025-10-03T11:00:00Z
+Source: istiod telemetry and Envoy sidecar metrics
+
+CERTIFICATE ROTATION TIMELINE (by namespace, first 10):
+
+  Namespace: checkout-prod
+    Sidecars: 16
+    Certs Rotated: 16
+    First Rotation: 10:31:12Z
+    Last Rotation: 10:33:44Z
+    Average Swap Time: 165ms
+    Connection Drops: 0
+    HTTP 503s During Rotation: 0
+
+  Namespace: orders-prod
+    Sidecars: 12
+    Certs Rotated: 12
+    First Rotation: 10:31:18Z
+    Last Rotation: 10:34:02Z
+    Average Swap Time: 178ms
+    Connection Drops: 0
+
+  Namespace: payments-prod
+    Sidecars: 8
+    Certs Rotated: 8
+    First Rotation: 10:31:24Z
+    Last Rotation: 10:33:10Z
+    Average Swap Time: 192ms
+    Connection Drops: 0
+
+  Namespace: catalog-prod
+    Sidecars: 14
+    Certs Rotated: 14
+    First Rotation: 10:31:30Z
+    Last Rotation: 10:34:22Z
+    Average Swap Time: 174ms
+    Connection Drops: 0
+
+  Namespace: analytics-prod
+    Sidecars: 6
+    Certs Rotated: 6
+    First Rotation: 10:32:00Z
+    Last Rotation: 10:33:48Z
+    Average Swap Time: 188ms
+    Connection Drops: 0
+
+  Namespace: shipping-prod
+    Sidecars: 8
+    Certs Rotated: 8
+    First Rotation: 10:32:10Z
+    Last Rotation: 10:34:14Z
+    Average Swap Time: 172ms
+
+  Namespace: inventory-prod
+    Sidecars: 10
+    Certs Rotated: 10
+    First Rotation: 10:32:18Z
+    Last Rotation: 10:34:30Z
+    Average Swap Time: 186ms
+
+  Namespace: recommendation-prod
+    Sidecars: 8
+    Certs Rotated: 8
+    First Rotation: 10:32:26Z
+    Last Rotation: 10:34:02Z
+    Average Swap Time: 190ms
+
+  Namespace: search-prod
+    Sidecars: 6
+    Certs Rotated: 6
+    First Rotation: 10:32:34Z
+    Last Rotation: 10:33:58Z
+    Average Swap Time: 168ms
+
+  Namespace: user-profile-prod
+    Sidecars: 6
+    Certs Rotated: 6
+    First Rotation: 10:32:42Z
+    Last Rotation: 10:34:06Z
+    Average Swap Time: 180ms
+
+  [Remaining 28 namespaces: all rotated by 11:00:00Z, similar metrics]
+
+AGGREGATE ROTATION METRICS:
+
+  Total Sidecars: 412
+  Total Certs Rotated: 412 (100%)
+  Rotation Window: 29 minutes
+  Average Swap Time: 180ms
+  Maximum Swap Time: 420ms (istiod pod in search-prod during peak traffic)
+  Minimum Swap Time: 112ms (monitoring namespace, low traffic)
+  Connection Drops: 0 (across all 412 sidecars)
+  TLS Handshake Failures: 0
+  gRPC Stream Resets: 0
+  HTTP 503 Errors: 0
+
+  istiod CPU During Rotation:
+    Pod 1: 840m avg, 1.2 peak
+    Pod 2: 780m avg, 1.1 peak
+    Normal Baseline: 200m avg
+
+  istiod Memory During Rotation:
+    Pod 1: 1.2 GiB (normal: 800 MiB)
+    Pod 2: 1.1 GiB (normal: 780 MiB)
+
+--- SECTION 14: DAILY OPERATIONS CHECKLIST ---
+
+Date: 2025-10-03
+Completed By: @alex.greenfield (overnight), @ravi.shankar (day shift), @tanya.okonkwo (security)
+
+Overnight Checks (06:00 UTC):
+  [x] Cluster node health — 36/36 Ready
+  [x] Pod status — 498 running, 0 pending, 1 OOMKill restart (analytics-batch-processor, resolved)
+  [x] Monthly aggregation job — restarted with new limits, running
+  [x] Kafka consumer lag — 0 across all groups
+  [x] ES cluster — GREEN, disk usage 52-57% on data-hot nodes (comfortable after last week's resize)
+  [x] RDS health — orders-prod-primary healthy, CPU 28%, connections 244
+  [x] Redis clusters — both healthy, memory usage 34% on redis-prod-main
+  [x] Certificate status — all certs valid, no upcoming expirations in 30 days
+  [x] PagerDuty — 1 alert overnight (OOMKill, P3, auto-resolved)
+
+Day Shift Checks (12:00 UTC):
+  [x] Cluster health — 36/36 Ready, no pressure conditions
+  [x] Istio CA rotation — completed, 412/412 workload certs rolled
+  [x] mTLS audit — 38 namespaces STRICT, 2 PERMISSIVE (expected)
+  [x] Kafka pre-maintenance checks — all 5 brokers healthy, URP 0
+  [x] Schema Registry — 84 subjects, compatibility checks passing
+  [x] Kafka Connect — 4 connectors all RUNNING, no task failures
+  [x] DNS resolution — CoreDNS p50 2.0ms, p99 4.4ms (normal)
+  [x] WAF block rate — 0.1% (normal)
+  [x] Cost check — daily spend $4,315 (within 5% of 30-day average)
+
+Evening Checks (18:00 UTC):
+  [x] Kafka post-tuning — GC pause p99 at 18ms (down from 42ms), healthy
+  [x] Partition expansion — vantage-order-events at 36 partitions, balanced
+  [x] Consumer groups — all rebalanced successfully after partition expansion
+  [x] Kafka Connect task count — elasticsearch-sink-search bumped to 4 tasks
+  [x] Monthly aggregation — completed at 05:48 UTC, results in S3
+  [x] Node memory — ip-10-42-31-142 at 72% (normal after analytics pod rescheduled)
+  [x] Backup verification — Velero daily backup completed at 02:12 UTC, 4,538 items
+  [x] S3 data lake — Kafka S3 sink wrote 142 GB in past 24h, no failures
+  [x] Autoscaler status — no scaling events today, 36 nodes stable
+  [x] Handoff notes — Kafka tuning complete, quarterly Istio rotation done, analytics limits updated
+  [x] Next maintenance — containerd 1.7.20 upgrade scheduled for 2025-10-08 maintenance window
+  [x] Monitoring pipeline — Prometheus 148/148 targets up, Grafana rendering, no stale data
+
+WEEKLY SUMMARY METRICS (2025-09-27 through 2025-10-03):
+  Total Incidents: 2 (P2 ES disk watermark, P3 OOMKill)
+  Total Change Records: 8
+  SLO Compliance: 99.97% (47 minutes ES log ingestion delay counted)
+  Error Budget Remaining: 82%
+  Node Replacements: 0 (no maintenance this week)
+  Spot Interruptions: 1 (handled automatically, 38-second rescheduling)
+
+================================================================================
+END OF INFRASTRUCTURE OPERATIONS LOG — 2025-10-03
+================================================================================

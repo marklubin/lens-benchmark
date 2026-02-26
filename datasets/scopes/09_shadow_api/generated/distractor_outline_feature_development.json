@@ -1,0 +1,944 @@
+{
+  "episodes": [
+    {
+      "index": 1,
+      "date": "2025-09-10",
+      "theme": "feature_development",
+      "documents": [
+        {
+          "type": "pull_request",
+          "metadata": {
+            "pr_number": 4602,
+            "repo": "vantage-commerce/checkout-service",
+            "branch": "feature/guest-checkout-redesign",
+            "author": "priya.nakamura",
+            "reviewers": ["carlos.medina", "janet.okoye"],
+            "status": "approved",
+            "files_changed": 34,
+            "insertions": 1847,
+            "deletions": 412
+          },
+          "entities": [
+            "checkout-service v3.8.0",
+            "svc-cart-manager",
+            "svc-payment-gateway",
+            "Redis session store (checkout-sessions-prod)",
+            "guest_checkout_v2 feature flag",
+            "Priya Nakamura (frontend platform)",
+            "Carlos Medina (checkout team lead)"
+          ],
+          "actions": [
+            "Replaces legacy guest checkout flow with single-page React component",
+            "Adds new /api/v2/checkout/guest endpoint accepting cart_id and email only",
+            "Migrates session handling from cookie-based to Redis-backed ephemeral tokens",
+            "Removes deprecated PaymentForm_v1 component (unused since Q2)",
+            "Adds Cypress E2E tests for guest-to-registered conversion funnel"
+          ],
+          "quotes": [
+            "priya.nakamura: 'The old flow had 6 redirects before payment — this gets it to 2. Conversion should improve measurably.'",
+            "carlos.medina: 'LGTM overall. One concern: the Redis TTL on guest sessions is 15 min — can we make that configurable via env var?'",
+            "janet.okoye: 'Nit: the error boundary in GuestCheckoutPanel doesn't surface the actual validation message, just a generic string.'"
+          ],
+          "details": [
+            "Feature flag guest_checkout_v2 gates rollout — currently enabled for 5% of traffic in us-east-1",
+            "Redis key pattern: guest:sess:{uuid} with 900s TTL (configurable via GUEST_SESSION_TTL_SECONDS)",
+            "New endpoint returns 201 on success with {order_id, confirmation_token} or 422 with field-level validation errors",
+            "Bundle size impact: +12KB gzipped for new checkout component, -34KB from removed legacy code",
+            "Migration plan: 5% → 25% → 50% → 100% over 4 weeks with conversion rate monitoring at each step"
+          ]
+        },
+        {
+          "type": "code_review",
+          "metadata": {
+            "pr_number": 4602,
+            "repo": "vantage-commerce/checkout-service",
+            "reviewer": "carlos.medina",
+            "review_type": "architecture",
+            "timestamp": "2025-09-10T14:23:00Z"
+          },
+          "entities": [
+            "GuestCheckoutPanel React component",
+            "PaymentIntentService",
+            "svc-payment-gateway /api/v1/intents/create",
+            "Stripe SDK v12.4.0",
+            "checkout-sessions-prod Redis cluster"
+          ],
+          "actions": [
+            "Requested changes to error handling in PaymentIntentService — currently swallows 502 from payment gateway",
+            "Suggested adding distributed tracing span for guest-to-payment handoff",
+            "Approved after second round with error handling fix and tracing span added"
+          ],
+          "quotes": [
+            "carlos.medina: 'Line 247: if the payment gateway returns 502 we need to retry with backoff, not return a generic 500. Users will just see a blank error page.'",
+            "priya.nakamura: 'Good catch — added exponential backoff with 3 retries and a user-facing message for terminal failures. Also added the OTel span you wanted.'"
+          ],
+          "details": [
+            "Payment gateway timeout set to 8000ms with 3 retries at 1s/2s/4s intervals",
+            "OpenTelemetry span: checkout.guest.payment_handoff with attributes {cart_id, payment_method_type, retry_count}",
+            "Stripe webhook endpoint updated to handle new guest session format (confirmation_token instead of user_id)"
+          ]
+        },
+        {
+          "type": "sprint_plan",
+          "metadata": {
+            "sprint": "Sprint 2025-37",
+            "team": "Checkout & Payments",
+            "dates": "2025-09-08 to 2025-09-19",
+            "sprint_goal": "Ship guest checkout redesign to 25% traffic",
+            "velocity": 34,
+            "capacity": 38
+          },
+          "entities": [
+            "Jira board CHKOUT",
+            "Priya Nakamura",
+            "Carlos Medina",
+            "Janet Okoye",
+            "Tomás Rivera (QA)",
+            "svc-cart-manager",
+            "svc-payment-gateway"
+          ],
+          "actions": [
+            "CHKOUT-1892: Guest checkout v2 — ramp to 25% (Priya, 8 pts)",
+            "CHKOUT-1901: Apple Pay integration for guest flow (Janet, 5 pts)",
+            "CHKOUT-1905: Cart abandonment webhook for analytics pipeline (Carlos, 3 pts)",
+            "CHKOUT-1910: Load test guest checkout at 2x peak traffic (Tomás, 5 pts)",
+            "CHKOUT-1912: Fix intermittent 409 conflict on concurrent cart updates (Priya, 3 pts)"
+          ],
+          "quotes": [
+            "carlos.medina: 'Main risk is the Redis session migration. If TTL is too aggressive we'll lose sessions mid-checkout. Monitoring is key.'",
+            "tomás.rivera: 'I'll run the load test Wednesday — targeting 4000 concurrent guest sessions to validate the Redis cluster sizing.'"
+          ],
+          "details": [
+            "Sprint starts with 14 points carried over from Sprint 36 (Apple Pay blocked on Stripe sandbox issue)",
+            "Definition of done for guest checkout ramp: conversion rate within 2% of existing flow at 25% traffic",
+            "Rollback plan: disable guest_checkout_v2 flag → instant revert to legacy flow, no deploy needed"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "date": "2025-09-16",
+      "theme": "feature_development",
+      "documents": [
+        {
+          "type": "feature_spec",
+          "metadata": {
+            "doc_id": "SPEC-2025-089",
+            "title": "Wishlist Sharing & Social Features",
+            "author": "maya.chen",
+            "status": "in_review",
+            "team": "Discovery & Engagement",
+            "target_release": "v4.2.0 (2025-10-01)"
+          },
+          "entities": [
+            "svc-wishlist",
+            "svc-notification-hub",
+            "svc-user-profile",
+            "CDN (Cloudflare R2 bucket: vantage-social-assets)",
+            "Maya Chen (product manager)",
+            "Deepak Patel (backend lead)",
+            "Open Graph meta tags",
+            "PostgreSQL wishlist_shares table"
+          ],
+          "actions": [
+            "New endpoint POST /api/v2/wishlists/{id}/share generates a shareable link with OG preview image",
+            "Shared wishlists are read-only with optional 'add to my list' action for logged-in users",
+            "Share events publish to Kafka topic wishlist.social.events for analytics consumption",
+            "Rate limit: 20 shares/hour per user to prevent spam, enforced via Redis sliding window",
+            "OG preview images generated server-side using Puppeteer service (svc-og-renderer) with product thumbnails"
+          ],
+          "quotes": [
+            "maya.chen: 'User research shows 34% of wishlist users want to share lists for holidays/birthdays. This is the #2 requested feature after price alerts.'",
+            "deepak.patel: 'Concern about the Puppeteer renderer — it's a new service and image generation under load could be expensive. Proposing we cache rendered images for 24h.'"
+          ],
+          "details": [
+            "Share link format: https://vantage.com/wishlists/shared/{share_token} — token is 22-char base62",
+            "PostgreSQL schema: wishlist_shares(id, wishlist_id, share_token, created_by, expires_at, view_count, created_at)",
+            "Kafka event schema: {event_type, wishlist_id, user_id, share_channel, item_count, timestamp}",
+            "Privacy controls: users can revoke share links, set expiry (7d/30d/never), and toggle individual items visible/hidden",
+            "Analytics dashboard in Looker: share conversion rate, viral coefficient, items added from shared lists"
+          ]
+        },
+        {
+          "type": "ab_test_config",
+          "metadata": {
+            "experiment_id": "EXP-2025-147",
+            "name": "wishlist_share_button_placement",
+            "platform": "LaunchDarkly",
+            "team": "Discovery & Engagement",
+            "status": "running",
+            "start_date": "2025-09-15",
+            "expected_end": "2025-09-29"
+          },
+          "entities": [
+            "LaunchDarkly project: vantage-web",
+            "Segment analytics",
+            "svc-wishlist",
+            "Looker dashboard: EXP-147 Results",
+            "Lisa Park (data science)",
+            "Maya Chen (product)"
+          ],
+          "actions": [
+            "Control (50%): Share button in overflow menu (three-dot icon) on wishlist page",
+            "Variant A (25%): Prominent share button next to wishlist title with social icons",
+            "Variant B (25%): Floating share FAB on mobile, inline button on desktop",
+            "Primary metric: share_initiated events per wishlist view (target: +15% over control)",
+            "Guardrail metrics: page load time (must not regress >200ms), wishlist_item_added rate (must not drop)"
+          ],
+          "quotes": [
+            "lisa.park: 'Power analysis says we need 14 days at current traffic to detect a 10% lift with 95% confidence. Adding the FAB variant because mobile is 68% of wishlist traffic.'",
+            "maya.chen: 'If variant B wins on mobile but loses on desktop we'll ship a responsive version — FAB on mobile, inline on desktop.'"
+          ],
+          "details": [
+            "User segmentation: all logged-in users with at least 1 wishlist item, excludes internal/QA accounts",
+            "LaunchDarkly flag: wishlist-share-placement with string variations: control, variant-a, variant-b",
+            "Segment events tracked: share_button_viewed, share_initiated, share_completed, share_link_clicked (recipient side)",
+            "Statistical method: Sequential testing with always-valid p-values (no peeking penalty)",
+            "Rollout plan: winner ships to 100% in v4.2.0, loser variants cleaned up in sprint 39"
+          ]
+        },
+        {
+          "type": "code_review",
+          "metadata": {
+            "pr_number": 4638,
+            "repo": "vantage-commerce/svc-wishlist",
+            "branch": "feature/wishlist-sharing",
+            "author": "deepak.patel",
+            "reviewers": ["angela.russo", "kwame.asante"],
+            "status": "changes_requested",
+            "files_changed": 22,
+            "insertions": 1204,
+            "deletions": 56
+          },
+          "entities": [
+            "svc-wishlist v2.6.0",
+            "PostgreSQL migration 048_add_wishlist_shares.sql",
+            "Kafka producer (wishlist.social.events topic)",
+            "Redis rate limiter",
+            "Angela Russo (security review)"
+          ],
+          "actions": [
+            "Angela flagged missing input validation on share_token lookup — potential enumeration attack",
+            "Kwame requested adding circuit breaker for OG renderer calls (Puppeteer service is new and untested under load)",
+            "Rate limiter implementation reviewed — uses Redis MULTI/EXEC for atomicity",
+            "Database migration adds index on (share_token) and (wishlist_id, created_at) for efficient lookups"
+          ],
+          "quotes": [
+            "angela.russo: 'The share token lookup endpoint needs rate limiting too — without it someone could enumerate valid tokens. Add 60 req/min per IP.'",
+            "kwame.asante: 'The Puppeteer renderer doesn't have a health check endpoint. If it goes down, the share flow hangs for 30s on the HTTP timeout. Add a circuit breaker with 5s timeout and fallback to a generic OG image.'",
+            "deepak.patel: 'Both valid. Adding IP rate limit on GET /shared/{token} and Resilience4j circuit breaker for the renderer. Will push fixes tonight.'"
+          ],
+          "details": [
+            "Share token generation uses crypto.randomBytes(16).toString('base62') — 22 chars, ~95 bits entropy",
+            "Circuit breaker config: failure threshold 3, wait duration 30s, fallback returns cached generic OG image",
+            "Migration is backward-compatible — new table only, no column changes to existing wishlists table",
+            "Kafka producer uses idempotent delivery (enable.idempotence=true) with exactly-once semantics"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "date": "2025-09-22",
+      "theme": "feature_development",
+      "documents": [
+        {
+          "type": "feature_flag_rollout",
+          "metadata": {
+            "flag_name": "dynamic_pricing_v3",
+            "platform": "LaunchDarkly",
+            "team": "Pricing & Revenue",
+            "current_rollout": "10%",
+            "target_rollout": "50%",
+            "rollout_date": "2025-09-22",
+            "owner": "rafael.silva"
+          },
+          "entities": [
+            "svc-pricing-engine v5.1.0",
+            "svc-product-catalog",
+            "svc-inventory-tracker",
+            "PostgreSQL pricing_rules table",
+            "Kafka topic: pricing.adjustments",
+            "Rafael Silva (pricing team lead)",
+            "Noor Al-Rashid (data science)",
+            "Datadog dashboard: Dynamic Pricing v3 Rollout"
+          ],
+          "actions": [
+            "Ramp dynamic_pricing_v3 flag from 10% to 50% of product catalog",
+            "New pricing model incorporates real-time inventory levels and competitor price signals",
+            "Price changes capped at +/- 8% from base price per 24h window to prevent customer backlash",
+            "All price adjustments logged to pricing.adjustments Kafka topic for audit trail",
+            "Automatic rollback trigger: if average cart abandonment rate increases >5% in any 1-hour window"
+          ],
+          "quotes": [
+            "rafael.silva: 'At 10% we saw +2.3% revenue per session with no measurable increase in abandonment. Confident to push to 50%.'",
+            "noor.al-rashid: 'The model is re-trained nightly on the last 30 days of conversion data. At 50% traffic we will get much better signal for the competitive pricing component.'",
+            "rafael.silva: 'Rollback is automated — if the Datadog monitor fires we revert to static pricing within 60 seconds via flag kill switch.'"
+          ],
+          "details": [
+            "Pricing model: XGBoost ensemble with features [inventory_level, competitor_price_delta, time_of_day, day_of_week, category_demand_index]",
+            "Price update frequency: every 15 minutes for high-velocity categories (electronics, fashion), hourly for long-tail",
+            "Audit log schema: {product_id, old_price, new_price, adjustment_pct, model_version, features_snapshot, timestamp}",
+            "Customer-facing: prices display as 'current price' with no indication of dynamic adjustment (per legal review)",
+            "Excluded categories: grocery, baby essentials, medical supplies (regulatory and brand sensitivity)"
+          ]
+        },
+        {
+          "type": "api_versioning_discussion",
+          "metadata": {
+            "channel": "#platform-api-design",
+            "date": "2025-09-22",
+            "topic": "Product Catalog API v3 migration timeline",
+            "participants": ["elena.volkov", "james.wright", "deepak.patel", "sarah.kim"]
+          },
+          "entities": [
+            "svc-product-catalog API v2 (current)",
+            "svc-product-catalog API v3 (proposed)",
+            "OpenAPI spec v3.1",
+            "API gateway (Kong)",
+            "Elena Volkov (platform architect)",
+            "James Wright (mobile team)",
+            "Sarah Kim (partner integrations)"
+          ],
+          "actions": [
+            "Elena proposes deprecating Product Catalog API v2 by 2025-12-01 with 90-day sunset notice",
+            "v3 changes: pagination switches from offset to cursor-based, response envelope standardized, nested category objects flattened",
+            "James raises concern about mobile app backward compatibility — App Store review takes 5-7 days",
+            "Sarah flags 12 external partner integrations still on v2 that need migration support",
+            "Decision: v2 gets 6-month sunset (2026-03-01) with deprecation headers starting 2025-10-01"
+          ],
+          "quotes": [
+            "elena.volkov: 'v2 has 847 endpoints but only 23 are actually used by more than 1 consumer. The long tail is dead code we can drop in v3.'",
+            "james.wright: 'Mobile can't ship a v3 migration in one sprint. We need at least the 6-month sunset plus a compatibility shim during transition.'",
+            "sarah.kim: 'Three of our top-10 partners are on v2 only. I need a migration guide and at least 2 sprints of partner engineering support.'",
+            "elena.volkov: 'Agreed on 6 months. I will publish the v3 OpenAPI spec by Friday and schedule migration office hours starting October.'"
+          ],
+          "details": [
+            "v3 breaking changes: removal of /products/search/legacy endpoint, cursor pagination (no more offset/limit), ISO 8601 timestamps (was Unix epoch), snake_case field names (was camelCase)",
+            "Kong gateway config: route /api/v2/products/* with deprecation header Sunset: 2026-03-01 and Link: </api/v3/products>; rel='successor-version'",
+            "Migration shim: thin adapter layer in Kong that translates v2 requests to v3 format for backward compat during transition",
+            "Monitoring: Datadog tracks v2 vs v3 request volume per consumer to identify stragglers before sunset"
+          ]
+        },
+        {
+          "type": "pull_request",
+          "metadata": {
+            "pr_number": 4671,
+            "repo": "vantage-commerce/svc-search",
+            "branch": "feature/typo-tolerant-search",
+            "author": "omar.hassan",
+            "reviewers": ["elena.volkov", "lisa.park"],
+            "status": "approved",
+            "files_changed": 18,
+            "insertions": 923,
+            "deletions": 201
+          },
+          "entities": [
+            "svc-search v4.3.0",
+            "Elasticsearch 8.11 cluster (search-prod-01 through search-prod-06)",
+            "Omar Hassan (search team)",
+            "Lisa Park (data science)",
+            "Elasticsearch fuzzy query DSL"
+          ],
+          "actions": [
+            "Implements typo-tolerant search using Elasticsearch fuzziness:AUTO with edit distance tuning",
+            "Adds phonetic analyzer (double_metaphone) as secondary match for brand names",
+            "New /api/v2/search/suggest endpoint for as-you-type suggestions with typo correction",
+            "Benchmark: p50 latency increases from 12ms to 18ms, p99 from 45ms to 72ms (within SLA of 100ms)",
+            "A/B test configured: 20% of search traffic gets typo-tolerant results"
+          ],
+          "quotes": [
+            "omar.hassan: 'Analysis of search-with-zero-results shows 14% are typos (e.g., \"nikey\" \"samsnug\" \"adiddas\"). This should recover most of those.'",
+            "lisa.park: 'The phonetic analyzer is a nice touch for brand names. Can we add it for category names too? People search for \"electronix\" and \"furnature\" constantly.'",
+            "elena.volkov: 'Latency impact is acceptable. Make sure the Elasticsearch cluster can handle the extra query load at 100% rollout — check with SRE on capacity.'"
+          ],
+          "details": [
+            "Fuzziness config: AUTO (0 edits for 1-2 chars, 1 edit for 3-5 chars, 2 edits for 6+ chars)",
+            "Phonetic analyzer added to product_name.phonetic and brand_name.phonetic subfields",
+            "Suggestion endpoint returns top-5 corrections with scores: {original_query, suggestions: [{text, score, result_count}]}",
+            "Index mapping changes require zero-downtime reindex — using Elasticsearch aliases to swap",
+            "Feature flag: typo_tolerant_search gates the A/B test, kill switch reverts to exact-match-only"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "date": "2025-09-29",
+      "theme": "feature_development",
+      "documents": [
+        {
+          "type": "qa_report",
+          "metadata": {
+            "report_id": "QA-2025-0922",
+            "title": "Guest Checkout v2 — 25% Rollout Validation",
+            "author": "tomás.rivera",
+            "date": "2025-09-29",
+            "environment": "production (us-east-1, eu-west-1)",
+            "status": "PASS with observations"
+          },
+          "entities": [
+            "checkout-service v3.8.1",
+            "svc-payment-gateway",
+            "Redis checkout-sessions-prod cluster",
+            "Tomás Rivera (QA lead)",
+            "Stripe sandbox + production",
+            "Datadog APM traces",
+            "Cypress test suite (147 tests)"
+          ],
+          "actions": [
+            "Executed full Cypress regression suite against 25% rollout — 147/147 passed",
+            "Manual exploratory testing: 23 scenarios across 4 browsers (Chrome, Safari, Firefox, Edge)",
+            "Load test: 4200 concurrent guest sessions sustained for 30 minutes without degradation",
+            "Verified Redis session TTL behavior — sessions correctly expire after 15 minutes of inactivity",
+            "Confirmed Stripe webhook delivery for guest orders (checked 500 sample events, 100% delivered within 3s)"
+          ],
+          "quotes": [
+            "tomás.rivera: 'Overall PASS. Two observations: (1) on Safari iOS the payment form occasionally flickers during Stripe element mount — cosmetic only, no functional impact. (2) Cart recovery emails for abandoned guest checkouts have a 4-second delay compared to registered users because of the Redis lookup.'",
+            "priya.nakamura: 'Safari flicker is a known Stripe SDK issue — they have a fix in their next minor release. The 4s delay on cart recovery is acceptable for now.'"
+          ],
+          "details": [
+            "Conversion rate at 25%: 3.42% (guest v2) vs 3.38% (legacy guest) — within noise, no regression",
+            "Average checkout completion time: 47s (v2) vs 68s (legacy) — 31% improvement",
+            "Error rate: 0.12% (v2) vs 0.15% (legacy) — slight improvement attributed to better error handling",
+            "Redis cluster metrics during load test: peak memory 2.1GB/8GB, p99 latency 1.2ms, zero evictions",
+            "Recommendation: proceed to 50% rollout in Sprint 38 (week of 2025-10-06)"
+          ]
+        },
+        {
+          "type": "pull_request",
+          "metadata": {
+            "pr_number": 4689,
+            "repo": "vantage-commerce/svc-notification-hub",
+            "branch": "feature/push-notification-preferences",
+            "author": "kwame.asante",
+            "reviewers": ["maya.chen", "angela.russo"],
+            "status": "approved",
+            "files_changed": 41,
+            "insertions": 2103,
+            "deletions": 334
+          },
+          "entities": [
+            "svc-notification-hub v3.2.0",
+            "Firebase Cloud Messaging (FCM)",
+            "Apple Push Notification Service (APNs)",
+            "PostgreSQL notification_preferences table",
+            "Kwame Asante (notifications team)",
+            "svc-user-profile",
+            "Kafka topic: notification.events"
+          ],
+          "actions": [
+            "Implements granular push notification preferences — users can opt in/out per category (orders, deals, wishlist, social)",
+            "New preferences API: GET/PUT /api/v1/users/{id}/notification-preferences",
+            "Adds batch notification scheduling — deals notifications queued and sent at user-preferred time window",
+            "FCM topic subscription management: subscribe/unsubscribe users from category-specific FCM topics",
+            "Migration adds notification_preferences table with per-channel (push, email, sms) per-category columns"
+          ],
+          "quotes": [
+            "kwame.asante: 'Currently we have a single push notification toggle. Users either get everything or nothing. This adds per-category control which should reduce opt-out rates.'",
+            "maya.chen: 'Product data shows 62% of push opt-outs happen within 48h of enabling — usually triggered by deal spam. Per-category controls should help retain users who want order updates but not deals.'",
+            "angela.russo: 'Security review: the preferences endpoint correctly validates that the authenticated user matches the {id} param. Approved.'"
+          ],
+          "details": [
+            "Preferences schema: {user_id, channel, category, enabled, quiet_hours_start, quiet_hours_end, updated_at}",
+            "Default preferences: orders=ON, deals=ON, wishlist=ON, social=OFF for new users",
+            "Batch scheduler: deals notifications queued in SQS with delivery window attribute, Lambda consumer sends at preferred time",
+            "FCM topics: vantage-deals-{region}, vantage-orders-{user_segment}, vantage-wishlist-updates",
+            "Backward compatibility: existing users get migrated with all categories=ON matching current behavior"
+          ]
+        },
+        {
+          "type": "sprint_plan",
+          "metadata": {
+            "sprint": "Sprint 2025-39",
+            "team": "Discovery & Engagement",
+            "dates": "2025-09-29 to 2025-10-10",
+            "sprint_goal": "Launch wishlist sharing beta + notification preferences",
+            "velocity": 29,
+            "capacity": 32
+          },
+          "entities": [
+            "Jira board DISC",
+            "Maya Chen",
+            "Deepak Patel",
+            "Kwame Asante",
+            "Angela Russo",
+            "svc-wishlist",
+            "svc-notification-hub",
+            "svc-og-renderer"
+          ],
+          "actions": [
+            "DISC-2340: Wishlist sharing — deploy OG renderer service to prod (Deepak, 5 pts)",
+            "DISC-2341: Wishlist sharing — ramp flag to 100% internal, 10% external (Deepak, 3 pts)",
+            "DISC-2355: Notification preferences — backend deploy + mobile SDK update (Kwame, 8 pts)",
+            "DISC-2360: Notification preferences — analytics events for preference changes (Kwame, 3 pts)",
+            "DISC-2362: Share link click-through tracking in Segment (Maya/Lisa, 2 pts)",
+            "DISC-2370: OG renderer load test at 500 concurrent renders (Deepak, 3 pts)"
+          ],
+          "quotes": [
+            "maya.chen: 'Wishlist sharing is the tentpole feature for the October product update email. We need it at 10% external by Sprint end.'",
+            "deepak.patel: 'The OG renderer is the risk item. If the load test shows issues, we fall back to static placeholder images and skip personalized previews for launch.'",
+            "kwame.asante: 'Notification preferences backend is ready — blocked on mobile SDK update from James. He committed to merging by Wednesday.'"
+          ],
+          "details": [
+            "Sprint velocity trending up: 25 → 27 → 29 over last 3 sprints",
+            "OG renderer service: 2 pods, 512MB memory, 0.5 CPU each — scaling policy adds pods at 70% CPU",
+            "Risk register: OG renderer stability (medium), mobile SDK dependency (low), FCM topic migration (low)",
+            "Sprint retro action from Sprint 38: improve PR review turnaround — target <24h for all reviews"
+          ]
+        },
+        {
+          "type": "deploy_manifest",
+          "metadata": {
+            "service": "svc-og-renderer",
+            "version": "1.0.0",
+            "environment": "production",
+            "timestamp": "2025-09-29T11:30:00Z",
+            "deployer": "deepak.patel",
+            "method": "ArgoCD auto-sync"
+          },
+          "entities": [
+            "svc-og-renderer v1.0.0",
+            "Kubernetes namespace: vantage-prod",
+            "ArgoCD application: og-renderer-prod",
+            "Cloudflare R2 bucket: vantage-social-assets",
+            "Puppeteer v21.5.0"
+          ],
+          "actions": [
+            "Initial production deployment of OG renderer service",
+            "2 replicas in us-east-1, 1 replica in eu-west-1",
+            "Health check: GET /healthz returns 200 with Puppeteer browser pool status",
+            "Renders cached in R2 with 24h TTL — cache key is SHA256(wishlist_id + item_ids + template_version)"
+          ],
+          "quotes": [
+            "deepak.patel: 'First prod deploy of og-renderer. Starting with 2+1 replicas. Will monitor for 24h before enabling wishlist sharing flag.'"
+          ],
+          "details": [
+            "Container image: ghcr.io/vantage-commerce/og-renderer:1.0.0-sha-a8f3c21",
+            "Resource limits: 512Mi memory, 500m CPU per pod (Puppeteer is memory-hungry)",
+            "Environment variables: R2_BUCKET=vantage-social-assets, RENDER_TIMEOUT_MS=5000, BROWSER_POOL_SIZE=3",
+            "Kubernetes HPA: min 2, max 8, target CPU 70%",
+            "Rollback: ArgoCD manual sync to previous commit if health checks fail for >5 minutes"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "date": "2025-10-03",
+      "theme": "feature_development",
+      "documents": [
+        {
+          "type": "pull_request",
+          "metadata": {
+            "pr_number": 4712,
+            "repo": "vantage-commerce/svc-order-service",
+            "branch": "feature/order-tracking-realtime",
+            "author": "janet.okoye",
+            "reviewers": ["carlos.medina", "rafael.silva"],
+            "status": "approved",
+            "files_changed": 27,
+            "insertions": 1567,
+            "deletions": 289
+          },
+          "entities": [
+            "svc-order-service v6.4.0",
+            "svc-logistics-gateway",
+            "WebSocket server (ws-order-tracking)",
+            "Redis Pub/Sub (order-tracking-events channel)",
+            "Janet Okoye (order experience team)",
+            "Carlos Medina (reviewer)",
+            "DHL API v2",
+            "FedEx Track API"
+          ],
+          "actions": [
+            "Adds real-time order tracking via WebSocket connection from customer-facing app",
+            "New WebSocket endpoint: wss://api.vantage.com/ws/orders/{order_id}/track",
+            "Backend polls carrier APIs (DHL, FedEx, UPS) every 60s and publishes updates to Redis Pub/Sub",
+            "WebSocket server subscribes to Redis channel and pushes tracking events to connected clients",
+            "Fallback: if WebSocket connection drops, client reverts to polling GET /api/v2/orders/{id}/tracking every 30s"
+          ],
+          "quotes": [
+            "janet.okoye: 'Current tracking page refreshes every 60s with a full page reload. This gives real-time updates without any reload. Analytics show tracking pages get 4.2 views per order on average — this should reduce that to 1-2.'",
+            "carlos.medina: 'WebSocket connection limits concern me. What happens if 100K users are all tracking orders during a sale event?'",
+            "janet.okoye: 'Good question — the ws-order-tracking service scales horizontally and each instance handles ~10K connections. Redis Pub/Sub fans out to all instances. We tested 50K concurrent in staging.'"
+          ],
+          "details": [
+            "WebSocket message format: {event: 'tracking_update', data: {status, location, timestamp, estimated_delivery, carrier}}",
+            "Carrier polling intervals: DHL 60s, FedEx 90s, UPS 120s (rate limit differences)",
+            "Redis Pub/Sub channel pattern: order:tracking:{order_id}",
+            "Authentication: WebSocket upgrade requires valid JWT with order_id in claims (user must own the order)",
+            "Connection limit: 5 concurrent WebSocket connections per user, enforced via Redis counter"
+          ]
+        },
+        {
+          "type": "code_review",
+          "metadata": {
+            "pr_number": 4712,
+            "repo": "vantage-commerce/svc-order-service",
+            "reviewer": "rafael.silva",
+            "review_type": "performance",
+            "timestamp": "2025-10-03T16:45:00Z"
+          },
+          "entities": [
+            "ws-order-tracking service",
+            "Redis Pub/Sub",
+            "Kubernetes HPA",
+            "Datadog WebSocket metrics dashboard",
+            "Rafael Silva (performance review)"
+          ],
+          "actions": [
+            "Rafael identified missing connection cleanup — stale WebSocket connections not being reaped after client disconnect",
+            "Suggested adding heartbeat ping/pong with 30s interval to detect dead connections",
+            "Recommended Datadog custom metric for active WebSocket connections per pod for HPA scaling",
+            "Approved after Janet added connection cleanup, heartbeat, and custom metrics"
+          ],
+          "quotes": [
+            "rafael.silva: 'Line 89: there is no cleanup when the client silently disconnects (e.g., phone goes to sleep). Without heartbeat these zombie connections will accumulate and hit the per-pod limit. Need ping/pong at minimum.'",
+            "janet.okoye: 'Added 30s ping/pong with 10s timeout for pong response. Dead connections are cleaned up and Redis subscription is cancelled. Also added the Datadog gauge for active connections.'"
+          ],
+          "details": [
+            "Heartbeat: server sends WebSocket ping frame every 30s, expects pong within 10s, closes connection on timeout",
+            "Connection cleanup: on disconnect → cancel Redis subscription → decrement user connection counter → log disconnect reason",
+            "Datadog metric: vantage.ws.order_tracking.active_connections tagged by pod, region, carrier",
+            "HPA config: scale up at 7500 active connections per pod (75% of 10K limit)"
+          ]
+        },
+        {
+          "type": "feature_flag_rollout",
+          "metadata": {
+            "flag_name": "realtime_order_tracking",
+            "platform": "LaunchDarkly",
+            "team": "Order Experience",
+            "current_rollout": "0%",
+            "target_rollout": "5%",
+            "rollout_date": "2025-10-03",
+            "owner": "janet.okoye"
+          },
+          "entities": [
+            "LaunchDarkly project: vantage-web",
+            "ws-order-tracking service",
+            "svc-order-service",
+            "Datadog monitor: ws-tracking-errors",
+            "Janet Okoye"
+          ],
+          "actions": [
+            "Initial 5% rollout of real-time order tracking to web users only (mobile in next sprint)",
+            "Targeting: users in us-east-1 with orders shipped via DHL (most reliable carrier API)",
+            "Monitoring: Datadog alert if WebSocket error rate exceeds 2% or connection count exceeds 80% pod capacity",
+            "Rollback: kill switch disables WebSocket upgrade — clients fall back to HTTP polling transparently"
+          ],
+          "quotes": [
+            "janet.okoye: 'Starting narrow — DHL only in us-east-1. Once we validate the WebSocket infrastructure, we add FedEx and UPS then go global.'"
+          ],
+          "details": [
+            "LaunchDarkly targeting rule: user.region = 'us-east-1' AND order.carrier = 'dhl' AND random_percentage < 5",
+            "Feature flag also controls whether the tracking page renders the WebSocket-powered component or the legacy polling version",
+            "Expected connection volume at 5%: ~200 concurrent WebSocket connections (based on current tracking page traffic)",
+            "Success criteria for ramp to 25%: zero WebSocket-related incidents for 7 days, tracking page bounce rate decreases"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "date": "2025-10-09",
+      "theme": "feature_development",
+      "documents": [
+        {
+          "type": "pull_request",
+          "metadata": {
+            "pr_number": 4745,
+            "repo": "vantage-commerce/svc-returns-portal",
+            "branch": "feature/self-service-returns",
+            "author": "sarah.kim",
+            "reviewers": ["carlos.medina", "angela.russo"],
+            "status": "approved",
+            "files_changed": 53,
+            "insertions": 3241,
+            "deletions": 876
+          },
+          "entities": [
+            "svc-returns-portal v2.0.0",
+            "svc-order-service",
+            "svc-inventory-tracker",
+            "svc-payment-gateway (refund flow)",
+            "PostgreSQL returns table + return_items table",
+            "Sarah Kim (returns & post-purchase team)",
+            "Carlos Medina (reviewer)",
+            "Angela Russo (security reviewer)",
+            "Kafka topic: returns.events"
+          ],
+          "actions": [
+            "Complete rewrite of returns flow — replaces email-based process with self-service portal",
+            "New endpoints: POST /api/v1/returns (initiate), GET /api/v1/returns/{id} (status), PUT /api/v1/returns/{id}/label (generate shipping label)",
+            "Automatic refund processing: refund issued when carrier scan confirms package pickup",
+            "Integration with svc-inventory-tracker to update available stock on return receipt",
+            "Return reason taxonomy: 18 standardized reasons with free-text optional field"
+          ],
+          "quotes": [
+            "sarah.kim: 'Current returns process: customer emails support → agent creates ticket → agent processes return manually → 5-7 business day refund. New flow: customer clicks return → selects reason → gets label → refund on pickup scan. Target: <24h from initiation to refund.'",
+            "carlos.medina: 'This is a big changeset. The refund-on-pickup-scan logic needs careful review — what if the carrier scan is delayed or missing?'",
+            "sarah.kim: 'Good point. Added a 72h fallback: if no carrier scan within 72h of label generation, the return goes into a manual review queue. Also added a daily reconciliation job that checks for orphaned returns.'",
+            "angela.russo: 'Reviewed the refund authorization flow. It correctly validates return eligibility (30-day window, item condition) before generating the shipping label. The refund amount calculation matches order-service totals. Approved.'"
+          ],
+          "details": [
+            "Return eligibility rules: within 30 days of delivery, item not in excluded categories (personalized, hazmat, digital), order total > $10",
+            "Shipping label generation: calls EasyPost API for cheapest ground shipping, label stored in S3 as PDF",
+            "Refund calculation: item price + proportional tax - original shipping (unless defective/wrong item → full refund including shipping)",
+            "Kafka events: return.initiated, return.label_generated, return.carrier_scanned, return.refund_issued, return.completed",
+            "Database schema: returns(id, order_id, user_id, status, reason_code, reason_text, refund_amount, created_at, updated_at) + return_items(id, return_id, order_item_id, quantity, condition)"
+          ]
+        },
+        {
+          "type": "feature_spec",
+          "metadata": {
+            "doc_id": "SPEC-2025-103",
+            "title": "Multi-Currency Support for International Orders",
+            "author": "elena.volkov",
+            "status": "approved",
+            "team": "Platform Architecture",
+            "target_release": "v5.0.0 (2025-11-15)"
+          },
+          "entities": [
+            "svc-pricing-engine",
+            "svc-payment-gateway",
+            "svc-order-service",
+            "svc-product-catalog",
+            "Open Exchange Rates API",
+            "Elena Volkov (platform architect)",
+            "Stripe multi-currency",
+            "PostgreSQL currency_rates table"
+          ],
+          "actions": [
+            "Support 8 currencies at launch: USD, EUR, GBP, CAD, AUD, JPY, MXN, BRL",
+            "Exchange rates fetched from Open Exchange Rates API every 15 minutes, cached in Redis",
+            "Product prices stored in USD, converted at display time using cached rates",
+            "Payment processing in customer's local currency via Stripe multi-currency (avoids conversion fees)",
+            "Order service stores both local currency amount and USD equivalent for financial reporting"
+          ],
+          "quotes": [
+            "elena.volkov: 'International revenue is 22% of total but we only accept USD. Customers in EU and UK see dynamic Stripe conversion fees of 2-3%. Accepting EUR and GBP directly removes that friction.'",
+            "rafael.silva: 'How does this interact with dynamic pricing? We need to ensure the pricing engine operates on USD base prices and conversion happens after adjustment, not before.'",
+            "elena.volkov: 'Correct — the pricing engine is USD-only. Currency conversion is a presentation layer concern. The flow is: base_price_usd → dynamic_adjustment_usd → convert_to_display_currency. All business logic stays in USD.'"
+          ],
+          "details": [
+            "Exchange rate cache: Redis key currency:rate:{pair} with 15-min TTL, fallback to last known rate if API is down",
+            "Rate staleness protection: if cached rate is >1h old, add 1% buffer to protect against adverse movement",
+            "Financial reporting: all analytics and revenue dashboards continue to use USD — conversion at order time is recorded in orders.usd_equivalent column",
+            "Rounding rules: JPY rounds to integer (no cents), all others to 2 decimal places, always round in customer's favor",
+            "Geolocation: user's currency detected from shipping address → billing address → IP geolocation (in that priority)"
+          ]
+        },
+        {
+          "type": "code_review",
+          "metadata": {
+            "pr_number": 4751,
+            "repo": "vantage-commerce/svc-search",
+            "branch": "feature/search-personalization",
+            "author": "omar.hassan",
+            "reviewers": ["lisa.park", "noor.al-rashid"],
+            "status": "changes_requested",
+            "files_changed": 15,
+            "insertions": 834,
+            "deletions": 112
+          },
+          "entities": [
+            "svc-search v4.4.0",
+            "Elasticsearch 8.11",
+            "svc-user-profile (preference vectors)",
+            "Omar Hassan (search team)",
+            "Lisa Park (data science)",
+            "Noor Al-Rashid (ML engineering)",
+            "Vespa re-ranking model"
+          ],
+          "actions": [
+            "Adds personalization layer to search results — user preference vector used as boost signal in Elasticsearch",
+            "Preference vector: 128-dim embedding from last 90 days of user behavior (views, purchases, wishlist adds)",
+            "Re-ranking: top 100 Elasticsearch results re-scored using Vespa model with user preference as feature",
+            "Lisa requested A/B test integration before any production rollout",
+            "Noor flagged cold-start problem for new users — suggested fallback to category-level popularity"
+          ],
+          "quotes": [
+            "omar.hassan: 'Personalized search lifts click-through rate by 18% in offline eval. Largest gains on ambiguous queries like \"shoes\" or \"gift\" where intent varies by user.'",
+            "lisa.park: 'Offline metrics look great but we need online validation. Please gate this behind a flag and set up the A/B test framework before merging. Also need to define what happens for logged-out users.'",
+            "noor.al-rashid: 'The cold-start fallback needs work. Currently new users get zero personalization boost — their results are pure relevance score. Suggesting we use category-level popularity vectors until we have 10+ behavioral signals.'"
+          ],
+          "details": [
+            "Preference vector computation: nightly batch job reads from Kafka clickstream topic, generates embeddings via custom PyTorch model, stores in svc-user-profile Redis cache",
+            "Elasticsearch query: function_score query wrapping the main match, with script_score using cosine similarity between user vector and product vector",
+            "Vespa re-ranking: RPC call to Vespa serving with features [es_score, user_pref_similarity, recency, popularity] — model is LightGBM",
+            "Cold-start threshold: <10 behavioral events → use category popularity vector; 10-50 events → blend 50/50; >50 events → full personalization",
+            "Privacy: preference vectors are ephemeral (90-day rolling window), deleted on account deletion, never sent to third parties"
+          ]
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "date": "2025-10-15",
+      "theme": "feature_development",
+      "documents": [
+        {
+          "type": "sprint_plan",
+          "metadata": {
+            "sprint": "Sprint 2025-41",
+            "team": "Checkout & Payments",
+            "dates": "2025-10-13 to 2025-10-24",
+            "sprint_goal": "Guest checkout 100% rollout + Apple Pay launch",
+            "velocity": 36,
+            "capacity": 40
+          },
+          "entities": [
+            "Jira board CHKOUT",
+            "Priya Nakamura",
+            "Carlos Medina",
+            "Janet Okoye",
+            "Tomás Rivera",
+            "checkout-service v3.9.0",
+            "svc-payment-gateway",
+            "Apple Pay integration"
+          ],
+          "actions": [
+            "CHKOUT-1952: Guest checkout v2 — ramp to 100% (Priya, 3 pts)",
+            "CHKOUT-1940: Apple Pay for guest + registered users (Janet, 8 pts)",
+            "CHKOUT-1955: Remove legacy guest checkout code + feature flag cleanup (Priya, 5 pts)",
+            "CHKOUT-1960: Payment method analytics dashboard (Carlos, 5 pts)",
+            "CHKOUT-1963: Checkout error rate alerting refinement (Tomás, 3 pts)",
+            "CHKOUT-1970: Express checkout one-click purchase for registered users with saved cards (Janet, 8 pts)"
+          ],
+          "quotes": [
+            "carlos.medina: 'Guest checkout has been at 50% for two weeks with better conversion than legacy across all segments. Time to go to 100% and retire the old code.'",
+            "janet.okoye: 'Apple Pay sandbox is fully tested. Stripe integration handles Apple Pay as just another payment method — minimal code changes on our side. The blocker was the Apple merchant identity certificate which we finally got last week.'",
+            "tomás.rivera: 'Current checkout error alerting fires too often on transient Stripe 502s that auto-resolve. I want to add a 3-minute suppression window before paging.'"
+          ],
+          "details": [
+            "Guest checkout v2 final metrics at 50%: conversion +4.2% vs legacy, completion time -31%, error rate -22%",
+            "Apple Pay availability: Safari on macOS/iOS, Chrome on macOS with Touch ID — estimated 38% of total checkout sessions eligible",
+            "Express checkout spec: saved card + default shipping address → single tap/click purchase with 5-second confirmation window",
+            "Legacy code removal: ~4,200 lines across 28 files, 3 unused API endpoints, 2 deprecated database columns",
+            "Payment analytics dashboard: Looker, metrics by payment method (card, Apple Pay, PayPal, guest) with conversion funnel breakdown"
+          ]
+        },
+        {
+          "type": "pull_request",
+          "metadata": {
+            "pr_number": 4788,
+            "repo": "vantage-commerce/svc-inventory-tracker",
+            "branch": "feature/low-stock-alerts",
+            "author": "rafael.silva",
+            "reviewers": ["elena.volkov", "deepak.patel"],
+            "status": "approved",
+            "files_changed": 19,
+            "insertions": 987,
+            "deletions": 143
+          },
+          "entities": [
+            "svc-inventory-tracker v3.7.0",
+            "svc-notification-hub",
+            "svc-product-catalog",
+            "PostgreSQL inventory_thresholds table",
+            "Kafka topic: inventory.alerts",
+            "Rafael Silva (pricing & inventory)",
+            "Elena Volkov (reviewer)",
+            "Datadog monitor: inventory-low-stock"
+          ],
+          "actions": [
+            "Implements configurable low-stock alert system for merchants and internal ops",
+            "Threshold configuration per product or per category — absolute count or percentage of 30-day average daily sales",
+            "Alert channels: Kafka event (for downstream consumers), PagerDuty (for ops), email digest (for merchandising team)",
+            "Deduplication: only one alert per product per 24h window to prevent alert fatigue",
+            "Dashboard: Grafana panel showing products below threshold with restock ETA from supplier integration"
+          ],
+          "quotes": [
+            "rafael.silva: 'We had 3 out-of-stock events last month on top-100 products that could have been avoided with earlier alerting. Current system only alerts at zero stock — too late for reorder lead times.'",
+            "elena.volkov: 'Clean implementation. One suggestion: add a webhook option for the alert channel so merchants can integrate with their own inventory management systems.'",
+            "rafael.silva: 'Good idea — added webhook as a fourth channel option. Merchants configure their endpoint URL in the merchant portal, we POST the alert payload with HMAC signature for verification.'"
+          ],
+          "details": [
+            "Threshold types: absolute (alert when stock < N units), relative (alert when stock < N% of 30-day avg daily sales × reorder_lead_days)",
+            "Default thresholds: 50 units for general merchandise, 20 units for electronics, 100 units for consumables — overridable per SKU",
+            "Inventory check frequency: every 5 minutes via cron job scanning products where current_stock <= threshold * 1.2 (early warning zone)",
+            "Kafka event schema: {product_id, sku, current_stock, threshold, threshold_type, avg_daily_sales, estimated_stockout_date, timestamp}",
+            "Webhook payload includes HMAC-SHA256 signature in X-Vantage-Signature header, merchants verify against their shared secret"
+          ]
+        },
+        {
+          "type": "ab_test_config",
+          "metadata": {
+            "experiment_id": "EXP-2025-163",
+            "name": "checkout_progress_indicator",
+            "platform": "LaunchDarkly",
+            "team": "Checkout & Payments",
+            "status": "concluded",
+            "start_date": "2025-09-25",
+            "end_date": "2025-10-14",
+            "winner": "variant_b"
+          },
+          "entities": [
+            "LaunchDarkly project: vantage-web",
+            "Segment analytics",
+            "checkout-service",
+            "Lisa Park (data science)",
+            "Priya Nakamura (frontend)"
+          ],
+          "actions": [
+            "Control: existing 4-step text breadcrumb (Cart → Shipping → Payment → Review)",
+            "Variant A: animated progress bar with step labels and estimated time remaining",
+            "Variant B: minimal step dots with current step highlighted, no time estimate",
+            "Primary metric: checkout completion rate from shipping step to order confirmation",
+            "Variant B won: +2.8% completion rate (p=0.003), shipping-to-payment drop-off reduced by 19%"
+          ],
+          "quotes": [
+            "lisa.park: 'Variant B wins decisively at p=0.003 after 19 days. Interestingly, variant A (animated bar + time estimate) performed worse than control — the time estimate seemed to increase anxiety when it showed >2 minutes.'",
+            "priya.nakamura: 'Shipping variant B to 100% in the Sprint 41 guest checkout update. The minimal dots work better across viewport sizes too — the animated bar had layout issues on small screens.'"
+          ],
+          "details": [
+            "Sample sizes: Control=142,380 sessions, Variant A=71,204 sessions, Variant B=71,891 sessions",
+            "Completion rates: Control 67.3%, Variant A 65.8% (-1.5%, p=0.04), Variant B 70.1% (+2.8%, p=0.003)",
+            "Variant A analysis: users who saw time estimate >2min had 24% higher abandonment than those who saw <1min — time estimate created pressure",
+            "Mobile vs desktop: Variant B outperformed control on both, but larger lift on mobile (+3.4%) vs desktop (+2.1%)",
+            "Implementation: variant B requires only CSS changes (no new JS), minimal bundle impact"
+          ]
+        },
+        {
+          "type": "deploy_manifest",
+          "metadata": {
+            "service": "svc-returns-portal",
+            "version": "2.0.0",
+            "environment": "production",
+            "timestamp": "2025-10-15T09:00:00Z",
+            "deployer": "sarah.kim",
+            "method": "ArgoCD canary (10% → 50% → 100%)"
+          },
+          "entities": [
+            "svc-returns-portal v2.0.0",
+            "Kubernetes namespace: vantage-prod",
+            "ArgoCD application: returns-portal-prod",
+            "EasyPost API",
+            "PostgreSQL returns migration 012_self_service_returns.sql",
+            "Sarah Kim"
+          ],
+          "actions": [
+            "Canary deployment: 10% traffic to v2.0.0 at 09:00, promote to 50% at 11:00 if metrics green, 100% at 14:00",
+            "Database migration runs pre-deploy: adds returns and return_items tables (non-breaking, additive only)",
+            "Feature flag self_service_returns gates customer-facing UI — flag stays OFF until canary is at 100%",
+            "EasyPost API credentials rotated for production — new keys configured in Vault"
+          ],
+          "quotes": [
+            "sarah.kim: 'Canary strategy for returns-portal v2.0.0. The backend deploys first with the flag off. Once canary is stable at 100%, I will enable the flag for 10% of users and monitor return initiation success rate.'",
+            "carlos.medina: 'Approved the canary plan. Make sure the reconciliation job is running before enabling the flag — we need the orphan detection safety net from day one.'"
+          ],
+          "details": [
+            "Container image: ghcr.io/vantage-commerce/returns-portal:2.0.0-sha-d4e7f89",
+            "Resource limits: 256Mi memory, 250m CPU per pod — 4 replicas in us-east-1, 2 in eu-west-1",
+            "Canary analysis: Datadog metrics compared between canary and stable — error rate, latency p99, return initiation success rate",
+            "Rollback trigger: automatic if canary error rate >1% or p99 latency >500ms for 5 consecutive minutes",
+            "Post-deploy verification: smoke test hits POST /api/v1/returns with test order, verifies 201 response and label generation"
+          ]
+        }
+      ]
+    }
+  ]
+}

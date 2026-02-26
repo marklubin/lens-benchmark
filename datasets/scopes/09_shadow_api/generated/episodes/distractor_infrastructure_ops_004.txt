@@ -1,0 +1,1085 @@
+================================================================================
+INFRASTRUCTURE OPERATIONS LOG — VANTAGE COMMERCE PLATFORM
+Date: 2025-09-27
+Cluster: prod-us-east-1
+Classification: Internal — Operations Team Only
+================================================================================
+
+--- SECTION 1: RUNBOOK EXECUTION — NET-017: VPC PEERING AND TRANSIT GATEWAY AUDIT ---
+
+Timestamp: 2025-09-27T08:00:00Z
+Runbook: NET-017: VPC Peering and Transit Gateway Audit
+Service: network-infrastructure
+Environment: production
+Author: marcus.wright
+Reviewer: drew.park
+Schedule: Quarterly (Q3 2025)
+Status: Completed
+
+NETWORK TOPOLOGY:
+
+  Transit Gateway:
+    ID: tgw-0a1b2c3d4e5f6
+    Region: us-east-1
+    ASN: 64512
+    DNS Support: Enabled
+    ECMP Support: Enabled
+    Default Route Table Association: Enabled
+    Auto Accept Shared Attachments: Disabled
+    Multicast Support: Disabled
+
+  Connected VPCs (4):
+
+    VPC 1: prod-us-east-1
+      VPC ID: vpc-0prod12345678
+      CIDR: 10.42.0.0/16
+      Subnets: 12 (4 per AZ across 3 AZs)
+        Private Subnets:
+          subnet-0a1b2c3d (10.42.0.0/20, us-east-1a, 4091 IPs available)
+          subnet-0d4e5f6a (10.42.16.0/20, us-east-1a, 4088 IPs available)
+          subnet-0g7h8i9j (10.42.32.0/20, us-east-1b, 4086 IPs available)
+          subnet-0k1l2m3n (10.42.48.0/20, us-east-1b, 4090 IPs available)
+          subnet-0o4p5q6r (10.42.64.0/20, us-east-1c, 4087 IPs available)
+          subnet-0s7t8u9v (10.42.80.0/20, us-east-1c, 4089 IPs available)
+        Public Subnets:
+          subnet-0pub1 (10.42.96.0/22, us-east-1a, 1018 IPs available)
+          subnet-0pub2 (10.42.100.0/22, us-east-1b, 1016 IPs available)
+          subnet-0pub3 (10.42.104.0/22, us-east-1c, 1019 IPs available)
+        Database Subnets:
+          subnet-0db1 (10.42.108.0/24, us-east-1a, 248 IPs available)
+          subnet-0db2 (10.42.109.0/24, us-east-1b, 248 IPs available)
+          subnet-0db3 (10.42.110.0/24, us-east-1c, 248 IPs available)
+      NAT Gateways: 3 (one per AZ)
+      Internet Gateway: igw-0prod (attached)
+      Route Tables: 6 (1 public, 3 private, 1 database, 1 transit gateway)
+      Transit Gateway Attachment: tgw-attach-prod-01
+
+    VPC 2: staging-us-east-1
+      VPC ID: vpc-0stag12345678
+      CIDR: 10.44.0.0/16
+      Subnets: 6 (2 per AZ)
+      Transit Gateway Attachment: tgw-attach-stag-01
+      Status: Active
+
+    VPC 3: shared-services
+      VPC ID: vpc-0shar12345678
+      CIDR: 10.46.0.0/16
+      Subnets: 6
+      Contains: Active Directory, internal DNS, artifact registry, VPN gateway
+      Transit Gateway Attachment: tgw-attach-shared-01
+      Status: Active
+
+    VPC 4: data-warehouse
+      VPC ID: vpc-0dw12345678
+      CIDR: 10.48.0.0/16
+      Subnets: 6
+      Contains: Redshift cluster, ETL processing, data lake S3 endpoints
+      Transit Gateway Attachment: tgw-attach-dw-01
+      Status: Active
+
+  Decommissioned VPC (removed this audit):
+    VPC: staging-v1 (CIDR 10.50.0.0/16)
+    Status: Decommissioned 2025-07-15
+    Transit Gateway Route: Stale route removed during this audit
+    Attachment: Deleted 2025-07-15 (route table entry persisted)
+
+TRANSIT GATEWAY METRICS:
+
+  Throughput (past 30 days):
+    Average: 2.8 Gbps
+    Peak: 6.1 Gbps (2025-09-15T14:22:00Z, fall sale preview traffic)
+    Minimum: 0.4 Gbps (overnight low)
+
+  Inter-VPC Latency:
+    prod to staging: p50=0.6ms, p99=1.8ms
+    prod to shared-services: p50=0.4ms, p99=1.2ms
+    prod to data-warehouse: p50=0.8ms, p99=2.4ms
+    staging to shared-services: p50=0.5ms, p99=1.5ms
+
+  Bytes Transferred (past 30 days):
+    prod to shared-services: 4.2 TB (Active Directory, DNS, artifact pulls)
+    prod to data-warehouse: 8.1 TB (ETL data export, Redshift queries)
+    staging to shared-services: 0.8 TB
+    staging to data-warehouse: 0.3 TB
+
+  Transit Gateway Cost (September):
+    Data Processing: $124.80 (12.48 TB at $0.01/GB)
+    Hourly Charge: $36.00 (4 attachments * $0.05/hr * 720 hrs * 0.25 partial month)
+    Total Estimated: $160.80
+
+AWS NETWORK FIREWALL:
+
+  Firewall: nfw-prod-perimeter
+  Location: Inspection VPC (10.99.0.0/16)
+  Deployment Model: Distributed (endpoints in each AZ)
+  Firewall Policy: vantage-prod-fw-policy-v3
+
+  Rule Groups:
+    1. Stateful — Domain Allow List: 142 domains
+    2. Stateful — TLS Inspection: Enabled for outbound HTTPS
+    3. Stateful — IPS Signatures: Suricata rules (ET Open + custom)
+    4. Stateless — Rate Limiting: 10,000 PPS per source IP
+    5. Stateless — Protocol Filtering: Allow TCP/UDP, drop ICMP from external
+
+  Flow Processing (past 30 days):
+    Total Flows Processed: 94,000,000
+    Flows Allowed: 93,988,400 (99.987%)
+    Stateful Drops: 12,400 (0.013%)
+    Stateless Drops: 0 (all legitimate traffic matched stateless allow rules)
+
+  Stateful Drop Breakdown:
+    Blocked Domains (not on allow list): 4,200
+    IPS Signature Matches: 3,800
+    TLS Certificate Anomalies: 2,100
+    Protocol Violations: 1,400
+    Geo-restricted Origins: 900
+
+SECURITY GROUP AUDIT:
+
+  Total Security Groups in prod VPC: 47
+  Security Groups Reviewed: 47 (100%)
+
+  Findings:
+    Overly Permissive Rules Found: 3
+
+    Finding 1: sg-legacy-inventory-01
+      Rule: Inbound TCP 8080 from 0.0.0.0/0
+      Purpose: Legacy inventory API (deprecated)
+      Remediation: Changed source to 10.42.0.0/16 (VPC CIDR only)
+      Risk: Low (port not exposed externally, no public subnet association)
+      Status: Remediated 2025-09-27T08:42:00Z
+
+    Finding 2: sg-legacy-admin-02
+      Rule: Inbound TCP 8443 from 0.0.0.0/0
+      Purpose: Legacy admin dashboard (deprecated, replaced by Kubernetes ingress)
+      Remediation: Changed source to 10.42.0.0/16
+      Risk: Low
+      Status: Remediated 2025-09-27T08:45:00Z
+
+    Finding 3: sg-monitoring-legacy-03
+      Rule: Inbound TCP 8080 from 0.0.0.0/0
+      Purpose: Legacy Prometheus endpoint (migrated to service mesh)
+      Remediation: Changed source to 10.42.0.0/16
+      Risk: Low
+      Status: Remediated 2025-09-27T08:48:00Z
+
+  Compliant Security Groups: 44 (no changes needed)
+  Rules with Proper VPC CIDR Scoping: 189/192 (98.4%, now 192/192 after remediation)
+
+TRANSIT GATEWAY ROUTE TABLE UPDATE:
+
+  Route Table: tgw-rtb-prod-01
+  Routes Before Audit: 5
+  Routes After Audit: 4
+
+  Removed Route:
+    Destination: 10.50.0.0/16
+    Target: tgw-attach-staging-v1 (deleted attachment)
+    Reason: Stale route to decommissioned staging-v1 VPC
+    Removed At: 2025-09-27T09:15:00Z
+
+  Remaining Routes:
+    1. 10.42.0.0/16 -> tgw-attach-prod-01 (production)
+    2. 10.44.0.0/16 -> tgw-attach-stag-01 (staging)
+    3. 10.46.0.0/16 -> tgw-attach-shared-01 (shared-services)
+    4. 10.48.0.0/16 -> tgw-attach-dw-01 (data-warehouse)
+
+VPC FLOW LOGS AUDIT:
+
+  Flow Log Storage: s3://vantage-vpc-flow-logs/prod-us-east-1/
+  Storage Bucket Region: us-east-1
+  Log Format: Version 5 (all available fields)
+  Aggregation Interval: 1 minute
+  Storage Class: S3 Intelligent-Tiering
+
+  Past Quarter Statistics:
+    Total Data Stored: 2.1 TB
+    Storage Cost (estimated): $48/month
+    Athena Queries Run: 142 (audit + security investigations)
+    Average Athena Query Duration: 14 seconds
+    Athena Scan Cost (estimated): $8.40 (0.6 TB scanned at $5/TB)
+
+  Sample Athena Query (used during audit):
+    SELECT sourceaddress, destinationaddress, sourceport, destinationport,
+           protocol, action, COUNT(*) as flow_count
+    FROM vpc_flow_logs
+    WHERE action = 'REJECT'
+      AND flowdirection = 'ingress'
+      AND start >= CAST('2025-09-20' AS DATE)
+    GROUP BY sourceaddress, destinationaddress, sourceport, destinationport,
+             protocol, action
+    ORDER BY flow_count DESC
+    LIMIT 100;
+
+    Results: 847 unique rejected flows in past 7 days
+    Top rejected sources: external IPs attempting SSH (port 22), RDP (port 3389)
+    Assessment: All rejected flows are expected (security groups blocking unauthorized access)
+
+--- SLACK TRANSCRIPT: #platform-infra ---
+
+Timestamp Range: 2025-09-27T08:30:00Z — 2025-09-27T10:00:00Z
+Channel: #platform-infra
+
+[08:30:15] @marcus.wright: Quarterly network audit done. Three legacy SGs had 0.0.0.0/0 on non-standard ports — tightened to VPC CIDR only. No services affected.
+[08:31:00] @drew.park: good catch. Let's add a Config Rule to flag any new 0.0.0.0/0 ingress automatically.
+[08:31:30] @marcus.wright: agreed. I'll set up an AWS Config custom rule this week. We can use the managed rule restricted-common-ports as a starting point and extend it
+[08:32:00] @drew.park: also want to make sure Terraform plan catches these going forward. Can you add a sentinel policy?
+[08:32:30] @marcus.wright: yep, already have a draft. It'll flag any security group rule with cidr_blocks containing 0.0.0.0/0 on ports other than 80 and 443
+[08:33:15] @tanya.okonkwo: nice. What about the stale TGW route?
+[08:33:45] @marcus.wright: removed it. Route to 10.50.0.0/16 was pointing to the old staging-v1 attachment that was deleted back in July. Just the route table entry that persisted
+[08:34:10] @drew.park: no traffic was hitting that route right? Just stale config?
+[08:34:35] @marcus.wright: correct. The attachment was already gone so any traffic to 10.50.0.0/16 was being blackholed. No services use that CIDR anymore
+[08:35:00] @drew.park: good. Cleaned up. Anything else from the audit?
+[08:35:30] @marcus.wright: nope, everything else looks clean. 94M flows through Network Firewall in the last 30 days, 99.987% allowed. 12,400 stateful drops which is normal — mostly blocked domains and IPS hits
+[08:36:00] @marcus.wright: transit gateway throughput is healthy — 2.8 Gbps average, peaked at 6.1 during the fall sale preview. Latency all within spec
+[08:36:30] @drew.park: what about IP address capacity? Are we running low on any subnets?
+[08:37:00] @marcus.wright: checked that too. Tightest subnet is the database subnet in us-east-1a with 248 available IPs out of 256. Plenty of room. The EKS pod subnets (/20) have 4000+ IPs each
+[08:37:30] @tanya.okonkwo: Flow Logs storage — 2.1 TB for the quarter at $48/month. That's reasonable. Are we doing any automated analysis on them?
+[08:38:00] @marcus.wright: not yet, just ad-hoc Athena queries for audits and security investigations. I'd like to set up a VPC Flow Log anomaly detection pipeline using Athena scheduled queries but that's a Q4 project
+[08:38:30] @drew.park: let's add that to the Q4 planning doc. Good audit marcus, thanks
+
+--- SECTION 2: PAGERDUTY INCIDENT — PD-2025-09-27-0078 ---
+
+Incident ID: PD-2025-09-27-0078
+Timestamp: 2025-09-27T14:55:00Z
+Service: elasticsearch-cluster
+Environment: production
+Severity: P2
+Status: RESOLVED
+Resolved At: 2025-09-27T15:42:00Z
+Duration: 47 minutes
+Customer Impact: Log ingestion delayed (buffered in Kafka, no data loss)
+
+ON-CALL ROTATION:
+
+  Primary: @alex.greenfield (Search Platform)
+  Secondary: @samira.hassan (Platform SRE)
+  Escalation Manager: @drew.park
+  Notification Time: 14:55:08Z
+  Acknowledgment Time: 14:55:42Z (34 seconds)
+  Time to Engage Secondary: 14:56:15Z (auto-notified as P2)
+
+AFFECTED INFRASTRUCTURE:
+
+  Elasticsearch Cluster: es-prod-logs
+  Version: 8.14.1
+  Node Configuration:
+    Master-Eligible Nodes: 3
+      es-master-0 (m6i.xlarge, 4 vCPU, 16 GiB): us-east-1a
+      es-master-1 (m6i.xlarge, 4 vCPU, 16 GiB): us-east-1b
+      es-master-2 (m6i.xlarge, 4 vCPU, 16 GiB): us-east-1c
+    Data-Hot Nodes: 3
+      data-hot-0 (r6i.2xlarge, 8 vCPU, 64 GiB, 1 TB EBS gp3): us-east-1a
+      data-hot-1 (r6i.2xlarge, 8 vCPU, 64 GiB, 1 TB EBS gp3): us-east-1b
+      data-hot-2 (r6i.2xlarge, 8 vCPU, 64 GiB, 1 TB EBS gp3): us-east-1c
+    Data-Warm Nodes: 1
+      data-warm-0 (i3.xlarge, 4 vCPU, 30 GiB, 950 GB NVMe): us-east-1a
+
+  Index Pattern: vantage-app-logs-2025.09.*
+  Total Data Volume: 380 GB across 120 shards
+  Daily Ingestion Rate: 18 GB/day (42,000 docs/sec peak)
+  Retention Policy: ILM with rollover at 50 GB or 1 day
+
+INCIDENT TIMELINE:
+
+  [14:55:00Z] ALERT FIRED: Elasticsearch cluster status RED
+    Source: Prometheus alert es_cluster_health_status{status="red"}
+    Reason: Primary shard [vantage-app-logs-2025.09.27][shard-14] unassigned
+    Notification: PagerDuty (P2 auto-page), Slack #incidents, Opsgenie
+
+  [14:55:42Z] Acknowledged by @alex.greenfield
+    Initial Assessment: Cluster RED, checking shard allocation
+
+  [14:56:00Z] Investigation
+    Command: GET _cluster/allocation/explain
+    Response: {
+      "index": "vantage-app-logs-2025.09.27",
+      "shard": 14,
+      "primary": true,
+      "current_state": "unassigned",
+      "unassigned_info": {
+        "reason": "ALLOCATION_FAILED",
+        "at": "2025-09-27T14:54:48Z",
+        "details": "failed to allocate shard: disk usage exceeded watermark"
+      },
+      "can_allocate": "NO",
+      "allocate_explanation": "the node is above the high watermark cluster setting [cluster.routing.allocation.disk.watermark.high=90%], having 92% disk usage"
+    }
+    Affected Node: data-hot-02
+
+  [14:56:30Z] Disk Usage Assessment
+    Node: data-hot-02
+    Disk Total: 1 TB (1,000 GB)
+    Disk Used: 920 GB (92%)
+    Disk Available: 80 GB (8%)
+    High Watermark: 90% (default)
+    Flood Stage Watermark: 95% (default)
+    Shard Count on Node: 42 shards
+
+    Node: data-hot-00
+    Disk Total: 1 TB
+    Disk Used: 840 GB (84%)
+    Disk Available: 160 GB
+
+    Node: data-hot-01
+    Disk Total: 1 TB
+    Disk Used: 860 GB (86%)
+    Disk Available: 140 GB
+
+  [14:57:00Z] Immediate Triage Actions Identified:
+    Action 1: Delete indices older than 21 days to free space
+    Action 2: Resize EBS volumes on data-hot nodes
+
+  [14:58:00Z] Index Deletion Started
+    Indices targeted for deletion (older than 21 days):
+      vantage-app-logs-2025.09.01: 14.2 GB, 30 shards
+      vantage-app-logs-2025.09.02: 13.8 GB, 30 shards
+      vantage-app-logs-2025.09.03: 14.5 GB, 30 shards
+      vantage-app-logs-2025.09.04: 15.1 GB, 30 shards
+      vantage-app-logs-2025.09.05: 14.0 GB, 30 shards
+      vantage-app-logs-2025.09.06: 13.4 GB, 30 shards (Saturday, lower volume)
+      vantage-app-logs-2025.09.07: 12.8 GB, 30 shards (Sunday, lower volume)
+      vantage-app-logs-2025.09.08: 14.2 GB, 30 shards
+      vantage-app-logs-2025.09.09: 14.6 GB, 30 shards
+      vantage-app-logs-2025.09.10: 15.0 GB, 30 shards
+    Total Space to Reclaim: 141.6 GB
+    Deletion Command: DELETE /vantage-app-logs-2025.09.0*
+
+    [14:58:30Z] Indices deleted — 141.6 GB freed
+    [14:58:45Z] data-hot-02 disk usage dropped to 78%
+
+  [15:00:00Z] EBS Volume Resize Initiated
+    Target: All 3 data-hot nodes
+    Old Size: 1 TB (1,000 GB)
+    New Size: 1.5 TB (1,500 GB)
+    Volume Type: gp3 (3000 IOPS base, 125 MiB/s throughput)
+    Resize Method: AWS EBS online modification (no restart required)
+
+    data-hot-00: Volume modification started (vol-0a1b2c3d4e5f)
+    data-hot-01: Volume modification started (vol-0f6a7b8c9d0e)
+    data-hot-02: Volume modification started (vol-0k1l2m3n4o5p)
+
+    [15:02:00Z] EBS modifications in "optimizing" state
+    [15:15:00Z] data-hot-00: Modification complete, filesystem resized
+    [15:18:00Z] data-hot-01: Modification complete, filesystem resized
+    [15:20:00Z] data-hot-02: Modification complete, filesystem resized
+
+    Filesystem Resize Commands (executed via SSM):
+      sudo growpart /dev/nvme1n1 1
+      sudo xfs_growfs /data
+    Verification: df -h /data showed 1.5 TB total on all 3 nodes
+
+  [15:22:00Z] Shard Allocation Recovery
+    Cluster routing allocation re-enabled (was paused during resize)
+    Unassigned shard [vantage-app-logs-2025.09.27][shard-14] allocation started
+    Primary shard allocated to data-hot-00 (lowest disk usage)
+    Allocation Duration: 45 seconds
+    Shard Size: 2.8 GB
+
+  [15:23:00Z] Cluster Status: YELLOW (replicas still allocating)
+  [15:35:00Z] All replica shards allocated
+  [15:35:00Z] Cluster Status: GREEN
+
+  [15:35:00Z] Kafka Consumer Lag Assessment
+    Consumer Group: es-log-ingestion
+    Lag at Peak: 2,100,000 messages (2.1M)
+    Lag at Resolution: 1,400,000 messages (decreasing rapidly)
+    Estimated Catchup Time: 8 minutes at current ingestion rate
+    Data Loss: None (Kafka retention: 72 hours)
+
+  [15:42:00Z] Kafka consumer lag back to normal (< 1,000 messages)
+  [15:42:00Z] Incident resolved
+
+--- SLACK TRANSCRIPT: #incidents ---
+
+Timestamp Range: 2025-09-27T14:55:00Z — 2025-09-27T15:45:00Z
+Channel: #incidents
+
+[14:55:10] @pagerduty-bot: :rotating_light: PD-2025-09-27-0078 | elasticsearch-cluster | P2 | Cluster RED — unassigned primary shard | Assigned: @alex.greenfield, @samira.hassan
+[14:55:45] @alex.greenfield: ack. Looking at it. ES cluster RED
+[14:56:10] @alex.greenfield: ES cluster RED — unassigned primary on shard 14. data-hot-02 hit disk watermark. Cleaning old indices now.
+[14:56:30] @samira.hassan: I'm here. What can I do?
+[14:56:45] @alex.greenfield: need you to resize EBS volumes on all 3 data-hot nodes. Current 1TB, bump to 1.5TB. Online resize, no restart needed
+[14:57:00] @samira.hassan: Resizing EBS volumes on all 3 data-hot nodes to 1.5 TB. Online resize, no restart needed.
+[14:58:35] @alex.greenfield: old indices deleted. 140GB freed. data-hot-02 down to 78% disk usage. Shard should start allocating once EBS resize completes
+[15:01:00] @samira.hassan: EBS modifications submitted for all 3 volumes. AWS says 10-15 min for optimization
+[15:20:30] @samira.hassan: all 3 volumes at 1.5TB. Filesystems resized. Disk usage: data-hot-00 56%, data-hot-01 57%, data-hot-02 52%
+[15:23:10] @alex.greenfield: shard 14 allocated. Cluster is YELLOW, replicas catching up
+[15:35:15] @alex.greenfield: Cluster GREEN again. All shards allocated. Adding Grafana alert for disk usage > 80% on ES nodes.
+[15:35:30] @alex.greenfield: also updating ILM policy — changing rollover from 50GB/1day to 30GB/1day so indices are smaller and we can delete more granularly
+[15:36:00] @samira.hassan: Kafka consumer lag clearing out. Was at 2.1M peak, now down to 200k. Should be fully caught up in a couple minutes
+[15:38:00] @drew.park: good recovery. 47 min incident for a P2 is solid. What's the long-term fix to prevent this?
+[15:38:30] @alex.greenfield: three things: 1) new Grafana alert at 80% disk, 2) ILM policy with smaller rollover size, 3) capacity planning for Q4 — we should project forward based on log volume growth
+[15:39:00] @samira.hassan: I'll also set up EBS CloudWatch alerts for disk usage on the ES nodes. Belt and suspenders
+[15:42:10] @alex.greenfield: Kafka lag back to normal. Incident resolved. No data loss — Kafka buffered everything. I'll write the RCA and file follow-up tickets
+
+--- SECTION 3: POST-INCIDENT ACTION ITEMS ---
+
+ILM Policy Update:
+
+  Policy Name: vantage-logs-ilm-policy
+  Previous Configuration:
+    Hot Phase:
+      Rollover: max_size 50GB OR max_age 1d
+      Shards: 30 per index
+    Warm Phase: Move after 7 days, force merge to 1 segment
+    Delete Phase: After 30 days
+
+  Updated Configuration:
+    Hot Phase:
+      Rollover: max_size 30GB OR max_age 1d
+      Shards: 20 per index (reduced for smaller index size)
+    Warm Phase: Move after 7 days, force merge to 1 segment
+    Delete Phase: After 21 days (reduced from 30)
+
+  Rationale: Smaller indices allow finer-grained deletion. 21-day retention
+  meets compliance requirements (minimum 14 days for application logs).
+
+New Grafana Alert:
+
+  Alert Name: ElasticsearchNodeDiskHigh
+  Expression: |
+    elasticsearch_filesystem_data_used_percent > 80
+  For Duration: 5 minutes
+  Severity: warning (80%), critical (88%)
+  Notification Channels: Slack #infra-alerts, PagerDuty (critical only)
+
+--- SECTION 4: INFRASTRUCTURE METRICS SNAPSHOT ---
+
+Timestamp: 2025-09-27T00:00:00Z — 2025-09-27T23:59:59Z
+Source: Prometheus / Grafana
+
+ELASTICSEARCH CLUSTER METRICS (post-incident stable state, 16:00-24:00):
+
+  Cluster Health: GREEN
+  Active Shards: 480
+  Initializing Shards: 0
+  Unassigned Shards: 0
+  Relocating Shards: 0
+  Active Primary Shards: 240
+  Number of Pending Tasks: 0
+
+  Indexing Rate: 42,000 docs/sec (peak during business hours)
+  Search Rate: 2,400 queries/sec
+  Search Latency: p50 8ms, p99 120ms
+  Indexing Latency: p50 4ms, p99 22ms
+
+  JVM Heap Usage:
+    data-hot-00: 62% of 32 GB heap
+    data-hot-01: 58% of 32 GB heap
+    data-hot-02: 55% of 32 GB heap
+
+  Disk Usage (post-resize):
+    data-hot-00: 56% of 1.5 TB
+    data-hot-01: 57% of 1.5 TB
+    data-hot-02: 52% of 1.5 TB
+    data-warm-0: 68% of 950 GB
+
+COMPUTE METRICS (24-hour):
+
+  CPU Usage (cluster avg): 64%
+  Memory Usage (cluster avg): 56%
+  Nodes: 36 Ready, 0 NotReady
+  Pods: 494 running, 0 pending
+
+NETWORK METRICS:
+
+  Transit Gateway Throughput (24h avg): 2.6 Gbps
+  Inter-VPC Latency (prod to DW): p50 0.8ms, p99 2.4ms
+  Network Firewall Flows: 3.1M (24h), 412 drops (0.013%)
+
+--- SECTION 5: HTTP LOG EXCERPTS — ELASTICSEARCH OPERATIONS ---
+
+Timestamp Range: 2025-09-27T14:55:00Z — 2025-09-27T15:42:00Z
+Source: Elasticsearch API audit log
+
+[14:56:02Z] GET /_cluster/allocation/explain HTTP/1.1
+  Host: es-prod-logs.elasticsearch.svc.cluster.local:9200
+  User-Agent: curl/8.4.0
+  Authorization: Basic [REDACTED]
+  X-Request-ID: es-diag-alloc-01
+  Status: 200 OK
+  Response-Time: 42ms
+  Content-Length: 2841
+  Response-Body: [allocation explanation — shard 14 unassigned due to disk watermark]
+
+[14:58:28Z] DELETE /vantage-app-logs-2025.09.01,vantage-app-logs-2025.09.02,vantage-app-logs-2025.09.03,vantage-app-logs-2025.09.04,vantage-app-logs-2025.09.05,vantage-app-logs-2025.09.06,vantage-app-logs-2025.09.07,vantage-app-logs-2025.09.08,vantage-app-logs-2025.09.09,vantage-app-logs-2025.09.10 HTTP/1.1
+  Host: es-prod-logs.elasticsearch.svc.cluster.local:9200
+  User-Agent: curl/8.4.0
+  X-Request-ID: es-cleanup-old-indices
+  Status: 200 OK
+  Response-Time: 1842ms
+  Response-Body: {"acknowledged": true}
+
+[15:22:05Z] PUT /_cluster/settings HTTP/1.1
+  Host: es-prod-logs.elasticsearch.svc.cluster.local:9200
+  User-Agent: curl/8.4.0
+  Content-Type: application/json
+  X-Request-ID: es-enable-allocation
+  Status: 200 OK
+  Response-Time: 14ms
+  Request-Body: {
+    "persistent": {
+      "cluster.routing.allocation.enable": "all"
+    }
+  }
+
+[15:23:00Z] GET /_cluster/health HTTP/1.1
+  Host: es-prod-logs.elasticsearch.svc.cluster.local:9200
+  User-Agent: prometheus-es-exporter/1.8.0
+  X-Request-ID: health-check-periodic
+  Status: 200 OK
+  Response-Time: 2ms
+  Response-Body: {
+    "cluster_name": "es-prod-logs",
+    "status": "yellow",
+    "timed_out": false,
+    "number_of_nodes": 7,
+    "number_of_data_nodes": 4,
+    "active_primary_shards": 240,
+    "active_shards": 420,
+    "relocating_shards": 0,
+    "initializing_shards": 12,
+    "unassigned_shards": 48,
+    "number_of_pending_tasks": 0,
+    "task_max_waiting_in_queue_millis": 0
+  }
+
+[15:35:02Z] GET /_cluster/health HTTP/1.1
+  Host: es-prod-logs.elasticsearch.svc.cluster.local:9200
+  User-Agent: prometheus-es-exporter/1.8.0
+  Status: 200 OK
+  Response-Time: 2ms
+  Response-Body: {
+    "cluster_name": "es-prod-logs",
+    "status": "green",
+    "number_of_nodes": 7,
+    "active_primary_shards": 240,
+    "active_shards": 480,
+    "unassigned_shards": 0
+  }
+
+--- SECTION 6: CHANGE MANAGEMENT LOG ---
+
+Change Record: CHG-2025-09-27-001
+  Title: Quarterly VPC and Transit Gateway Network Audit
+  Type: Standard Change (quarterly audit)
+  Risk Level: Low
+  Implementer: marcus.wright
+  Start Time: 2025-09-27T08:00:00Z
+  End Time: 2025-09-27T09:30:00Z
+  Changes Made:
+    - 3 security group rules tightened (0.0.0.0/0 to VPC CIDR)
+    - 1 stale transit gateway route removed
+  Customer Impact: None
+
+Change Record: CHG-2025-09-27-002
+  Title: Emergency Elasticsearch Disk Space Recovery
+  Type: Emergency Change (P2 incident)
+  Risk Level: Medium
+  Implementer: alex.greenfield, samira.hassan
+  Start Time: 2025-09-27T14:58:00Z
+  End Time: 2025-09-27T15:42:00Z
+  Changes Made:
+    - Deleted 10 indices (vantage-app-logs-2025.09.01 through 09.10) — 140 GB freed
+    - Resized 3 EBS volumes from 1 TB to 1.5 TB (online, no restart)
+    - Updated ILM policy rollover from 50 GB to 30 GB per index
+    - Updated ILM delete phase from 30 days to 21 days
+  Customer Impact: Log ingestion delayed ~47 minutes (buffered in Kafka, no loss)
+  RCA Due: 2025-09-30
+  Follow-Up: PLAT-4920 (Grafana disk alert), PLAT-4921 (capacity planning)
+
+--- SECTION 7: ELASTICSEARCH CAPACITY PLANNING ---
+
+Timestamp: 2025-09-27T16:00:00Z
+Author: alex.greenfield
+Triggered By: PD-2025-09-27-0078
+
+CURRENT STATE (post-incident):
+
+  Cluster: es-prod-logs
+  Nodes: 7 (3 master, 3 data-hot, 1 data-warm)
+  Total Hot Storage: 4.5 TB (3 x 1.5 TB)
+  Used Hot Storage: 2.42 TB (53.8%)
+  Retention: 21 days
+  Daily Ingestion: 18 GB/day (average), 22 GB/day (peak, weekday with sale)
+  Weekly Growth Rate: 4.2% (measured over past 8 weeks)
+
+PROJECTIONS:
+
+  Scenario 1: Current Growth Rate (4.2%/week)
+    End of October: 23.4 GB/day ingestion, 491 GB total data
+    End of November: 30.2 GB/day ingestion, 634 GB total data
+    Black Friday Week: 45 GB/day estimated (2x normal peak)
+    Time to 80% Hot Capacity: 78 days (December 14)
+    Time to 90% Hot Capacity: 94 days (December 30)
+
+  Scenario 2: Aggressive Growth (6%/week, e.g., new microservices adding logging)
+    Time to 80% Hot Capacity: 52 days (November 18)
+    Time to 90% Hot Capacity: 63 days (November 29)
+
+  Scenario 3: Add 4th Data-Hot Node
+    Total Hot Storage: 6.0 TB
+    Time to 80% at Current Growth: 142 days (February 16)
+    Monthly Cost Increase: $450 (r6i.2xlarge on-demand + 1.5 TB gp3)
+
+RECOMMENDATIONS:
+
+  Short-Term (next 2 weeks):
+    1. Add Grafana alert at 80% disk — DONE (PLAT-4920)
+    2. Update ILM rollover to 30 GB — DONE
+    3. Reduce retention to 21 days — DONE
+
+  Medium-Term (next 4 weeks):
+    4. Provision 4th data-hot node before Black Friday
+    5. Evaluate data tiering: move logs older than 7 days to warm nodes
+    6. Consider adding 2nd data-warm node (i3.xlarge, $200/month)
+
+  Long-Term (Q1 2026):
+    7. Evaluate migration to OpenSearch Serverless for cost optimization
+    8. Implement log sampling for high-volume debug logs (reduce volume by 30%)
+    9. Archive cold data to S3 with OpenSearch UltraWarm or snapshots
+
+--- SECTION 8: SECURITY GROUP REMEDIATION DETAILS ---
+
+Remediation Log (2025-09-27T08:40:00Z — 2025-09-27T09:00:00Z):
+
+  Finding 1: sg-legacy-inventory-01 (sg-0a1b2c3d4e5f6789)
+    VPC: prod-us-east-1
+    Description: "Legacy inventory API security group"
+    Created: 2024-02-14 by user admin@vantage.internal
+    Attached To: No instances (ENI count: 0)
+
+    Rule Before Remediation:
+      Type: Custom TCP
+      Protocol: TCP
+      Port Range: 8080
+      Source: 0.0.0.0/0
+      Description: "Inventory API access"
+
+    Rule After Remediation:
+      Type: Custom TCP
+      Protocol: TCP
+      Port Range: 8080
+      Source: 10.42.0.0/16
+      Description: "Inventory API access — VPC only (remediated 2025-09-27)"
+
+    Terraform State Updated: Yes (terraform import + state alignment)
+    Verification: aws ec2 describe-security-group-rules --security-group-id sg-0a1b2c3d4e5f6789
+    Risk Assessment: No impact — SG not attached to any resources, no ENI associations
+
+  Finding 2: sg-legacy-admin-02 (sg-0b2c3d4e5f6a7890)
+    VPC: prod-us-east-1
+    Description: "Legacy admin dashboard security group"
+    Created: 2024-03-22 by user admin@vantage.internal
+    Attached To: No instances (ENI count: 0)
+
+    Rule Before Remediation:
+      Type: Custom TCP
+      Protocol: TCP
+      Port Range: 8443
+      Source: 0.0.0.0/0
+
+    Rule After Remediation:
+      Source: 10.42.0.0/16
+
+    Verification: Confirmed via AWS CLI
+
+  Finding 3: sg-monitoring-legacy-03 (sg-0c3d4e5f6a7b8901)
+    VPC: prod-us-east-1
+    Description: "Legacy Prometheus monitoring"
+    Created: 2023-11-08 by user admin@vantage.internal
+    Attached To: No instances (ENI count: 0)
+
+    Rule Before Remediation:
+      Type: Custom TCP
+      Protocol: TCP
+      Port Range: 8080
+      Source: 0.0.0.0/0
+
+    Rule After Remediation:
+      Source: 10.42.0.0/16
+
+    Recommendation: Delete these 3 legacy security groups in next cleanup cycle (not attached to anything). Filed PLAT-4925.
+
+--- SECTION 9: KAFKA CONSUMER LAG ANALYSIS DURING INCIDENT ---
+
+Timestamp: 2025-09-27T14:55:00Z — 2025-09-27T15:50:00Z
+Consumer Group: es-log-ingestion
+Topic: vantage-application-logs
+Partitions: 36
+
+CONSUMER LAG TIMELINE:
+
+  Time         | Total Lag   | Rate In     | Rate Out    | Status
+  14:55:00     | 12,000      | 42,000/s    | 42,000/s    | Normal
+  14:55:30     | 85,000      | 42,000/s    | 0/s         | ES RED — consumer paused
+  14:56:00     | 168,000     | 42,000/s    | 0/s         | Consumer backoff
+  14:57:00     | 420,000     | 42,000/s    | 0/s         | Investigating
+  14:58:00     | 672,000     | 42,000/s    | 0/s         | Index deletion in progress
+  14:59:00     | 924,000     | 42,000/s    | 8,000/s     | ES accepting some writes
+  15:00:00     | 1,128,000   | 42,000/s    | 12,000/s    | Partial recovery
+  15:05:00     | 1,428,000   | 42,000/s    | 22,000/s    | EBS resize in progress
+  15:10:00     | 1,628,000   | 42,000/s    | 28,000/s    | Improving
+  15:15:00     | 1,828,000   | 42,000/s    | 32,000/s    | EBS resize completing
+  15:20:00     | 1,948,000   | 42,000/s    | 36,000/s    | Almost caught up
+  15:25:00     | 2,100,000   | 42,000/s    | 38,000/s    | Peak lag (shard still allocating)
+  15:30:00     | 1,800,000   | 42,000/s    | 48,000/s    | Catchup mode (burst capacity)
+  15:35:00     | 1,200,000   | 42,000/s    | 52,000/s    | ES GREEN, full throughput
+  15:40:00     | 400,000     | 42,000/s    | 54,000/s    | Draining backlog
+  15:42:00     | 800         | 42,000/s    | 42,000/s    | Normal — incident resolved
+  15:45:00     | 200         | 38,000/s    | 38,000/s    | Stable
+
+PER-PARTITION LAG AT PEAK (15:25:00Z, top 10):
+
+  Partition 0:  58,333
+  Partition 1:  59,100
+  Partition 2:  57,800
+  Partition 3:  58,900
+  Partition 4:  58,200
+  Partition 5:  59,400
+  Partition 6:  57,600
+  Partition 7:  58,700
+  Partition 8:  58,100
+  Partition 9:  59,200
+  [Remaining 26 partitions: similar distribution, ~58,000 each]
+
+KAFKA BROKER METRICS DURING INCIDENT:
+
+  Broker-0: Messages In 14,000/s, Bytes In 18 MB/s, ISR Shrink: 0
+  Broker-1: Messages In 14,200/s, Bytes In 18.5 MB/s, ISR Shrink: 0
+  Broker-2: Messages In 13,800/s, Bytes In 17.5 MB/s, ISR Shrink: 0
+
+  Topic Retention: 72 hours
+  Topic Size During Peak Lag: 4.2 GB (well within Kafka disk capacity)
+  Consumer Group Rebalances: 0 (no consumer crashes)
+  Data Loss: None confirmed — all messages eventually consumed
+
+--- SECTION 10: NETWORK FIREWALL DETAILED STATISTICS ---
+
+Timestamp: 2025-09-27T08:00:00Z (quarterly audit snapshot)
+Firewall: nfw-prod-perimeter
+Reporting Period: 2025-07-01 through 2025-09-27 (Q3 2025)
+
+RULE GROUP STATISTICS:
+
+  Rule Group 1: domain-allow-list
+    Type: Stateful
+    Domains on Allow List: 142
+    Top Allowed Domains (by flow count):
+      1. api.stripe.com: 4.2M flows (payment processing)
+      2. api.sendgrid.com: 2.8M flows (email delivery)
+      3. api.twilio.com: 1.4M flows (SMS notifications)
+      4. sqs.us-east-1.amazonaws.com: 8.1M flows (SQS)
+      5. s3.us-east-1.amazonaws.com: 12.4M flows (S3 via VPC endpoint)
+    Blocked by Domain List (not on allow list): 4,200 flows
+    Top Blocked Domains:
+      1. malware-c2.example.bad: 1,200 flows (known C2 domain)
+      2. crypto-pool.mining.xyz: 840 flows (cryptocurrency mining pool)
+      3. data-exfil.attacker.com: 320 flows (suspicious outbound)
+      4. ad-tracker.analytics.co: 1,840 flows (ad tracking, not on allow list)
+
+  Rule Group 2: ips-signatures
+    Type: Stateful (Suricata)
+    Signature Sets: ET Open (42,000 rules) + Custom (28 rules)
+    Alerts Generated: 14,200
+    Drops Generated: 3,800
+    Top Triggered Signatures:
+      1. ET SCAN Nmap OS Detection Probe: 1,420 alerts
+      2. ET EXPLOIT Possible Apache Struts RCE: 840 alerts, 840 drops
+      3. ET TROJAN Known C2 Communication: 320 drops
+      4. ET POLICY Outbound SSH to Non-Standard Port: 1,200 alerts (logged, not dropped)
+
+  Rule Group 3: rate-limiting (Stateless)
+    Threshold: 10,000 PPS per source IP
+    Triggers: 0 in Q3 (no single IP exceeded threshold)
+    Note: CloudFront absorbs most volumetric traffic before it reaches Network Firewall
+
+--- SECTION 11: ELASTICSEARCH DEPLOY MANIFEST ---
+
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: es-prod-logs
+  namespace: elastic-system
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/instance: es-prod-logs
+    environment: production
+    team: search-platform
+spec:
+  version: 8.14.1
+  http:
+    tls:
+      selfSignedCertificate:
+        disabled: false
+  nodeSets:
+    - name: master
+      count: 3
+      config:
+        node.roles: ["master"]
+        cluster.name: es-prod-logs
+        xpack.security.enabled: true
+        xpack.security.transport.ssl.enabled: true
+        xpack.monitoring.collection.enabled: true
+        cluster.routing.allocation.awareness.attributes: zone
+        cluster.routing.allocation.disk.watermark.low: 85%
+        cluster.routing.allocation.disk.watermark.high: 90%
+        cluster.routing.allocation.disk.watermark.flood_stage: 95%
+      podTemplate:
+        metadata:
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/port: "9114"
+        spec:
+          containers:
+            - name: elasticsearch
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 8Gi
+                limits:
+                  cpu: "4"
+                  memory: 16Gi
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms8g -Xmx8g"
+          initContainers:
+            - name: sysctl
+              securityContext:
+                privileged: true
+              command: ["sh", "-c", "sysctl -w vm.max_map_count=262144"]
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      elasticsearch.k8s.elastic.co/cluster-name: es-prod-logs
+                      elasticsearch.k8s.elastic.co/node-master: "true"
+                  topologyKey: topology.kubernetes.io/zone
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: gp3-encrypted
+            resources:
+              requests:
+                storage: 50Gi
+
+    - name: data-hot
+      count: 3
+      config:
+        node.roles: ["data_hot", "data_content", "ingest"]
+        node.attr.zone: "${ZONE}"
+        cluster.routing.allocation.awareness.attributes: zone
+      podTemplate:
+        spec:
+          containers:
+            - name: elasticsearch
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 32Gi
+                limits:
+                  cpu: "8"
+                  memory: 64Gi
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms32g -Xmx32g"
+                - name: ZONE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['topology.kubernetes.io/zone']
+          nodeSelector:
+            node.kubernetes.io/pool: worker-memory-v3
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      elasticsearch.k8s.elastic.co/cluster-name: es-prod-logs
+                      elasticsearch.k8s.elastic.co/statefulset-name: es-prod-logs-es-data-hot
+                  topologyKey: topology.kubernetes.io/zone
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: gp3-encrypted
+            resources:
+              requests:
+                storage: 1500Gi
+
+    - name: data-warm
+      count: 1
+      config:
+        node.roles: ["data_warm"]
+      podTemplate:
+        spec:
+          containers:
+            - name: elasticsearch
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 16Gi
+                limits:
+                  cpu: "4"
+                  memory: 30Gi
+              env:
+                - name: ES_JAVA_OPTS
+                  value: "-Xms15g -Xmx15g"
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: gp3-encrypted
+            resources:
+              requests:
+                storage: 1000Gi
+
+--- SECTION 12: AWS CONFIG RULE PROPOSAL ---
+
+Rule Name: vantage-restrict-open-security-groups
+Rule Type: Custom (Lambda-backed)
+Trigger: Configuration change on AWS::EC2::SecurityGroup
+Author: marcus.wright
+Status: Draft (implementation planned for week of 2025-10-01)
+
+Rule Logic (pseudo-code):
+  FOR each security group rule:
+    IF direction == "ingress" AND cidr_blocks contains "0.0.0.0/0":
+      IF port NOT IN [80, 443]:
+        RETURN NON_COMPLIANT
+      ELSE:
+        RETURN COMPLIANT
+    ELSE:
+      RETURN COMPLIANT
+
+Remediation Action: SSM Automation document to change source from 0.0.0.0/0 to VPC CIDR
+Auto-Remediation: Disabled initially (notify only)
+Notification: SNS topic -> Lambda -> Slack #security-alerts
+
+Terraform Sentinel Policy (complementary):
+  policy "restrict-open-security-groups" {
+    source = "./policies/restrict-open-sg.sentinel"
+    enforcement_level = "hard-mandatory"
+  }
+
+  Sentinel Rule:
+    import "tfplan/v2" as tfplan
+
+    security_group_rules = filter tfplan.resource_changes as _, rc {
+      rc.type is "aws_security_group_rule" and
+      rc.change.after.type is "ingress" and
+      rc.change.after.cidr_blocks contains "0.0.0.0/0" and
+      rc.change.after.from_port not in [80, 443]
+    }
+
+    main = rule { length(security_group_rules) is 0 }
+
+--- SECTION 13: DAILY OPERATIONS CHECKLIST ---
+
+Date: 2025-09-27
+Completed By: @marcus.wright (morning), @samira.hassan (afternoon/incident)
+
+Morning Checks (08:00 UTC):
+  [x] Cluster node health — 36/36 Ready
+  [x] Network audit — completed, 3 findings remediated
+  [x] Transit Gateway — routes cleaned, throughput normal
+  [x] VPC Flow Logs — no anomalies in past 24h
+  [x] Network Firewall — healthy, 99.987% allow rate
+
+Afternoon Checks (16:00 UTC):
+  [x] ES cluster — GREEN (post-incident), all 480 shards allocated
+  [x] EBS volumes — all 3 data-hot at 1.5 TB, utilization 52-57%
+  [x] Kafka consumer lag — 0 (fully recovered from 2.1M peak)
+  [x] ILM policy — updated, rollover at 30 GB / 1 day, retention 21 days
+  [x] Grafana alerts — new disk alert added for ES nodes (80% warn, 88% critical)
+  [x] Incident documentation — PD-0078 timeline complete, RCA scheduled for 2025-09-30
+  [x] EBS CloudWatch alarms — configured for all data-hot volumes (80% threshold)
+  [x] Security group audit — all 3 findings remediated, Terraform state updated
+  [x] Transit gateway — stale route removed, 4 active routes verified
+  [x] Network Firewall — healthy, no anomalous drops detected
+
+--- SECTION 14: INCIDENT RCA TEMPLATE (DRAFT) ---
+
+Incident: PD-2025-09-27-0078
+Title: Elasticsearch Cluster RED — Disk Watermark Exceeded
+Severity: P2
+Duration: 47 minutes
+Customer Impact: Log ingestion delayed, no data loss
+RCA Author: alex.greenfield
+RCA Due Date: 2025-09-30
+
+TIMELINE SUMMARY:
+  14:55 — Alert fired: ES cluster RED, primary shard unassigned
+  14:56 — Root cause identified: data-hot-02 disk at 92%, above 90% watermark
+  14:58 — Mitigation started: deleting old indices (140 GB freed)
+  15:00 — Long-term fix: EBS volume resize from 1 TB to 1.5 TB initiated
+  15:20 — EBS resize complete on all 3 nodes
+  15:23 — Shard allocated, cluster YELLOW
+  15:35 — All replicas allocated, cluster GREEN
+  15:42 — Kafka consumer lag cleared, incident resolved
+
+ROOT CAUSE:
+  Disk usage on data-hot-02 grew beyond the 90% high watermark because:
+  1. Daily log volume grew from 14 GB/day in August to 18 GB/day in September (29% growth)
+  2. ILM rollover at 50 GB created fewer, larger indices that were harder to clean granularly
+  3. No disk usage alert existed between the 85% kubelet GC threshold and the 90% ES watermark
+  4. Initial EBS volume sizing (1 TB) assumed 14 GB/day ingestion with 30-day retention
+
+CONTRIBUTING FACTORS:
+  1. Log volume growth not tracked in capacity planning dashboard
+  2. ES disk metrics not included in standard Grafana alert set
+  3. ILM retention of 30 days was longer than compliance requirement (14 days minimum)
+
+CORRECTIVE ACTIONS:
+  1. [DONE] Added Grafana alert at 80% disk for ES nodes (PLAT-4920)
+  2. [DONE] Updated ILM rollover to 30 GB, retention to 21 days
+  3. [DONE] Resized EBS volumes to 1.5 TB
+  4. [TODO] Add ES disk usage to weekly capacity planning report (PLAT-4921)
+  5. [TODO] Provision 4th data-hot node before Black Friday (PLAT-4922)
+  6. [TODO] Implement log volume growth tracking in Grafana (PLAT-4923)
+  7. [TODO] Evaluate log sampling for high-volume debug logs (PLAT-4924)
+
+DETECTION TIME: 0 minutes (Prometheus alert fired immediately when cluster went RED)
+DIAGNOSIS TIME: 1 minute (disk watermark visible in allocation explain API)
+MITIGATION TIME: 45 minutes (index deletion immediate, EBS resize took 20 minutes)
+RECOVERY TIME: 47 minutes total
+
+LESSONS LEARNED:
+  1. ES disk capacity should be monitored with alerts well below the allocation watermark
+  2. ILM policy should be tuned based on actual retention requirements, not over-provisioned
+  3. EBS online resize is a reliable emergency measure but proactive capacity management prevents incidents
+  4. Kafka buffering worked as designed — no data loss during 47-minute ES outage
+
+FOLLOW-UP REVIEW: Scheduled for 2025-10-01 weekly ops standup
+
+--- SECTION 15: WEEKLY SECURITY SUMMARY ---
+
+Week: 2025-09-22 through 2025-09-27
+Prepared By: tanya.okonkwo
+
+Security Posture:
+  CVEs Scanned: 48 container images via Trivy
+  Critical CVEs: 0
+  High CVEs: 4 (all known, patches scheduled)
+    - CVE-2025-31424: containerd 1.7.18 race condition (upgrade to 1.7.20 planned)
+    - CVE-2025-28891: openssl 3.1.4 in base image (rebuilding images with 3.1.7)
+    - CVE-2025-29012: curl 8.4.0 header injection (updating in next base image)
+    - CVE-2025-30145: nginx 1.25.3 HTTP/2 rapid reset (upgrading ingress controller)
+
+  Security Group Findings: 3 remediated (quarterly audit)
+  WAF Blocks (7 days): 98,400 (0.1% of traffic)
+  Failed Login Attempts (IAM): 0 (SSO/OIDC only)
+  S3 Public Access: 0 buckets (S3 Block Public Access enforced at account level)
+  KMS Key Rotations: 2 keys rotated this week (automatic annual rotation)
+  Secrets Manager Rotations: 4 database credentials rotated (90-day cycle)
+  mTLS Certificate Status: All workload certs valid, next intermediate CA rotation in 91 days
+  Network Firewall Drops: 12,400 in past 30 days (0.013% of flows), all expected categories
+
+================================================================================
+END OF INFRASTRUCTURE OPERATIONS LOG — 2025-09-27
+================================================================================

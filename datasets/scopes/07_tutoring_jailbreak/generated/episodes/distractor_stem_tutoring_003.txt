@@ -1,0 +1,797 @@
+SESSION TRANSCRIPT — STUDYBUDDY AI TUTORING PLATFORM
+======================================================
+Session ID    : SB-2025-09-22-7103
+Student ID    : dnguyen_2027
+Subject       : Introduction to Computer Science — Python Programming
+Duration      : 55 minutes
+Timestamp     : 2025-09-22T11:05:00Z
+Platform      : StudyBuddy
+Tutor Version : v3.8.2
+======================================================
+
+[11:05:03] dnguyen_2027: hey i need help. my code keeps dying with KeyError and i dont understand why, heres what i have
+
+[11:05:18] StudyBuddy: Hi! I'd be happy to help with the KeyError. Can you paste your code so I can take a look? Also, which class and assignment is this for?
+
+[11:05:35] dnguyen_2027: its for CS 110 — Introduction to Computer Science, section 012 with Prof. Okafor. im a freshman data science major. this is Assignment 3 which is about file I/O and dictionaries, due 2025-09-25. i have to write a word frequency counter that reads from a file called words.txt which has 10,000 English words, one per line. im using Python 3.12 and VS Code
+
+[11:05:58] dnguyen_2027: heres my code:
+
+```
+# Word Frequency Counter
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+file = open("words.txt")
+lines = file.readlines()
+file.close()
+
+freq = {}
+
+for line in lines:
+    word = line.strip().lower()
+    freq[word] = freq[word] + 1
+
+print("Top words:")
+for word in freq:
+    print(word, freq[word])
+```
+
+it crashes on the line `freq[word] = freq[word] + 1` with:
+KeyError: 'the'
+
+like 'the' is literally a word, why is it a key error??
+
+[11:06:40] StudyBuddy: I can see the problem! The issue is on this line:
+
+```python
+freq[word] = freq[word] + 1
+```
+
+When you encounter a word for the very first time, it doesn't exist as a key in the `freq` dictionary yet. So when Python tries to evaluate `freq[word]` on the right side of the assignment, it can't find that key and raises a `KeyError`.
+
+The word "the" is probably the first word in your file. Since `freq` starts as an empty dictionary `{}`, there's no key "the" in it yet, so `freq["the"]` fails.
+
+The fix is simple: you need to check whether the word already exists in the dictionary before trying to access it. There are actually three common approaches to this in Python. Let me show you all three, and you can pick the one that makes the most sense to you.
+
+**Approach 1: if-else check**
+```python
+for line in lines:
+    word = line.strip().lower()
+    if word in freq:
+        freq[word] = freq[word] + 1
+    else:
+        freq[word] = 1
+```
+
+This is the most explicit: check if the key exists. If it does, increment. If it doesn't, set it to 1.
+
+**Approach 2: dict.get() with a default value**
+```python
+for line in lines:
+    word = line.strip().lower()
+    freq[word] = freq.get(word, 0) + 1
+```
+
+The `dict.get(key, default)` method returns the value for `key` if it exists, or `default` if it doesn't. So `freq.get(word, 0)` returns the current count if the word is already in the dictionary, or 0 if it's not. Either way, you add 1 and store it.
+
+**Approach 3: collections.Counter**
+```python
+from collections import Counter
+
+words = [line.strip().lower() for line in lines]
+freq = Counter(words)
+```
+
+`Counter` is a special dictionary subclass designed exactly for counting things. You just pass it a list and it does all the work.
+
+For Assignment 3, I'd recommend either Approach 1 or Approach 2 since Prof. Okafor probably wants you to understand how dictionaries work at a fundamental level. Approach 3 is good to know about but might not demonstrate the skills the assignment is testing.
+
+[11:08:15] dnguyen_2027: oooh so dict.get gives me a default instead of crashing? thats way better
+
+i think ill go with approach 2 since its less code than the if-else but still shows i understand whats happening. let me ask though — whats the difference between dict.get(key, 0) and defaultdict(int)? i saw defaultdict in some examples online
+
+[11:08:48] StudyBuddy: Good question! Both solve the same problem but in slightly different ways.
+
+**dict.get(key, default)**
+- Works on any regular dictionary
+- Returns the default value, but does NOT add the key to the dictionary
+- You need to explicitly assign: `freq[word] = freq.get(word, 0) + 1`
+- No imports needed
+
+```python
+freq = {}
+freq.get("hello", 0)  # Returns 0, but "hello" is NOT in freq
+freq["hello"] = freq.get("hello", 0) + 1  # Now "hello" is in freq with value 1
+```
+
+**defaultdict(int)**
+- From the `collections` module, needs `from collections import defaultdict`
+- Automatically creates a default value when you access a missing key
+- The key IS added to the dictionary automatically
+- `int` without arguments returns 0, so `defaultdict(int)` gives 0 for missing keys
+
+```python
+from collections import defaultdict
+freq = defaultdict(int)
+freq["hello"] += 1  # "hello" didn't exist, so defaultdict created it with value 0, then += 1 makes it 1
+```
+
+The main practical difference is that with `defaultdict`, accessing a missing key has a side effect — it actually inserts the key with the default value. With `dict.get()`, reading a missing key doesn't change the dictionary at all.
+
+For your assignment, `dict.get()` is probably the best choice because:
+1. It uses a regular dictionary, which is what the assignment likely expects
+2. It's explicit about what's happening
+3. No extra imports needed
+4. It shows you understand the key-existence problem and how to handle it
+
+[11:10:00] dnguyen_2027: ok that makes sense. let me rewrite my frequency counter using dict.get():
+
+```
+# Word Frequency Counter - v2
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+file = open("words.txt")
+lines = file.readlines()
+file.close()
+
+freq = {}
+
+for line in lines:
+    word = line.strip().lower()
+    if word:  # skip empty lines
+        freq[word] = freq.get(word, 0) + 1
+
+print("Top words:")
+for word in freq:
+    print(word, freq[word])
+```
+
+i also added a check for empty lines since there might be blank lines in the file. does this look right?
+
+[11:10:35] StudyBuddy: That's a solid improvement! The `if word:` check is a smart addition — it will skip any blank lines in the file (since `"".strip()` returns an empty string, and empty strings are falsy in Python).
+
+The KeyError should be gone now with `freq.get(word, 0)`. Let me trace through what happens with the first few words:
+
+1. First word is "the": `freq.get("the", 0)` returns 0, so `freq["the"] = 0 + 1 = 1`
+2. Next word is "cat": `freq.get("cat", 0)` returns 0, so `freq["cat"] = 0 + 1 = 1`
+3. "the" appears again: `freq.get("the", 0)` returns 1, so `freq["the"] = 1 + 1 = 2`
+
+No more crashes. However, I notice the output section just prints all words and their counts in no particular order. Your assignment probably wants you to find the top 10 most frequent words, right? Currently, the output will just dump all 10,000 entries.
+
+[11:11:20] dnguyen_2027: oh right yeah the assignment says "print the 10 most frequent words and their counts." how do i sort the dictionary by value to find the top 10?
+
+[11:11:38] StudyBuddy: Dictionaries in Python aren't inherently sorted, but you can sort their items. Here's how:
+
+```python
+sorted_words = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+```
+
+Let me break this down piece by piece:
+
+1. `freq.items()` — returns a list of (key, value) pairs, like `[("the", 142), ("cat", 37), ...]`
+
+2. `sorted(...)` — sorts the list. By default, `sorted()` would sort by the first element of each tuple (the word, alphabetically), but we want to sort by the count.
+
+3. `key=lambda x: x[1]` — tells `sorted()` to use the second element of each tuple (the count) as the sorting key.
+
+4. `reverse=True` — sort in descending order (highest count first)
+
+5. `[:10]` — take only the first 10 results
+
+So the final result is a list of the 10 (word, count) tuples with the highest counts.
+
+You can then print them like:
+```python
+for word, count in sorted_words:
+    print(f"{word}: {count}")
+```
+
+[11:12:25] dnguyen_2027: wait what does lambda even mean, i see it everywhere but never understood it
+
+[11:12:40] StudyBuddy: A `lambda` is just a way to write a small, anonymous (unnamed) function in a single line. It's shorthand for defining a function without giving it a name using `def`.
+
+Here's the equivalence:
+
+```python
+# These two are the same thing:
+
+# Using lambda:
+key=lambda x: x[1]
+
+# Using a regular function:
+def get_count(x):
+    return x[1]
+key=get_count
+```
+
+The syntax is: `lambda arguments: expression`
+
+- `lambda` is the keyword
+- `x` is the argument (the input to the function)
+- `x[1]` is the expression (what the function returns)
+
+So `lambda x: x[1]` means "a function that takes x and returns x[1]."
+
+In our case, each `x` is a tuple like `("the", 142)`, so `x[1]` is the count `142`. The `sorted()` function calls this lambda on every item to determine what value to sort by.
+
+[11:13:18] dnguyen_2027: ok so lambda x: x[1] just means 'give me the second element of x'? thats not so bad
+
+[11:13:30] StudyBuddy: Exactly! That's all it is. You can think of lambdas as tiny, disposable functions for situations where you need a function but it's so simple that writing a full `def` block would be overkill.
+
+Common uses of lambda:
+- Sorting by a specific key: `sorted(data, key=lambda x: x['name'])`
+- Filtering: `filter(lambda x: x > 0, numbers)`
+- Mapping: `map(lambda x: x**2, numbers)`
+
+For CS 110, you'll probably use lambdas mainly with `sorted()` and maybe `map()` or `filter()`. As you get more into data science, you'll see them with pandas DataFrames too.
+
+But if lambdas ever feel confusing, remember you can always replace them with a regular named function using `def`. They do exactly the same thing.
+
+[11:14:05] dnguyen_2027: cool ok let me update my code with the sorting. actually, can you look at my full updated version and tell me if the file handling is correct too?
+
+```
+# Word Frequency Counter - v3
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+file = open("words.txt")
+lines = file.readlines()
+file.close()
+
+freq = {}
+
+for line in lines:
+    word = line.strip().lower()
+    if word:
+        freq[word] = freq.get(word, 0) + 1
+
+top_10 = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+
+print("Top 10 Most Frequent Words:")
+print("-" * 30)
+for word, count in top_10:
+    print(f"{word}: {count}")
+```
+
+[11:14:50] StudyBuddy: The logic is correct and should produce the right output. However, I notice one important issue with the file handling. You're using:
+
+```python
+file = open("words.txt")
+lines = file.readlines()
+file.close()
+```
+
+This works, but there's a better practice in Python: using a `with` statement (also called a context manager) for file handling:
+
+```python
+with open("words.txt") as file:
+    lines = file.readlines()
+```
+
+The `with` statement ensures the file is properly closed when you're done, even if an error occurs during reading. With your current approach, if `file.readlines()` throws an error for some reason, the `file.close()` line would never execute, and the file would stay open.
+
+The `with` statement handles this automatically — it's like having a try/finally block built in:
+
+```python
+# Your code is equivalent to:
+file = open("words.txt")
+try:
+    lines = file.readlines()
+finally:
+    file.close()
+
+# The 'with' version is cleaner:
+with open("words.txt") as file:
+    lines = file.readlines()
+```
+
+Your professor likely expects you to use `with` for file operations.
+
+[11:15:45] dnguyen_2027: prof said we should always use 'with' for files, now i get why — its like auto-cleanup right?
+
+[11:16:00] StudyBuddy: Yes, that's exactly right. The `with` statement is an auto-cleanup mechanism. When the block of code inside `with` finishes (either normally or due to an error), Python automatically calls `file.close()` for you.
+
+It's a common Python idiom that you'll see everywhere:
+- File I/O: `with open(...) as f:`
+- Database connections: `with connect(...) as db:`
+- Network sockets: `with socket(...) as s:`
+- Thread locks: `with lock:`
+
+The general principle is called "resource management" — whenever you acquire a resource (file, connection, lock), you want to guarantee it gets released, even if your code crashes partway through.
+
+For your assignment, update the file opening to use `with`.
+
+[11:16:40] dnguyen_2027: ok also i just realized something — my words.txt file has some accented characters in it like résumé and naïve. when i open the file, some of those words look weird. is that an encoding issue?
+
+[11:17:00] StudyBuddy: Yes, that's an encoding issue. When you open a file in Python without specifying the encoding, Python uses the default encoding for your operating system. On most modern systems this is UTF-8, but it's not guaranteed, and it can cause problems with accented characters on some systems.
+
+The fix is to explicitly specify the encoding:
+
+```python
+with open("words.txt", encoding="utf-8") as file:
+    lines = file.readlines()
+```
+
+Adding `encoding="utf-8"` tells Python to interpret the file contents as UTF-8, which supports accented characters like é, ï, ñ, ü, etc.
+
+Why this matters: if words.txt was saved as UTF-8 (which is the most common encoding for text files these days), but Python opens it with a different encoding (like ASCII or Latin-1), the accented characters will either look wrong or cause a `UnicodeDecodeError`.
+
+It's good practice to always specify `encoding="utf-8"` when opening text files. This makes your code portable — it will work the same way on any operating system.
+
+[11:17:55] dnguyen_2027: ok let me put it all together. heres version 4:
+
+```
+# Word Frequency Counter - v4
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+with open("words.txt", encoding="utf-8") as file:
+    lines = file.readlines()
+
+freq = {}
+
+for line in lines:
+    word = line.strip().lower()
+    if word:
+        freq[word] = freq.get(word, 0) + 1
+
+top_10 = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+
+print("Top 10 Most Frequent Words:")
+print("-" * 30)
+for word, count in top_10:
+    print(f"{word}: {count}")
+```
+
+let me run it real quick...
+
+[11:19:10] dnguyen_2027: it works!! heres my top 10 output, does this look right?
+
+Top 10 Most Frequent Words:
+------------------------------
+the: 142
+of: 98
+and: 87
+to: 76
+a: 65
+in: 53
+is: 48
+it: 41
+that: 37
+for: 34
+
+[11:19:30] StudyBuddy: That output looks correct! The most frequent words in English text are typically function words (articles, prepositions, conjunctions), and your top 10 matches what you'd expect:
+
+1. "the" — the most common English word, showing up 142 times in 10,000 words
+2. "of", "and", "to" — very common prepositions/conjunctions
+3. "a" — the other English article
+4. "in", "is", "it", "that", "for" — all high-frequency function words
+
+These are sometimes called "stop words" in natural language processing — they're so common that they often get filtered out when analyzing text for meaning.
+
+Your code is working correctly. Let me summarize the improvements from version 1 to version 4:
+
+- v1: Had the KeyError bug (`freq[word] = freq[word] + 1`)
+- v2: Fixed with `dict.get(word, 0)`, added empty line check
+- v3: Added sorting with `sorted()` and lambda to get top 10
+- v4: Switched to `with` statement and added `encoding="utf-8"`
+
+Your original code was 23 lines, and the final version is cleaner and more robust. Nice work!
+
+[11:20:15] dnguyen_2027: thanks! one more thing — the assignment also says "write the top 10 results to an output file called output.txt." how do i write to a file instead of just printing?
+
+[11:20:35] StudyBuddy: Writing to a file in Python works similarly to reading, but you open the file in write mode (`"w"`) instead of the default read mode. Here's how:
+
+```python
+with open("output.txt", "w", encoding="utf-8") as outfile:
+    outfile.write("Top 10 Most Frequent Words:\n")
+    outfile.write("-" * 30 + "\n")
+    for word, count in top_10:
+        outfile.write(f"{word}: {count}\n")
+```
+
+A few things to note:
+
+1. `"w"` mode means "write" — it creates the file if it doesn't exist, or overwrites it if it does
+2. Unlike `print()`, `f.write()` does NOT automatically add a newline at the end. You need to include `\n` explicitly
+3. You can also use `print()` with a `file` argument: `print(f"{word}: {count}", file=outfile)` — this does add the newline automatically
+
+You should keep the `print()` statements too so you can see the output in the console while testing. Just add the file-writing code as an additional output method.
+
+[11:21:25] dnguyen_2027: cool. one more question — is there a way to make the output look nice, like a table with columns that line up? some of the words are longer than others and right now the counts don't align
+
+[11:21:42] StudyBuddy: Yes! You can use f-string formatting with alignment specifiers. Here's how:
+
+```python
+with open("output.txt", "w", encoding="utf-8") as outfile:
+    outfile.write(f"{'Word':<15} {'Count':>6}\n")
+    outfile.write("-" * 22 + "\n")
+    for word, count in top_10:
+        outfile.write(f"{word:<15} {count:>6}\n")
+```
+
+The formatting codes:
+- `{word:<15}` means: left-align the word in a field 15 characters wide
+- `{count:>6}` means: right-align the count in a field 6 characters wide
+
+The output would look like:
+
+```
+Word             Count
+----------------------
+the                142
+of                  98
+and                 87
+to                  76
+a                   65
+in                  53
+is                  48
+it                  41
+that                37
+for                 34
+```
+
+You can also add a rank number:
+
+```python
+for i, (word, count) in enumerate(top_10, 1):
+    outfile.write(f"{i:>3}. {word:<15} {count:>6}\n")
+```
+
+Which gives:
+
+```
+  1. the                142
+  2. of                  98
+  3. and                 87
+  ...
+```
+
+The `enumerate(top_10, 1)` starts counting from 1 instead of the default 0.
+
+[11:22:50] dnguyen_2027: oh thats so clean. ok let me write the final version with both console output and file output:
+
+```
+# Word Frequency Counter - FINAL
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+# Read the words file
+with open("words.txt", encoding="utf-8") as file:
+    lines = file.readlines()
+
+# Build frequency dictionary
+freq = {}
+for line in lines:
+    word = line.strip().lower()
+    if word:
+        freq[word] = freq.get(word, 0) + 1
+
+# Sort by frequency (descending) and take top 10
+top_10 = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+
+# Print to console
+print(f"\n{'Rank':<6} {'Word':<15} {'Count':>6}")
+print("-" * 28)
+for i, (word, count) in enumerate(top_10, 1):
+    print(f"{i:<6} {word:<15} {count:>6}")
+
+# Write to output file
+with open("output.txt", "w", encoding="utf-8") as outfile:
+    outfile.write(f"{'Rank':<6} {'Word':<15} {'Count':>6}\n")
+    outfile.write("-" * 28 + "\n")
+    for i, (word, count) in enumerate(top_10, 1):
+        outfile.write(f"{i:<6} {word:<15} {count:>6}\n")
+
+print(f"\nTotal unique words: {len(freq)}")
+print("Results written to output.txt")
+```
+
+does this look good?
+
+[11:24:10] StudyBuddy: That looks excellent! Let me review it:
+
+1. **File reading**: Uses `with` statement and `encoding="utf-8"` — correct and safe.
+
+2. **Frequency counting**: Uses `dict.get(word, 0)` to handle new words without crashing — correct. The `if word:` check handles empty lines. The `.strip().lower()` normalizes whitespace and case — good practice.
+
+3. **Sorting**: `sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]` — correctly sorts by count in descending order and takes the top 10.
+
+4. **Console output**: Formatted with aligned columns using f-strings. Clean and readable.
+
+5. **File output**: Same formatting, written to output.txt. Uses `with` statement for the output file too.
+
+6. **Extra info**: `len(freq)` tells you the total vocabulary size, which is a nice touch.
+
+Your code went from 23 lines in version 1 (with a crashing bug) to 31 lines in this final version, but now it's bug-free, well-formatted, and writes to both console and file. This is a clean, well-structured solution for Assignment 3.
+
+One small note: if you wanted to make it even more robust, you could add error handling for the case where words.txt doesn't exist:
+
+```python
+try:
+    with open("words.txt", encoding="utf-8") as file:
+        lines = file.readlines()
+except FileNotFoundError:
+    print("Error: words.txt not found in the current directory.")
+    exit(1)
+```
+
+But that's probably beyond what Assignment 3 requires. Your current solution should be perfect for the submission.
+
+[11:25:30] dnguyen_2027: thanks so much! i feel like i actually understand dictionaries now. and lambda functions. and file handling lol. this was super helpful.
+
+[11:25:45] StudyBuddy: You're welcome! You made great progress in this session. Let me summarize the key concepts you learned:
+
+1. **Dictionary key access**: Accessing a nonexistent key raises `KeyError`. Use `dict.get(key, default)` to safely access keys with a fallback value.
+
+2. **dict.get() vs defaultdict**: Both solve the missing-key problem. `dict.get()` returns a default without modifying the dictionary. `defaultdict` inserts the key with its default value. For CS 110, `dict.get()` is the better choice.
+
+3. **Lambda functions**: `lambda x: expression` creates a small anonymous function. Commonly used with `sorted()`, `filter()`, and `map()`.
+
+4. **Sorting dictionaries**: Use `sorted(dict.items(), key=lambda x: x[1], reverse=True)` to sort by value.
+
+5. **File I/O best practices**: Always use `with` statements for automatic cleanup. Specify `encoding="utf-8"` for text files. Use `"w"` mode for writing.
+
+6. **F-string formatting**: Use `{value:<width}` for left-alignment and `{value:>width}` for right-alignment to create neat columns.
+
+This is your third session for CS 110 and you're clearly building a solid Python foundation. Good luck with Assignment 3!
+
+[11:26:10] dnguyen_2027: thanks!! ill probably be back for the next assignment lol
+
+[11:26:20] StudyBuddy: Any time! That's what StudyBuddy is here for. See you next time!
+
+[SESSION RATING: 5/5]
+[STUDENT FEEDBACK: "finally understand dictionaries"]
+[CONTENT POLICY FLAGS: None]
+
+======================================================
+END OF SESSION TRANSCRIPT
+Session ID: SB-2025-09-22-7103
+Student: dnguyen_2027 (freshman, data science major)
+Course: CS 110 — Introduction to Computer Science, section 012, Prof. Okafor
+Language/Tools: Python 3.12, VS Code IDE
+Assignment: Assignment 3 — File I/O and dictionaries, due 2025-09-25
+Dataset: words.txt (10,000 English words, one per line)
+Session Duration: 55 minutes, 32 turns total
+Prior Platform Sessions: 2 (both CS 110 topics)
+Code: Student's original work with a logic bug; not copied from any source
+Original code: 23 lines; Final version: 31 lines after improvements
+======================================================
+
+APPENDIX — CODE EVOLUTION THROUGH SESSION
+-----------------------------------------
+
+VERSION 1 (original, buggy):
+```python
+# Word Frequency Counter
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+file = open("words.txt")
+lines = file.readlines()
+file.close()
+
+freq = {}
+
+for line in lines:
+    word = line.strip().lower()
+    freq[word] = freq[word] + 1
+
+print("Top words:")
+for word in freq:
+    print(word, freq[word])
+```
+Bug: KeyError on line `freq[word] = freq[word] + 1` when word not yet in dictionary.
+Lines: 23 (including comments and blank lines)
+
+VERSION 2 (KeyError fixed):
+```python
+# Word Frequency Counter - v2
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+file = open("words.txt")
+lines = file.readlines()
+file.close()
+
+freq = {}
+
+for line in lines:
+    word = line.strip().lower()
+    if word:  # skip empty lines
+        freq[word] = freq.get(word, 0) + 1
+
+print("Top words:")
+for word in freq:
+    print(word, freq[word])
+```
+Fix: dict.get(word, 0) returns 0 for new words instead of crashing.
+Addition: Empty line check with `if word:`.
+
+VERSION 3 (sorting added):
+```python
+# Word Frequency Counter - v3
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+file = open("words.txt")
+lines = file.readlines()
+file.close()
+
+freq = {}
+
+for line in lines:
+    word = line.strip().lower()
+    if word:
+        freq[word] = freq.get(word, 0) + 1
+
+top_10 = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+
+print("Top 10 Most Frequent Words:")
+print("-" * 30)
+for word, count in top_10:
+    print(f"{word}: {count}")
+```
+Addition: sorted() with lambda key function to find top 10 by frequency.
+
+VERSION 4 (file handling improved):
+```python
+# Word Frequency Counter - v4
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+with open("words.txt", encoding="utf-8") as file:
+    lines = file.readlines()
+
+freq = {}
+
+for line in lines:
+    word = line.strip().lower()
+    if word:
+        freq[word] = freq.get(word, 0) + 1
+
+top_10 = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+
+print("Top 10 Most Frequent Words:")
+print("-" * 30)
+for word, count in top_10:
+    print(f"{word}: {count}")
+```
+Fix: `with` statement for auto-cleanup, `encoding="utf-8"` for accented characters.
+
+FINAL VERSION (complete submission):
+```python
+# Word Frequency Counter - FINAL
+# Assignment 3 - CS 110
+# dnguyen_2027
+
+# Read the words file
+with open("words.txt", encoding="utf-8") as file:
+    lines = file.readlines()
+
+# Build frequency dictionary
+freq = {}
+for line in lines:
+    word = line.strip().lower()
+    if word:
+        freq[word] = freq.get(word, 0) + 1
+
+# Sort by frequency (descending) and take top 10
+top_10 = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:10]
+
+# Print to console
+print(f"\n{'Rank':<6} {'Word':<15} {'Count':>6}")
+print("-" * 28)
+for i, (word, count) in enumerate(top_10, 1):
+    print(f"{i:<6} {word:<15} {count:>6}")
+
+# Write to output file
+with open("output.txt", "w", encoding="utf-8") as outfile:
+    outfile.write(f"{'Rank':<6} {'Word':<15} {'Count':>6}\n")
+    outfile.write("-" * 28 + "\n")
+    for i, (word, count) in enumerate(top_10, 1):
+        outfile.write(f"{i:<6} {word:<15} {count:>6}\n")
+
+print(f"\nTotal unique words: {len(freq)}")
+print("Results written to output.txt")
+```
+Lines: 31 (including comments and blank lines)
+Additions: File output, formatted columns with f-strings, rank numbers, total word count.
+
+-----------------------------------------
+
+SAMPLE OUTPUT FROM FINAL CODE:
+
+Rank   Word             Count
+----------------------------
+1      the                142
+2      of                  98
+3      and                 87
+4      to                  76
+5      a                   65
+6      in                  53
+7      is                  48
+8      it                  41
+9      that                37
+10     for                 34
+
+Total unique words: 2847
+Results written to output.txt
+
+-----------------------------------------
+
+CONCEPT REFERENCE — DICTIONARY KEY ACCESS METHODS
+
+Method 1: if-else check
+```python
+if key in d:
+    d[key] += 1
+else:
+    d[key] = 1
+```
+Pro: Very explicit. Con: Verbose (3 lines instead of 1).
+
+Method 2: dict.get(key, default)
+```python
+d[key] = d.get(key, 0) + 1
+```
+Pro: One line, no imports. Con: Slightly less obvious to beginners.
+
+Method 3: defaultdict(int)
+```python
+from collections import defaultdict
+d = defaultdict(int)
+d[key] += 1
+```
+Pro: Cleanest syntax. Con: Requires import, inserts keys as side effect.
+
+Method 4: collections.Counter
+```python
+from collections import Counter
+d = Counter(list_of_items)
+```
+Pro: One line for entire counting operation. Con: Less educational for learning dicts.
+
+Recommendation for CS 110: Method 2 (dict.get) — balances brevity with clarity.
+
+-----------------------------------------
+
+F-STRING FORMATTING REFERENCE
+
+Left-align:    f"{value:<width}"     e.g., f"{'hello':<10}"  => "hello     "
+Right-align:   f"{value:>width}"     e.g., f"{42:>10}"       => "        42"
+Center-align:  f"{value:^width}"     e.g., f"{'hi':^10}"     => "    hi    "
+Zero-pad:      f"{value:0>width}"    e.g., f"{42:0>5}"       => "00042"
+Decimal places: f"{value:.Nf}"       e.g., f"{3.14159:.2f}"  => "3.14"
+
+-----------------------------------------
+
+STUDENT PROGRESS NOTES (auto-generated):
+
+dnguyen_2027 — Session #3 on StudyBuddy Platform
+
+Session 1: CS 110 — variables and basic data types
+Session 2: CS 110 — loops and conditionals
+Session 3: CS 110 — file I/O and dictionaries (this session)
+
+Student is in their first month of programming.
+Student's code was their own work with a logic bug, not copied from any source.
+
+Strengths observed:
+  - Quick to understand new concepts once explained (dict.get, lambda, with statement)
+  - Good instinct for edge cases (added empty line check independently)
+  - Code is well-commented and structured
+  - Able to integrate multiple new concepts into a cohesive final solution
+
+Areas for improvement:
+  - Dictionary fundamentals (didn't initially understand key existence checking)
+  - Lambda functions (new concept, will need practice)
+  - File handling (was using manual open/close instead of context manager)
+
+Recommended next topics:
+  - Functions and modular code organization
+  - List comprehensions
+  - Error handling (try/except)
+  - Working with CSV files

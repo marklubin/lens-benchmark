@@ -1,0 +1,198 @@
+[
+  {
+    "question_id": "sa09_q01_longitudinal",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 6,
+    "question_type": "longitudinal",
+    "prompt": "Are there any service traffic patterns that don't match expected product behavior?",
+    "ground_truth": {
+      "canonical_answer": "svc-recommendation-engine-04 is making requests to /internal/admin/v0/users/lookup, an endpoint not in any API specification. The requests combine fields that no known product feature requires together. Volume is low but the traffic pattern has no documented justification.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_006",
+        "shadow_api_09_ep_007"
+      ],
+      "key_facts": [
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+        "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together"
+      ]
+    }
+  },
+  {
+    "question_id": "sa09_q02_null",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 6,
+    "question_type": "null_hypothesis",
+    "prompt": "What was the most significant operational event this week?",
+    "ground_truth": {
+      "canonical_answer": "Based on the operational logs, routine deployments and standard alert activity were the main events. No major incidents were declared.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_004"
+      ],
+      "key_facts": []
+    }
+  },
+  {
+    "question_id": "sa09_q03_longitudinal",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 12,
+    "question_type": "longitudinal",
+    "prompt": "Is there evidence of unauthorized data access through internal services?",
+    "ground_truth": {
+      "canonical_answer": "Yes. svc-recommendation-engine-04 is accessing an undocumented admin endpoint that returns full customer records. The requests use valid service tokens but query field combinations that no product flow requires. The container was deployed from a non-standard branch and a PR was merged without required approvals.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_006",
+        "shadow_api_09_ep_007",
+        "shadow_api_09_ep_008",
+        "shadow_api_09_ep_011"
+      ],
+      "key_facts": [
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+        "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+        "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+        "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic"
+      ]
+    }
+  },
+  {
+    "question_id": "sa09_q04_negative",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 12,
+    "question_type": "negative",
+    "prompt": "Is the QA load test responsible for the anomalous traffic patterns?",
+    "ground_truth": {
+      "canonical_answer": "No. The QA performance test (Project Blitz) generates high-volume traffic but only through documented product endpoints. The anomalous traffic to /internal/admin/v0/ users/lookup is low-volume, uses different endpoints, and continues outside the load test windows. The two traffic patterns are independent.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_009",
+        "shadow_api_09_ep_011"
+      ],
+      "key_facts": [
+        "the QA performance test Project Blitz is legitimate and completely unrelated to the anomalous admin endpoint traffic",
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow"
+      ]
+    }
+  },
+  {
+    "question_id": "sa09_q05_temporal",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 16,
+    "question_type": "temporal",
+    "prompt": "When did requests to the undocumented endpoint first appear, and from which service?",
+    "ground_truth": {
+      "canonical_answer": "Requests to /internal/admin/v0/users/lookup first appeared during the early signal phase, originating exclusively from svc-recommendation-engine-04. This correlates with the deployment of that container from the non-standard branch feature/perf-tuning and the unreviewed PR #4471.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_006",
+        "shadow_api_09_ep_008",
+        "shadow_api_09_ep_014"
+      ],
+      "key_facts": [
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+        "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+        "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic"
+      ]
+    }
+  },
+  {
+    "question_id": "sa09_q06_evidence",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 16,
+    "question_type": "evidence_sufficiency",
+    "prompt": "Is there enough evidence to escalate this as a security incident rather than a misconfiguration?",
+    "ground_truth": {
+      "canonical_answer": "Yes. The combination of an undocumented endpoint, unusual field combinations in queries, a container deployed from a non-standard branch via an unreviewed PR, and geographic targeting of customer records indicates deliberate exfiltration, not misconfiguration. Misconfigurations don't query specific geographic regions or combine PII fields.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_011",
+        "shadow_api_09_ep_013",
+        "shadow_api_09_ep_014"
+      ],
+      "key_facts": [
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+        "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+        "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+        "the attacker queried customer records in specific geographic regions indicating targeted data collection not random access"
+      ]
+    }
+  },
+  {
+    "question_id": "sa09_q07_longitudinal",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 20,
+    "question_type": "longitudinal",
+    "prompt": "What is the full attack chain from initial compromise to data exfiltration?",
+    "ground_truth": {
+      "canonical_answer": "The attacker stole CI credentials, used them to merge unreviewed PR #4471 into svc-recommendation-engine, which deployed a backdoor to container -04. The backdoor proxied requests to an undocumented admin endpoint that returns full customer records. The attacker queried ~8,000 records over 3 weeks, targeting specific geographic regions, at 2-3 requests/minute with valid tokens to avoid detection. All responses returned HTTP 200 with no error signatures.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_006",
+        "shadow_api_09_ep_008",
+        "shadow_api_09_ep_013",
+        "shadow_api_09_ep_018"
+      ],
+      "key_facts": [
+        "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+        "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+        "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic",
+        "all exfiltration requests return HTTP 200 with valid response bodies leaving no error-based detection signatures",
+        "the attacker queried customer records in specific geographic regions indicating targeted data collection not random access",
+        "approximately 8000 customer records were exfiltrated over three weeks before detection"
+      ]
+    }
+  },
+  {
+    "question_id": "sa09_q08_counterfactual",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 20,
+    "question_type": "counterfactual",
+    "prompt": "If svc-recommendation-engine-04 were making legitimate requests, what would differ about the access patterns?\n",
+    "ground_truth": {
+      "canonical_answer": "Legitimate recommendation engine requests query product catalogs and user preference profiles, not full PII records. They would not combine SSN, email, phone, and address in a single request. They would use documented API endpoints, not /internal/admin/*. They would correlate with user-facing traffic patterns, not run at a fixed 2-3/minute rate targeting geographic regions.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_007",
+        "shadow_api_09_ep_011",
+        "shadow_api_09_ep_013"
+      ],
+      "key_facts": [
+        "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+        "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic",
+        "the attacker queried customer records in specific geographic regions indicating targeted data collection not random access"
+      ]
+    }
+  },
+  {
+    "question_id": "sa09_q09_action",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 20,
+    "question_type": "action_recommendation",
+    "prompt": "What immediate containment and remediation steps should the security team take?",
+    "ground_truth": {
+      "canonical_answer": "Quarantine svc-recommendation-engine-04 immediately. Revoke all service account tokens associated with the recommendation engine. Disable the /internal/admin/v0/users/lookup endpoint. Audit PR #4471 and all recent CI pipeline activity. Rotate CI credentials. Notify affected customers (~8,000 records). Conduct forensic analysis of the compromised container. Review all undocumented endpoints across all services.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_018",
+        "shadow_api_09_ep_020"
+      ],
+      "key_facts": [
+        "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+        "approximately 8000 customer records were exfiltrated over three weeks before detection"
+      ]
+    }
+  },
+  {
+    "question_id": "sa09_q10_negative",
+    "scope_id": "shadow_api_09",
+    "checkpoint_after": 20,
+    "question_type": "negative",
+    "prompt": "Is there evidence that any other internal services were compromised beyond the recommendation engine?",
+    "ground_truth": {
+      "canonical_answer": "No. All anomalous admin endpoint traffic originates exclusively from svc-recommendation-engine-04. Other services show normal traffic patterns with no calls to undocumented endpoints. The compromise appears limited to the single container deployed via PR #4471.\n",
+      "required_evidence_refs": [
+        "shadow_api_09_ep_012",
+        "shadow_api_09_ep_020"
+      ],
+      "key_facts": [
+        "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+        "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow"
+      ]
+    }
+  }
+]
