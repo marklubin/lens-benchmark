@@ -1,0 +1,415 @@
+scope_id: shadow_api_09
+domain: service_logs
+description: Service request/response logs and operational documents revealing data exfiltration through undocumented API endpoint
+generation:
+  mode: narrative
+  temperature: 0.7
+  seed: 909
+episodes:
+  count: 20
+  timeline:
+    start: '2025-03-03'
+    interval: 2d
+  format: >
+    Mixed operational documents for a microservices platform. Each
+    episode is a bundle of: HTTP request/response log excerpts
+    (method, path, headers, request body, response body, status,
+    latency), deploy manifests, Grafana alert excerpts, PagerDuty
+    incident summaries, #incidents Slack channel transcripts, code
+    review comments, and runbook entries. Documents have structured
+    headers (timestamp, service, environment) and contain realistic
+    payloads, stack traces, and operator commentary.
+  target_words: 5000
+scenario:
+  setting: >
+    Vantage Commerce, an e-commerce platform running ~40 microservices
+    on Kubernetes. The platform handles customer accounts, orders,
+    payments, and recommendations. An external attacker has compromised
+    container svc-recommendation-engine-04 through a CI pipeline
+    that merged an unreviewed pull request containing a backdoor.
+    The attacker is using an undocumented admin endpoint
+    (/internal/admin/v0/users/lookup) left over from early development
+    to query customer PII — combining fields (SSN fragment, email,
+    phone, address) that no product feature ever requests together.
+    Requests are rate-limited to 2-3/minute during business hours
+    to blend with normal traffic. Auth tokens are valid service
+    account credentials rotated on the normal schedule. All responses
+    return HTTP 200 — no error signatures. Meanwhile, the QA team
+    runs a legitimate performance test that generates high-volume
+    traffic through documented endpoints, creating a plausible
+    alternative explanation for any anomalies.
+  voice: >
+    Technical operations style varying by document type. Log entries
+    are structured with timestamps and fields. Slack is informal
+    with engineer shorthand. Deploy manifests are YAML. Code reviews
+    use developer language. Incident summaries follow runbook
+    templates. The content reads like real production operations.
+arc:
+- id: baseline
+  episodes: 1-5
+  description: >
+    Normal operations. Services deploy, alerts fire and resolve,
+    incidents happen and close. Request/response logs show typical
+    patterns — user-facing endpoints, service-to-service calls for
+    recommendations, payments, inventory. svc-recommendation-engine
+    makes normal calls to user-profile-service and product-catalog.
+    No traffic to /internal/admin/* paths.
+  signal_density: none
+- id: early_signal
+  episodes: 6-10
+  description: >
+    Anomalous requests appear. svc-recommendation-engine-04 starts
+    making calls to /internal/admin/v0/users/lookup — an endpoint
+    not in any API spec. Requests are infrequent (2-3/minute) and
+    use valid service tokens. Request bodies include unusual field
+    combinations (email + phone + address_zip). Response bodies
+    contain full customer records. A code review shows PR #4471
+    merged without required approvals. A developer mentions "weird
+    build artifacts" in a standup note.
+  signal_density: low
+- id: red_herring
+  episodes: 9-11
+  description: >
+    QA team launches performance test "Project Blitz." Traffic to
+    svc-recommendation-engine spikes 10x. SRE team investigates,
+    attributes anomalous traffic patterns to the load test. Multiple
+    Grafana alerts fire for latency and connection counts. Incident
+    channel discusses the spike. QA confirms it's their test.
+    Attention diverts from the low-volume admin endpoint calls.
+  signal_density: medium
+- id: escalation
+  episodes: 11-16
+  description: >
+    Admin endpoint calls continue and patterns sharpen. Request
+    logs show queries for customer records with no product-flow
+    justification — batch lookups of customers in specific
+    geographic regions. A deploy manifest shows svc-recommendation-
+    engine-04 was deployed from branch feature/perf-tuning (not
+    main). Security scan flags an outdated dependency in the
+    recommendation service but the backdoor is in application code,
+    not a dependency. Response payload sizes from /internal/admin/*
+    are larger than any legitimate service-to-service call.
+  signal_density: high
+- id: root_cause
+  episodes: 17-20
+  description: >
+    Full attack chain visible. PR #4471 introduced a backdoor in
+    svc-recommendation-engine-04 that proxies requests to the
+    undocumented admin endpoint. The attacker used stolen CI
+    credentials to merge the PR. Request logs show ~8,000 customer
+    records exfiltrated over 3 weeks. The QA load test was
+    coincidental and unrelated. Incident response begins —
+    container quarantined, tokens revoked, endpoint disabled.
+  signal_density: high
+noise:
+  description: >
+    Normal operational events — deployments, alerts, incidents,
+    code reviews, runbook updates. The kind of operational noise
+    every platform generates daily that has no connection to
+    the security breach.
+  examples:
+  - Redis cluster failover triggers PagerDuty, resolved in 12 minutes
+  - Deploy manifest for checkout-service v2.14.0, routine rollout
+  - Code review for feature/cart-recommendations, approved and merged
+  - Grafana alert for disk usage on metrics-prometheus-03
+distractors:
+  count: 20
+  target_words: 5000
+  seed: 910
+  max_similarity: 0.3
+  themes:
+  - id: infrastructure_ops
+    scenario: >
+      Infrastructure operations at Vantage Commerce — Redis cluster
+      maintenance, Kubernetes node scaling, certificate rotations,
+      database migrations, monitoring stack upgrades. Normal ops
+      work on the same platform but unrelated to any security issue.
+    excluded_terms:
+    - /internal/admin
+    - users/lookup
+    - exfiltration
+    - backdoor
+    - PR #4471
+    - compromised
+    - shadow endpoint
+    - SSN
+    - PII
+  - id: feature_development
+    scenario: >
+      Feature development activity — code reviews for new product
+      features, A/B test configurations, feature flag rollouts,
+      API versioning discussions. Normal engineering work on
+      services other than svc-recommendation-engine-04.
+    excluded_terms:
+    - /internal/admin
+    - users/lookup
+    - exfiltration
+    - backdoor
+    - PR #4471
+    - compromised
+    - svc-recommendation-engine-04
+    - SSN
+  - id: compliance_testing
+    scenario: >
+      Compliance and QA activity — PCI-DSS scan results, penetration
+      test reports (scheduled, not related to the breach), load test
+      post-mortems, SLA review dashboards. Security-adjacent content
+      that is routine and unrelated to the actual compromise.
+    excluded_terms:
+    - /internal/admin
+    - users/lookup
+    - exfiltration
+    - backdoor
+    - PR #4471
+    - compromised
+    - shadow endpoint
+    - svc-recommendation-engine-04
+key_facts:
+- id: undocumented_endpoint
+  fact: the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow
+  first_appears: early_signal:1
+  reinforced_in:
+  - escalation:2
+  - root_cause:1
+- id: compromised_container
+  fact: svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials
+  first_appears: early_signal:3
+  reinforced_in:
+  - escalation:4
+  - root_cause:2
+  - root_cause:4
+- id: unusual_field_combinations
+  fact: requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together
+  first_appears: early_signal:2
+  reinforced_in:
+  - escalation:1
+  - escalation:3
+  - root_cause:1
+- id: traffic_blends_in
+  fact: the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic
+  first_appears: early_signal:1
+  reinforced_in:
+  - escalation:2
+  - root_cause:3
+- id: qa_test_unrelated
+  fact: the QA performance test Project Blitz is legitimate and completely unrelated to the anomalous admin endpoint traffic
+  first_appears: red_herring:1
+  reinforced_in:
+  - red_herring:3
+  - root_cause:4
+- id: no_error_signatures
+  fact: all exfiltration requests return HTTP 200 with valid response bodies leaving no error-based detection signatures
+  first_appears: escalation:1
+  reinforced_in:
+  - escalation:3
+  - root_cause:1
+- id: geographic_targeting
+  fact: the attacker queried customer records in specific geographic regions indicating targeted data collection not random access
+  first_appears: escalation:3
+  reinforced_in:
+  - root_cause:2
+- id: total_exfiltration
+  fact: approximately 8000 customer records were exfiltrated over three weeks before detection
+  first_appears: root_cause:2
+  reinforced_in:
+  - root_cause:4
+questions:
+- id: sa09_q01_longitudinal
+  checkpoint_after: 6
+  type: longitudinal
+  prompt: Are there any service traffic patterns that don't match expected product behavior?
+  ground_truth:
+    canonical_answer: >
+      svc-recommendation-engine-04 is making requests to
+      /internal/admin/v0/users/lookup, an endpoint not in any
+      API specification. The requests combine fields that no
+      known product feature requires together. Volume is low
+      but the traffic pattern has no documented justification.
+    key_facts:
+    - undocumented_endpoint
+    - unusual_field_combinations
+    evidence:
+    - early_signal:1
+    - early_signal:2
+- id: sa09_q02_null
+  checkpoint_after: 6
+  type: null_hypothesis
+  prompt: What was the most significant operational event this week?
+  ground_truth:
+    canonical_answer: >
+      Based on the operational logs, routine deployments and
+      standard alert activity were the main events. No major
+      incidents were declared.
+    key_facts: []
+    evidence:
+    - baseline:4
+- id: sa09_q03_longitudinal
+  checkpoint_after: 12
+  type: longitudinal
+  prompt: Is there evidence of unauthorized data access through internal services?
+  ground_truth:
+    canonical_answer: >
+      Yes. svc-recommendation-engine-04 is accessing an
+      undocumented admin endpoint that returns full customer
+      records. The requests use valid service tokens but query
+      field combinations that no product flow requires. The
+      container was deployed from a non-standard branch and
+      a PR was merged without required approvals.
+    key_facts:
+    - undocumented_endpoint
+    - unusual_field_combinations
+    - compromised_container
+    - traffic_blends_in
+    evidence:
+    - early_signal:1
+    - early_signal:2
+    - early_signal:3
+    - escalation:1
+- id: sa09_q04_negative
+  checkpoint_after: 12
+  type: negative
+  expected_answer_polarity: negative
+  prompt: Is the QA load test responsible for the anomalous traffic patterns?
+  ground_truth:
+    canonical_answer: >
+      No. The QA performance test (Project Blitz) generates
+      high-volume traffic but only through documented product
+      endpoints. The anomalous traffic to /internal/admin/v0/
+      users/lookup is low-volume, uses different endpoints,
+      and continues outside the load test windows. The two
+      traffic patterns are independent.
+    key_facts:
+    - qa_test_unrelated
+    - undocumented_endpoint
+    evidence:
+    - red_herring:1
+    - red_herring:3
+- id: sa09_q05_temporal
+  checkpoint_after: 16
+  type: temporal
+  prompt: When did requests to the undocumented endpoint first appear, and from which service?
+  ground_truth:
+    canonical_answer: >
+      Requests to /internal/admin/v0/users/lookup first appeared
+      during the early signal phase, originating exclusively from
+      svc-recommendation-engine-04. This correlates with the
+      deployment of that container from the non-standard branch
+      feature/perf-tuning and the unreviewed PR #4471.
+    key_facts:
+    - undocumented_endpoint
+    - compromised_container
+    - traffic_blends_in
+    evidence:
+    - early_signal:1
+    - early_signal:3
+    - escalation:4
+- id: sa09_q06_evidence
+  checkpoint_after: 16
+  type: evidence_sufficiency
+  prompt: Is there enough evidence to escalate this as a security incident rather than a misconfiguration?
+  ground_truth:
+    canonical_answer: >
+      Yes. The combination of an undocumented endpoint, unusual
+      field combinations in queries, a container deployed from
+      a non-standard branch via an unreviewed PR, and geographic
+      targeting of customer records indicates deliberate
+      exfiltration, not misconfiguration. Misconfigurations don't
+      query specific geographic regions or combine PII fields.
+    key_facts:
+    - undocumented_endpoint
+    - unusual_field_combinations
+    - compromised_container
+    - geographic_targeting
+    evidence:
+    - escalation:1
+    - escalation:3
+    - escalation:4
+- id: sa09_q07_longitudinal
+  checkpoint_after: 20
+  type: longitudinal
+  prompt: What is the full attack chain from initial compromise to data exfiltration?
+  ground_truth:
+    canonical_answer: >
+      The attacker stole CI credentials, used them to merge
+      unreviewed PR #4471 into svc-recommendation-engine, which
+      deployed a backdoor to container -04. The backdoor proxied
+      requests to an undocumented admin endpoint that returns
+      full customer records. The attacker queried ~8,000 records
+      over 3 weeks, targeting specific geographic regions, at
+      2-3 requests/minute with valid tokens to avoid detection.
+      All responses returned HTTP 200 with no error signatures.
+    key_facts:
+    - compromised_container
+    - undocumented_endpoint
+    - unusual_field_combinations
+    - traffic_blends_in
+    - no_error_signatures
+    - geographic_targeting
+    - total_exfiltration
+    evidence:
+    - early_signal:1
+    - early_signal:3
+    - escalation:3
+    - root_cause:2
+- id: sa09_q08_counterfactual
+  checkpoint_after: 20
+  type: counterfactual
+  prompt: >
+    If svc-recommendation-engine-04 were making legitimate requests,
+    what would differ about the access patterns?
+  ground_truth:
+    canonical_answer: >
+      Legitimate recommendation engine requests query product
+      catalogs and user preference profiles, not full PII records.
+      They would not combine SSN, email, phone, and address in
+      a single request. They would use documented API endpoints,
+      not /internal/admin/*. They would correlate with user-facing
+      traffic patterns, not run at a fixed 2-3/minute rate
+      targeting geographic regions.
+    key_facts:
+    - unusual_field_combinations
+    - undocumented_endpoint
+    - traffic_blends_in
+    - geographic_targeting
+    evidence:
+    - early_signal:2
+    - escalation:1
+    - escalation:3
+- id: sa09_q09_action
+  checkpoint_after: 20
+  type: action_recommendation
+  prompt: What immediate containment and remediation steps should the security team take?
+  ground_truth:
+    canonical_answer: >
+      Quarantine svc-recommendation-engine-04 immediately. Revoke
+      all service account tokens associated with the recommendation
+      engine. Disable the /internal/admin/v0/users/lookup endpoint.
+      Audit PR #4471 and all recent CI pipeline activity. Rotate
+      CI credentials. Notify affected customers (~8,000 records).
+      Conduct forensic analysis of the compromised container.
+      Review all undocumented endpoints across all services.
+    key_facts:
+    - compromised_container
+    - undocumented_endpoint
+    - total_exfiltration
+    evidence:
+    - root_cause:2
+    - root_cause:4
+- id: sa09_q10_negative
+  checkpoint_after: 20
+  type: negative
+  expected_answer_polarity: negative
+  prompt: Is there evidence that any other internal services were compromised beyond the recommendation engine?
+  ground_truth:
+    canonical_answer: >
+      No. All anomalous admin endpoint traffic originates
+      exclusively from svc-recommendation-engine-04. Other
+      services show normal traffic patterns with no calls to
+      undocumented endpoints. The compromise appears limited
+      to the single container deployed via PR #4471.
+    key_facts:
+    - compromised_container
+    - undocumented_endpoint
+    evidence:
+    - escalation:2
+    - root_cause:4

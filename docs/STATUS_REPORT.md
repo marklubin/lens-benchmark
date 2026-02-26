@@ -1,11 +1,11 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-24 (session 24)
+**Last Updated**: 2026-02-25 (session 25)
 **Scoring Pipeline**: v3.2 (naive baseline advantage replaces longitudinal_advantage, per-question timing)
 **Agent LLM**: GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI) / Qwen3-32B (RunPod vLLM)
 **Judge LLM**: GPT-OSS-120B (Cerebras, session 23) / Qwen3-235B-A22B (Together AI, prior sessions)
 **Token Cap**: 32,768 (standard) / 16,384 (constrained-16k) / 8,192 (constrained-8k) / 4,096 (constrained-4k) / 2,048 (constrained-2k)
-**Dataset**: 6 scopes, 144 questions, 720 signal episodes + 540 distractor episodes (120 per scope with distractors)
+**Dataset**: 6 numeric scopes (01-06) + 3 narrative scopes (07-09, episodes pending generation), 144+30 questions, 720+60 signal episodes + 540+60 distractor episodes planned
 **Unit Tests**: 991 passing
 **Adapters Under Evaluation**: 8 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti). ~~hindsight~~ removed — see session 19 notes.
 **Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + 12 Phase 3 runs + **90 Phase 5 runs scored (of 96 attempted)**
@@ -849,11 +849,15 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 ### Immediate
 
-1. **Write the paper** — All experimental data is in hand: 90 scored Phase 5 runs, bootstrap CIs, Wilcoxon tests, Kendall's W, judge reliability audit, publication-ready figures and LaTeX tables, qualitative theory of failure. Phase F of the publication plan.
+1. **Generate narrative scope episodes** — 3 spec.yaml files (07, 08, 09) are created and validated. Generation framework (`scripts/narrative_prompts.py`, `scripts/assemble_narrative_dataset.py`) is ready. Next: use Claude Code multi-agent to run planner→renderer pipeline for each scope (20 signal + 20 distractor episodes per scope, ~5,000 words each). Then validate (contamination <40%, naive baseline <50%, key fact hit rate >90%).
 
-2. **Graphiti runs abandoned** — 6/12 graphiti runs (scopes 03-05) failed repeatedly (FalkorDB crashes, Cerebras 402, embed proxy failures, Together AI connection errors). Declared done — graphiti results based on 6/12 (scopes 01, 02, 06). This is a meaningful result in itself: graph-based entity extraction does not scale reliably to 120-episode corpora with remote LLM APIs.
+2. **Run narrative scope benchmarks** — 30 config files ready (5 adapters × 3 scopes × 2 budgets). After episode generation + validation, run benchmark sweep. Expect different ranking patterns: knowledge graph systems (cognee, graphiti) should benefit from entity extraction over prose; BM25+embedding may struggle with entity co-occurrence that doesn't share keywords.
 
-3. **Remaining nice-to-have**: Constrained budget runs (4k/2k) with 120-episode distractor datasets, additional adapters (Zep, LangChain, LlamaIndex), human baseline study.
+3. **Write the paper** — All numeric experimental data is in hand: 90 scored Phase 5 runs, bootstrap CIs, Wilcoxon tests, Kendall's W, judge reliability audit, publication-ready figures and LaTeX tables, qualitative theory of failure. Narrative scope results will add structured-vs-narrative comparison.
+
+4. **Graphiti runs abandoned** — 6/12 graphiti runs (scopes 03-05) failed repeatedly. Declared done — graphiti results based on 6/12 (scopes 01, 02, 06).
+
+5. **Remaining nice-to-have**: Constrained budget runs (4k/2k) with distractors, additional adapters (Zep, LangChain, LlamaIndex), human baseline study.
 
 ### Previously Completed
 
@@ -912,6 +916,7 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-02-25 | Narrative scope design (session 25) | **Dataset redesign**: Keeping scope 06 (market regime) as sole numeric exemplar, deprecating scopes 02-05. Designed 3 new narrative scopes: **07 (AI Tutoring Jailbreak)** — user/assistant chat logs, student progressively escalates from legit tutoring to academic fraud; **08 (Corporate Acquisition)** — bundles of corporate documents (board minutes, Slack, emails, legal memos), CEO secretly orchestrating company sale; **09 (Shadow API Abuse)** — system logs, HTTP request/response, incident channel transcripts, attacker exploiting undocumented admin endpoint. Each scope: 20 signal + 20 distractor episodes, ~5,000 words each (~280K tokens total, multi-context-window). Created 3 spec.yaml files (validated), `scripts/narrative_prompts.py` (planner/renderer prompt builders for Claude Code multi-agent generation), `scripts/assemble_narrative_dataset.py` (assembler), 30 run configs (5 adapters × 3 scopes × 2 budgets). Generation deferred to next session. |
 | 2026-02-24 | Qualitative failure theory (session 24) | Traced actual agent transcripts across all 8 systems to build theory of WHY complex memory architectures underperform. **The Lossy Abstraction Trap**: every architecture that preprocesses evidence (summarization, entity extraction, memory consolidation, vector embedding) destroys exactly the fine-grained numeric evidence longitudinal synthesis requires. Ground-truth head-to-head on Q3 (chromium source): chunked-hybrid finds "discharge pipe at RM 18.6" via BM25 keyword match; cognee returns empty (field note not in graph); mem0 misidentifies source station (semantic drift); letta-sleepy empty (search thrashing); compaction sees early-day patterns but lost ep_025. Empty answer rates: chunked-hybrid 17%, cognee 38%, mem0 33%, letta 50%, letta-sleepy 42%, compaction 42%. Wrote `results/FAILURE_THEORY.md` (443 lines) and updated `results/PHASE5_ANALYSIS.md`. Graphiti runs declared done (6/12, infrastructure failure). Cerebras credits exhausted. |
 | 2026-02-23 | Phase 5 completion + analysis (session 23) | **90/96 runs scored** (was 53). Fixed cognee (SQLite WAL mode + busy_timeout=60s for concurrent writes), letta/letta-sleepy (removed serial group constraint, bumped ingest_max_latency_ms 200→2000, all 8 runs parallelized in ~10 min), graphiti (FalkorDB MAX_QUEUED_QUERIES=500 + TIMEOUT=30s, semaphore 8→3, internal timeout 60→180s/episode — scopes 01,02,06 succeeded, 03-05 still timeout). Migrated remaining Together AI references to Cerebras in orchestrator. Full statistical analysis: Kendall's W=0.755 (strong concordance), 12/28 pairwise significant, budget effect p=0.016. Judge reliability audit: 7,652 calls, A/(A+B)=0.451 (minimal position bias), cognee 100% TIE rate (judge failure). Generated 5 publication figures + 2 LaTeX tables. **Key result**: sqlite-chunked-hybrid 0.473 beats all complex memory architectures. No adapter exceeds 0.50 composite. |
 | 2026-02-23 | Heavy adapter fixes (session 22) | Diagnosed root causes for cognee (0/12), letta (4/12), graphiti (1/12) Phase 5 failures using multi-agent codebase analysis. **Cognee**: sequential `add()` × 120 episodes → timeout; fixed with batch `add(data=[texts], data_per_batch=20)`. **Letta**: httpx 60s timeout + slow Together AI; fixed with 300s timeout + route internal LLM to Cerebras (`cerebras/gpt-oss-120b`). **Graphiti**: underscores in distractor entity names → RediSearch syntax error; fixed with monkey-patch escaping `_-\|()~` in group_id filters. Updated orchestrator to auto-route Letta to Cerebras in Phase 5. 991 tests passing. |
