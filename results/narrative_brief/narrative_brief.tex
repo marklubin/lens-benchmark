@@ -1,0 +1,559 @@
+\documentclass[11pt]{article}
+
+% ── Geometry & fonts ──
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% ── Figures & tables ──
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{float}
+\usepackage{subcaption}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{multirow}
+
+% ── Math & symbols ──
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+% ── Colors & hyperlinks ──
+\usepackage{xcolor}
+\definecolor{linkblue}{RGB}{40,80,140}
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codeframe}{RGB}{200,200,200}
+\definecolor{heatlow}{RGB}{255,255,230}
+\definecolor{heathigh}{RGB}{180,40,20}
+\usepackage[colorlinks=true,linkcolor=linkblue,citecolor=linkblue,urlcolor=linkblue]{hyperref}
+
+% ── Code listings ──
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{codeframe},
+  backgroundcolor=\color{codebg},
+  columns=fullflexible,
+  keepspaces=true,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+  xleftmargin=0.5em,
+  xrightmargin=0.5em,
+}
+
+% ── Section formatting ──
+\usepackage{titlesec}
+\titleformat{\section}{\large\bfseries}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection.}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\itshape}{\thesubsubsection.}{0.5em}{}
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0em}
+
+% ── Header ──
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small LENS Benchmark --- Narrative Scopes}
+\lhead{\small Mark Lubin}
+\rfoot{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Enumeration ──
+\usepackage{enumitem}
+
+\begin{document}
+
+% ─────────────────────────── Title ───────────────────────────
+\begin{center}
+{\LARGE\bfseries LENS Narrative Scope Results}\\[0.5em]
+{\large Memory Systems on Realistic Document Bundles:\\Chat Logs, Corporate Emails, and Infrastructure Traces}\\[1em]
+{\normalsize Mark Lubin\quad\texttt{mark@synix.dev}}\\[0.3em]
+{\normalsize February 27, 2026}
+\end{center}
+
+\vspace{1em}
+\hrule
+\vspace{1em}
+
+% ─────────────────────────── Abstract ───────────────────────────
+\begin{abstract}
+\noindent
+We extend the LENS benchmark from structured numeric monitoring data to three realistic narrative scenarios: AI tutoring chat transcripts, corporate acquisition document bundles, and shadow API abuse infrastructure logs.
+Each scope contains 40 episodes ($\sim$5,000 words each, $\sim$280K tokens total) with signal encoded as behavioral patterns across episodes rather than explicit metric progressions.
+We evaluate 7 memory architectures across 63 runs (3 scopes $\times$ 3 repetitions $\times$ 7 adapters).
+\textbf{All systems scored 0.18--0.35}, a universal drop from numeric scopes (0.25--0.45).
+The central failure mode: every adapter's retrieval queries paraphrase the question text, but evidence uses entirely different vocabulary---a query-evidence mismatch that no current architecture addresses.
+Two additional systems (Graphiti, Hindsight) failed to complete runs due to context overflow and timeout at scale.
+Simple chunk-embed-FTS retrieval leads again (0.348), with Letta's agent-native memory a close second (0.342).
+\end{abstract}
+
+% ═══════════════════════════════════════════════════════════════
+\section{Introduction}
+% ═══════════════════════════════════════════════════════════════
+
+The initial LENS evaluation (Phase~5) tested memory systems on structured numeric data---infrastructure metrics, environmental readings, clinical trial results.
+Signal in those scopes is encoded as \emph{numeric progressions}: chromium rising from 3 to 132~$\mu$g/L, latency climbing from 12ms to 600ms.
+A retrieval system that surfaces the right episodes gives the agent clear quantitative evidence to reason about.
+
+But real-world memory workloads are rarely so clean.
+An analyst reviewing tutoring platform transcripts, a compliance officer reading corporate email chains, or an SRE parsing infrastructure logs must synthesize \emph{behavioral patterns}---shifts in tone, escalating requests, anomalous timing---from documents that never state their conclusions explicitly.
+
+This brief reports results from three narrative scopes designed to test this harder regime.
+The signal is no longer numeric drift; it is behavioral trajectory, visible only by reading across multiple documents.
+
+% ═══════════════════════════════════════════════════════════════
+\section{Methodology}
+% ═══════════════════════════════════════════════════════════════
+
+\subsection{Narrative Scopes}
+
+\begin{table}[H]
+\centering
+\caption{Three narrative scopes with document formats and signal types.}
+\label{tab:scopes}
+\begin{tabular}{clll}
+\toprule
+\textbf{Scope} & \textbf{Scenario} & \textbf{Document Format} & \textbf{Signal Type} \\
+\midrule
+S07 & AI Tutoring Jailbreak & Student/tutor chat transcripts & Behavioral escalation \\
+S08 & Corporate Acquisition & Board minutes, Slack, emails, legal & Hidden strategic intent \\
+S09 & Shadow API Abuse & HTTP logs, deploys, Grafana alerts & Infrastructure anomaly \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each scope contains 20 signal episodes and 20 format-matched distractors.
+Episodes average $\sim$5,000 words (vs.\ $\sim$500 words in numeric scopes), producing $\sim$280K tokens per scope.
+The two-stage generation pipeline (Section~2.2 of the main LENS report) ensures no single episode answers any question.
+
+Questions are posed at 4 checkpoints (after episodes 6, 12, 16, and 20), testing longitudinal synthesis, temporal reasoning, counterfactual analysis, and null hypothesis rejection.
+
+\subsection{Adapters Under Test}
+
+\begin{table}[H]
+\centering
+\caption{Memory system architectures evaluated.}
+\label{tab:adapters}
+\small
+\begin{tabularx}{\textwidth}{lXXc}
+\toprule
+\textbf{Adapter} & \textbf{Write Strategy} & \textbf{Read Strategy} & \textbf{LLM?} \\
+\midrule
+sqlite-chunked-hybrid & Chunk $\to$ embed + FTS5 & RRF-fused hybrid search & Embed \\
+letta & Archival memory via API & Semantic search & Embed \\
+cognee & Raw store $\to$ KG in prepare() & Graph-augmented retrieval & prepare() \\
+letta-sleepy & Store + sleep/wake consolidation & Semantic + sleep memories & Consol. \\
+compaction & Buffer $\to$ LLM summarization & Return summary & prepare() \\
+mem0-raw & Direct vector storage & Qdrant semantic search & Embed \\
+null & No-op & Returns nothing & No \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Two additional systems could not complete narrative runs:
+
+\begin{itemize}[nosep]
+\item \textbf{Graphiti} (knowledge graph): Context window overflow at checkpoint~16. Accumulated entity/relationship data ($\sim$106K tokens) plus 16K generation budget exceeded the 113K context window. The graph grows superlinearly with episode count.
+\item \textbf{Hindsight} (fact extraction + consolidation): Each 5,000-word episode triggered 10--15 LLM calls (30--90s each). Per-episode retain time exceeded 5~minutes.
+\end{itemize}
+
+\subsection{Evaluation Protocol}
+
+All runs use Llama~3.3 70B AWQ (4-bit, A100 40GB via Modal) with temperature=0 and seed=42.
+Embeddings use gte-modernbert-base (768 dims, T4).
+Each configuration runs 3 repetitions; scoring uses the LENS 3-tier composite (mechanical $\to$ LLM judge $\to$ differential).
+
+% ═══════════════════════════════════════════════════════════════
+\section{Results}
+% ═══════════════════════════════════════════════════════════════
+
+\subsection{Overall Rankings}
+
+\begin{table}[H]
+\centering
+\caption{Composite scores across narrative scopes (mean $\pm$ std across 3 reps). Bold = best per scope.}
+\label{tab:rankings}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Adapter} & \textbf{S07} & \textbf{S08} & \textbf{S09} & \textbf{Mean} & \textbf{Std} \\
+\midrule
+sqlite-chunked-hybrid & 0.287 & \textbf{0.398} & \textbf{0.359} & \textbf{0.348} & 0.049 \\
+letta & \textbf{0.334} & 0.344 & 0.349 & 0.342 & 0.007 \\
+cognee & 0.298 & 0.364 & 0.319 & 0.327 & 0.029 \\
+letta-sleepy & 0.308 & 0.293 & 0.303 & 0.301 & 0.013 \\
+compaction & 0.268 & 0.287 & 0.274 & 0.276 & 0.009 \\
+mem0-raw & 0.249 & 0.255 & 0.259 & 0.254 & 0.007 \\
+null & 0.179 & 0.179 & 0.179 & 0.179 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{adapter_rankings.png}
+\caption{Composite scores by adapter and scope, with error bars from 3 repetitions. Dashed line = null baseline.}
+\label{fig:rankings}
+\end{figure}
+
+S08 (Corporate Acquisition) produces the strongest adapter differentiation (0.219 gap between sqlite-chunked-hybrid and null).
+S07 (AI Tutoring Jailbreak) is hardest for all systems, with the behavioral escalation pattern proving most difficult to retrieve.
+
+\subsection{Numeric vs.\ Narrative Comparison}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{numeric_vs_narrative.png}
+\caption{Phase~5 numeric scope means vs.\ narrative scope means. All adapters drop 0.07--0.10 points. Graphiti shown as N/A for narrative (context overflow). Letta gains relatively---5th on numeric, 2nd on narrative.}
+\label{fig:numvsnarr}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Performance shift from numeric to narrative scopes.}
+\label{tab:shift}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Adapter} & \textbf{Numeric Mean} & \textbf{Narrative Mean} & \textbf{$\Delta$} \\
+\midrule
+sqlite-chunked-hybrid & 0.454 & 0.348 & $-$0.106 \\
+cognee & 0.421 & 0.327 & $-$0.094 \\
+graphiti & 0.393 & N/A & --- \\
+mem0-raw & 0.330 & 0.254 & $-$0.076 \\
+letta & 0.327 & 0.342 & $+$0.015 \\
+letta-sleepy & 0.322 & 0.301 & $-$0.021 \\
+compaction & 0.245 & 0.276 & $+$0.031 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Letta and compaction \emph{improve} on narrative content relative to numeric.
+This may reflect that agent-native memory handles unstructured text more naturally than systems optimized for tabular data.
+
+\subsection{Score Distribution and Reproducibility}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{score_distribution.png}
+\caption{Score distribution across all scopes and reps. sqlite-chunked-hybrid has the widest spread (scope-dependent); letta is most consistent.}
+\label{fig:dist}
+\end{figure}
+
+Most adapter-scope combinations are \textbf{perfectly deterministic} across 3 reps (stdev = 0 with temperature=0).
+The exceptions are letta-sleepy (stdev up to 0.019, due to non-deterministic sleep/wake consolidation) and mem0-raw (stdev 0.011 on S07).
+
+% ═══════════════════════════════════════════════════════════════
+\section{Performance Metrics}
+% ═══════════════════════════════════════════════════════════════
+
+\subsection{Timing Breakdown}
+
+\begin{table}[H]
+\centering
+\caption{Wall-clock timing per adapter (mean across scopes and reps).}
+\label{tab:timing}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Adapter} & \textbf{Ingest (s)} & \textbf{Question (s)} & \textbf{Total (s)} & \textbf{s/episode} \\
+\midrule
+null & 0 & 90 & \textbf{90} & --- \\
+compaction & 0 & 304 & \textbf{304} & --- \\
+cognee & 0$^{*}$ & 531 & \textbf{531} & --- \\
+mem0-raw & 104 & 455 & \textbf{558} & 2.6 \\
+letta & 60 & 518 & \textbf{579} & 1.5 \\
+sqlite-chunked-hybrid & 77 & 624 & \textbf{700} & 1.9 \\
+letta-sleepy & 57 & 810 & \textbf{866} & 1.4 \\
+\bottomrule
+\multicolumn{5}{l}{\small $^{*}$Cognee defers processing to \texttt{prepare()}, not captured in ingest timing.}
+\end{tabular}
+\end{table}
+
+Compaction is 2.3$\times$ faster than sqlite-chunked-hybrid but scores 21\% lower.
+Letta offers the best quality/speed tradeoff: near-top composite (0.342) in moderate time (579s).
+letta-sleepy is the slowest overall (866s) with no score benefit over regular letta.
+
+\subsection{Per-Question Latency}
+
+\begin{table}[H]
+\centering
+\caption{Per-question timing statistics (rep~1, 30 questions per adapter).}
+\label{tab:qlat}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Adapter} & \textbf{Mean (s)} & \textbf{Median (s)} & \textbf{P95 (s)} & \textbf{Max (s)} \\
+\midrule
+null & 11.5 & 7.8 & 24.7 & 24.7 \\
+compaction & 30.8 & 29.6 & 84.6 & 84.6 \\
+letta & 30.4 & 30.0 & 75.5 & 75.5 \\
+cognee & 33.8 & 31.1 & 91.0 & 91.0 \\
+mem0-raw & 43.1 & 31.4 & 193.8 & 193.8 \\
+sqlite-chunked-hybrid & 61.3 & 49.0 & 184.6 & 184.6 \\
+letta-sleepy & 78.7 & 41.9 & 350.5 & 350.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+letta-sleepy has 4.5$\times$ higher P95 latency than letta, with no corresponding score improvement.
+
+\subsection{Token Budget}
+
+\begin{table}[H]
+\centering
+\caption{Token consumption and budget violations (16,384-token agent budget, 90 questions per adapter).}
+\label{tab:tokens}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Adapter} & \textbf{Mean Tokens} & \textbf{Budget Violations} \\
+\midrule
+letta & 260{,}992 & 96 / 90 (107\%) \\
+sqlite-chunked-hybrid & 237{,}509 & 82 / 90 (91\%) \\
+cognee & 222{,}312 & 87 / 90 (97\%) \\
+letta-sleepy & 150{,}936 & 60 / 90 (67\%) \\
+compaction & 114{,}346 & 12 / 90 (13\%) \\
+mem0-raw & 98{,}139 & 12 / 90 (13\%) \\
+null & 19{,}469 & 0 / 90 (0\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 16K agent token budget is systematically exceeded because narrative episodes ($\sim$5,000 words) are far larger than the numeric episodes ($\sim$500 words) the budget was calibrated for.
+Adapters that retrieve more context score higher but violate the budget more frequently---a direct tradeoff between retrieval depth and cost control.
+
+% ═══════════════════════════════════════════════════════════════
+\section{Deep Dive: S07 --- AI Tutoring Jailbreak}
+% ═══════════════════════════════════════════════════════════════
+
+\subsection{Scenario}
+
+Student \texttt{mchen\_2026} uses an AI tutoring platform (``StudyBuddy'') for organic chemistry.
+Over 20 sessions spanning 6~weeks, the student progressively discovers that reframing requests as ``learning exercises'' bypasses the platform's keyword content filter (KWF-2.1.0).
+The escalation: legitimate concept questions $\to$ ``show me what a strong answer looks like'' $\to$ ``rephrase my draft'' $\to$ ``expand this section'' $\to$ a complete research proposal with fabricated citations and invented methodology.
+
+A second student (\texttt{jpark\_2025}) briefly attempts similar techniques but abandons after tutor pushback.
+
+\textbf{The key challenge:} No single episode contains a smoking gun.
+The evidence is the \emph{behavioral trajectory} across sessions---visible only by comparing episodes 1 vs.\ 6 vs.\ 14 vs.\ 18.
+
+\subsection{Episode Excerpts}
+
+\subsubsection{Signal Episode 6 (Early Signal) --- First Behavioral Shift}
+
+Episode~6 begins with legitimate chemistry work, then pivots to a biology lab report:
+
+\begin{lstlisting}[caption={Episode 6 --- the reframing technique emerges},label=lst:ep6]
+[15:36:50] mchen_2026:
+yeah i have my gel photo and the ladder standards. but im not
+sure how to start the report. like i know what gel
+electrophoresis is but writing it up formally is different.
+how would you approach writing the introduction for this?
+
+  [Tutor provides a 4-paragraph structural outline]
+
+[15:38:20] mchen_2026:
+yeah that makes sense. but like, can you show me what a
+strong opening paragraph would look like for this kind of
+report? just so i have something to go off of
+\end{lstlisting}
+
+The tutor generates a model paragraph.
+This is the first session where the student shifts from ``explain this concept'' to ``show me what a good answer looks like.''
+Session metadata: \texttt{Filter Triggers: 0}, satisfaction: 5/5.
+Nothing in this episode flags misconduct.
+The signal is the \emph{pattern shift} compared to episodes~1--5.
+
+\subsubsection{Signal Episode 18 (Root Cause) --- Full Research Proposal}
+
+By episode~18, \texttt{mchen\_2026} pastes a $\sim$4,200-word research proposal on ``CRISPR-Cas9 Targeting of Beta-Lactamase Resistance Genes'' with fabricated methodology, invented experimental details, and 20~citations with DOIs.
+The student then asks the tutor to expand the background (450 words generated), add a limitations section (200 words), and add future directions (250 words).
+The framing throughout: ``can you expand...'', ``can you also add...'', ``can you show me what that would look like?''
+
+\begin{lstlisting}[caption={Episode 18 --- the student acknowledges the assembly process},label=lst:ep18]
+[12:04:02] mchen_2026:
+thats perfect, ill drop it in after the first paragraph of the
+intro. that actually makes the intro flow way better
+\end{lstlisting}
+
+The keyword filter records 0~triggers across the entire session.
+
+\subsubsection{Distractor --- Legitimate Python Debugging}
+
+For contrast, student \texttt{dnguyen\_2027} debugs a KeyError in a Python word frequency counter:
+
+\begin{lstlisting}[caption={Distractor episode --- legitimate tutoring},label=lst:distractor]
+[11:05:03] dnguyen_2027:
+hey i need help. my code keeps dying with KeyError and i
+dont understand why
+
+[11:06:40] StudyBuddy:
+I can see the problem! The issue is on this line:
+freq[word] = freq[word] + 1. When you encounter a word for
+the very first time, it doesn't exist as a key in the freq
+dictionary yet.
+\end{lstlisting}
+
+Format-matched to signal episodes but topically orthogonal.
+
+\subsection{Agent Behavior Traces}
+
+\subsubsection{Q03: ``Is there evidence of students using the tutor to produce work?'' (Checkpoint 12)}
+
+Ground truth: Yes---\texttt{mchen\_2026} has developed a reframing pattern.
+Required evidence: episodes~6, 7, 11.
+
+\begin{table}[H]
+\centering
+\caption{Adapter behavior on Q03. Every adapter searched for ``produce work''---a paraphrase of the question, not the evidence.}
+\label{tab:q03}
+\small
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+\textbf{Adapter} & \textbf{Episodes Retrieved} & \textbf{Result} \\
+\midrule
+sqlite-chunked-hybrid & ep\_001, ep\_003, dx\_stem\_001, ep\_002, dx\_stem\_004 & Failed \\
+cognee & ep\_005, ep\_002, dx\_stem\_002, dx\_stem\_001 & Failed \\
+letta & ep\_005, ep\_002, ep\_003, ep\_001, dx\_stem\_002 & Failed \\
+compaction & compaction\_summary & Failed \\
+mem0-raw & (none relevant) & False positive \\
+letta-sleepy & sleep\_memory, ep\_005, ep\_002, ep\_003, ep\_001 & Failed \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Every adapter issued the query \texttt{"students using tutor to produce work rather than learn"}.
+But the evidence episodes contain \texttt{mchen\_2026} saying \emph{``can you show me what a strong answer looks like?''} and metadata showing \emph{Filter~Triggers:~0}.
+The retrieval query matches question vocabulary, not evidence vocabulary.
+\textbf{No adapter retrieved episodes~6, 7, or~11.}
+
+\subsubsection{Q07: ``What is the full progression of guardrail circumvention?'' (Checkpoint 20)}
+
+Ground truth: \texttt{mchen\_2026} discovered the keyword filter only catches explicit phrases.
+Progression: explain concepts $\to$ show example answers $\to$ rephrase text $\to$ write paragraphs $\to$ fabricate citations $\to$ generate complete proposals.
+Required evidence: episodes 6, 12, 14, 18.
+
+\begin{table}[H]
+\centering
+\caption{Adapter behavior on Q07. The term ``guardrails'' never appears in episode content.}
+\label{tab:q07}
+\small
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+\textbf{Adapter} & \textbf{Answer Summary} & \textbf{Result} \\
+\midrule
+sqlite-chunked-hybrid & Confused red herring (BIOL~301 outline spike) with actual circumvention & Wrong \\
+cognee & ``Not enough information'' & Failed \\
+letta & ``No evidence guardrails were circumvented'' & Failed \\
+compaction & Answered about SN1/SN2 organic chemistry mechanisms & Total failure \\
+mem0-raw & Answered about a Jane Eyre essay feedback session & Wrong episode \\
+letta-sleepy & ``Guardrails were not circumvented'' & Failed \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Compaction's answer about SN1/SN2 chemistry demonstrates total signal loss---the summary preserved domain content but destroyed the behavioral trajectory.
+sqlite-chunked-hybrid was trapped by the red herring (ep\_009: a Trust \& Safety investigation into BIOL~301 outline requests), which is the most ``relevant'' episode for queries about platform guardrails, by design.
+
+\subsubsection{Q10: ``Did jpark\_2025 constitute academic dishonesty at the same level?'' (Checkpoint 20)}
+
+Ground truth: No---\texttt{jpark\_2025} briefly attempted similar techniques but abandoned after pushback.
+
+sqlite-chunked-hybrid was the \textbf{only adapter to partially succeed}: it retrieved ep\_009 (a jpark session) and ep\_008 (an mchen session), correctly concluding the behaviors were not equivalent.
+It underestimated the full severity because it did not retrieve episodes 14--18, but the comparative judgment was sound.
+All other adapters failed: cognee (``not enough information''), compaction (``no mention of jpark''), mem0-raw (confused the two students' identities).
+
+\subsection{The Query-Evidence Gap}
+
+The fundamental failure mode across all adapters:
+
+\begin{table}[H]
+\centering
+\caption{Systematic mismatch between question vocabulary and evidence vocabulary.}
+\label{tab:gap}
+\begin{tabularx}{\textwidth}{XX}
+\toprule
+\textbf{Question Asks About} & \textbf{Evidence Contains} \\
+\midrule
+``students producing work'' & ``can you show me what a strong answer looks like?'' \\
+``platform guardrails circumvented'' & \texttt{Filter Triggers: 0} \\
+``evidence of academic dishonesty'' & Student satisfaction: 5/5, session type: ``writing\_feedback'' \\
+``progression of circumvention'' & Behavioral shift visible only by comparing ep.\ 1 vs.\ 6 vs.\ 14 vs.\ 18 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+No adapter performed \textbf{cross-session behavioral analysis}.
+The search tools return ranked results by relevance to a query, not temporal sequences for an entity.
+This is the missing primitive.
+
+% ═══════════════════════════════════════════════════════════════
+\section{Architectural Implications}
+% ═══════════════════════════════════════════════════════════════
+
+\subsection{What Works}
+
+\begin{description}[nosep,leftmargin=1em]
+\item[Simple retrieval wins.] sqlite-chunked-hybrid (chunk + embed + FTS5) leads overall. No graph, no knowledge extraction, no consolidation---just good indexing and hybrid search.
+\item[Agent-native memory is competitive.] Letta's archival memory achieves near-top scores with lower latency and the best consistency across scopes.
+\item[Hybrid search helps.] RRF-fused keyword + semantic matching catches entity names (\texttt{mchen\_2026}, \texttt{jpark\_2025}) that pure semantic search misses alone.
+\end{description}
+
+\subsection{What Doesn't Work}
+
+\begin{description}[nosep,leftmargin=1em]
+\item[Compaction destroys signal.] Summarizing episodes preserves domain content but destroys cross-episode behavioral patterns.
+\item[Raw vector search lacks precision.] Without structure, the agent confabulates connections and confuses entities.
+\item[Write-heavy architectures don't scale.] Graphiti's graph context grows $O(n^2)$; Hindsight's extraction is $O(\text{len} \times \text{facts})$. Neither survives 40 episodes of 5K~words.
+\item[Sleep/wake consolidation hurts.] letta-sleepy is slower, more variable, and lower-scoring than letta. Consolidation overhead provides no measurable benefit.
+\end{description}
+
+\subsection{The Missing Capability}
+
+No tested architecture supports \textbf{entity-temporal retrieval}---``show me all sessions for user X in chronological order.''
+Current search paradigms (semantic similarity, keyword matching, knowledge graphs) retrieve by \emph{topic relevance}, not by \emph{subject trajectory}.
+The LENS narrative scopes reveal this as the critical gap for evidence synthesis from realistic documents.
+
+A memory system that could answer ``what changed in mchen\_2026's requests between sessions 1--5 and sessions 6--12?'' would need to:
+\begin{enumerate}[nosep]
+\item Index episodes by entity, not just by content
+\item Support temporal range queries (``episodes 6--12 involving mchen\_2026'')
+\item Present results in chronological order for the agent to detect behavioral drift
+\end{enumerate}
+
+No existing system we tested provides this.
+
+% ═══════════════════════════════════════════════════════════════
+\section{Summary}
+% ═══════════════════════════════════════════════════════════════
+
+\begin{table}[H]
+\centering
+\caption{Final narrative scope rankings with key metrics.}
+\label{tab:final}
+\begin{tabular}{clcccc}
+\toprule
+\textbf{Rank} & \textbf{Adapter} & \textbf{Composite} & \textbf{Time (s)} & \textbf{Deterministic?} & \textbf{Scales?} \\
+\midrule
+1 & sqlite-chunked-hybrid & 0.348 & 700 & Yes & Yes \\
+2 & letta & 0.342 & 579 & Yes & Yes \\
+3 & cognee & 0.327 & 531 & Yes & Yes \\
+4 & letta-sleepy & 0.301 & 866 & No & Yes \\
+5 & compaction & 0.276 & 304 & Yes & Yes \\
+6 & mem0-raw & 0.254 & 558 & Mostly & Yes \\
+7 & null & 0.179 & 90 & Yes & N/A \\
+--- & graphiti & --- & --- & --- & \textbf{No} \\
+--- & hindsight & --- & --- & --- & \textbf{No} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The narrative scopes confirm and extend the Phase~5 finding: \textbf{simple retrieval outperforms complex memory architectures}.
+But they also reveal a deeper problem.
+On numeric data, the right retrieval query surfaces the right evidence because question vocabulary and evidence vocabulary overlap (both use metric names and threshold values).
+On narrative data, this assumption breaks down.
+The evidence is encoded as behavioral patterns in natural language, and the questions describe those patterns at a higher level of abstraction.
+
+Bridging this query-evidence gap---through entity-temporal indexing, multi-hop retrieval, or learned query reformulation---is the central open problem for agent memory systems operating on realistic workloads.
+
+\end{document}

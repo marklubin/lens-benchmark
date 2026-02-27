@@ -44,12 +44,21 @@ def _build_mem0_config() -> dict:
     """
     qdrant_url = os.environ.get("MEM0_QDRANT_URL", "http://localhost:6333")
 
-    # Embedder config
+    # Embedder config — falls back to LENS_EMBED_* if MEM0_EMBED_* not set
     embed_provider = os.environ.get("MEM0_EMBED_PROVIDER", "openai")
-    embed_model = os.environ.get("MEM0_EMBED_MODEL", "text-embedding-3-small")
-    embed_api_key = os.environ.get("MEM0_EMBED_API_KEY")
-    embed_base_url = os.environ.get("MEM0_EMBED_BASE_URL")
-    embed_dims = os.environ.get("MEM0_EMBED_DIMS")
+    embed_model = (
+        os.environ.get("MEM0_EMBED_MODEL")
+        or os.environ.get("LENS_EMBED_MODEL", "Alibaba-NLP/gte-modernbert-base")
+    )
+    embed_api_key = (
+        os.environ.get("MEM0_EMBED_API_KEY")
+        or os.environ.get("LENS_EMBED_API_KEY")
+    )
+    embed_base_url = (
+        os.environ.get("MEM0_EMBED_BASE_URL")
+        or os.environ.get("LENS_EMBED_BASE_URL")
+    )
+    embed_dims = os.environ.get("MEM0_EMBED_DIMS", "768")
 
     embedder_config: dict = {"model": embed_model}
     if embed_api_key:
@@ -59,10 +68,10 @@ def _build_mem0_config() -> dict:
     if embed_dims:
         embedder_config["embedding_dims"] = int(embed_dims)
 
-    # LLM config (Mem0 always initializes this, even for infer=False)
-    llm_api_key = os.environ.get("MEM0_LLM_API_KEY")
-    llm_base_url = os.environ.get("MEM0_LLM_BASE_URL")
-    llm_model = os.environ.get("MEM0_LLM_MODEL")
+    # LLM config — falls back to LENS_LLM_* if MEM0_LLM_* not set
+    llm_api_key = os.environ.get("MEM0_LLM_API_KEY") or os.environ.get("LENS_LLM_API_KEY")
+    llm_base_url = os.environ.get("MEM0_LLM_BASE_URL") or os.environ.get("LENS_LLM_API_BASE")
+    llm_model = os.environ.get("MEM0_LLM_MODEL") or os.environ.get("LENS_LLM_MODEL")
 
     llm_config: dict = {}
     if llm_model:
@@ -109,7 +118,6 @@ def _patch_embed_no_dims(client: object) -> None:
     embedder = getattr(client, "embedding_model", None)
     if embedder is None:
         return
-    original_embed = embedder.embed
 
     def _embed_no_dims(text, memory_action=None):
         # Call the OpenAI client directly without dimensions
@@ -123,6 +131,57 @@ def _patch_embed_no_dims(client: object) -> None:
         )
 
     embedder.embed = _embed_no_dims
+
+
+def _patch_embed_direct(client: object) -> None:
+    """Patch Mem0's embedder to call the embedding endpoint directly via httpx.
+
+    The standard OpenAI SDK appends /embeddings to base_url, which doesn't
+    work with endpoints that serve at root (e.g. Modal). This bypasses the SDK.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+
+    embedder = getattr(client, "embedding_model", None)
+    if embedder is None:
+        return
+
+    base_url = (
+        os.environ.get("MEM0_EMBED_BASE_URL")
+        or os.environ.get("LENS_EMBED_BASE_URL")
+    )
+    if not base_url:
+        return
+
+    api_key = (
+        os.environ.get("MEM0_EMBED_API_KEY")
+        or os.environ.get("LENS_EMBED_API_KEY")
+        or "dummy"
+    )
+    model_name = (
+        os.environ.get("MEM0_EMBED_MODEL")
+        or os.environ.get("LENS_EMBED_MODEL", "")
+    )
+    embed_url = base_url.rstrip("/")
+    if not embed_url.endswith("/embeddings"):
+        embed_url += "/embeddings"
+
+    def _embed_direct(text, memory_action=None):
+        import httpx
+
+        text = text.replace("\n", " ")
+        resp = httpx.post(
+            embed_url,
+            json={"input": [text], "model": model_name},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["data"][0]["embedding"]
+
+    embedder.embed = _embed_direct
+    log.info("Patched Mem0 embedder to call %s directly", embed_url)
 
 
 class _Mem0Base(MemoryAdapter):
@@ -147,6 +206,12 @@ class _Mem0Base(MemoryAdapter):
         # doesn't support it (e.g. Together AI serving BGE models).
         if os.environ.get("MEM0_EMBED_NO_DIMS"):
             _patch_embed_no_dims(self._client)
+
+        # Patch: bypass OpenAI SDK URL construction when using a custom
+        # embed endpoint that serves at root (e.g. Modal).
+        embed_base = os.environ.get("MEM0_EMBED_BASE_URL") or os.environ.get("LENS_EMBED_BASE_URL")
+        if embed_base:
+            _patch_embed_direct(self._client)
 
         # Local index: episode_id -> list of memory IDs for retrieval
         self._ep_index: dict[str, list[str]] = {}
@@ -239,7 +304,7 @@ class _Mem0Base(MemoryAdapter):
     def get_capabilities(self) -> CapabilityManifest:
         return CapabilityManifest(
             search_modes=["semantic"],
-            max_results_per_search=10,
+            max_results_per_search=5,
         )
 
 

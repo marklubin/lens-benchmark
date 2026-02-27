@@ -116,7 +116,12 @@ def _embed_texts_openai(
     if not api_key:
         raise ValueError("OpenAI API key required: set OPENAI_API_KEY or LENS_LLM_API_KEY")
 
-    embed_url = base_url.rstrip("/") + "/embeddings" if base_url else _OPENAI_EMBED_URL
+    if base_url:
+        embed_url = base_url.rstrip("/")
+        if not embed_url.endswith("/embeddings"):
+            embed_url += "/embeddings"
+    else:
+        embed_url = _OPENAI_EMBED_URL
 
     body = json.dumps({"model": model, "input": texts}).encode()
     for attempt in range(_max_retries):
@@ -317,7 +322,7 @@ class SQLiteEmbeddingAdapter(MemoryAdapter):
                 FilterField(name="start_date", field_type="string", description="Filter episodes after this ISO date"),
                 FilterField(name="end_date", field_type="string", description="Filter episodes before this ISO date"),
             ],
-            max_results_per_search=10,
+            max_results_per_search=5,
             supports_date_range=True,
             extra_tools=[],
         )
@@ -541,7 +546,7 @@ class SQLiteHybridAdapter(MemoryAdapter):
                 FilterField(name="start_date", field_type="string", description="Filter episodes after this ISO date"),
                 FilterField(name="end_date", field_type="string", description="Filter episodes before this ISO date"),
             ],
-            max_results_per_search=10,
+            max_results_per_search=5,
             supports_date_range=True,
             extra_tools=[],
         )
@@ -1284,7 +1289,7 @@ class SQLiteChunkedHybridAdapter(MemoryAdapter):
                 FilterField(name="start_date", field_type="string", description="Filter episodes after this ISO date"),
                 FilterField(name="end_date", field_type="string", description="Filter episodes before this ISO date"),
             ],
-            max_results_per_search=7,
+            max_results_per_search=5,
             supports_date_range=True,
             extra_tools=[
                 ExtraTool(

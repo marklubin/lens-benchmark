@@ -8,16 +8,15 @@ Requires:
     Hindsight server running locally (default: http://localhost:8888)
 
 Setup:
-    TK=$(grep '^TOGETHER_API_KEY=' .env | cut -d= -f2 | tr -d '"')
     podman run -d -p 8888:8888 --name hindsight \\
         -e HINDSIGHT_API_LLM_PROVIDER=openai \\
-        -e HINDSIGHT_API_LLM_API_KEY="$TK" \\
-        -e HINDSIGHT_API_LLM_MODEL=Qwen/Qwen3-235B-A22B-Instruct-2507-tput \\
-        -e HINDSIGHT_API_LLM_BASE_URL=https://api.together.xyz/v1 \\
+        -e HINDSIGHT_API_LLM_API_KEY="$MODAL_API_KEY" \\
+        -e HINDSIGHT_API_LLM_MODEL=casperhansen/Meta-Llama-3.3-70B-Instruct-AWQ-INT4 \\
+        -e HINDSIGHT_API_LLM_BASE_URL="$MODAL_LLM_URL" \\
         -e HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai \\
-        -e HINDSIGHT_API_EMBEDDINGS_API_KEY="$TK" \\
+        -e HINDSIGHT_API_EMBEDDINGS_API_KEY="$MODAL_API_KEY" \\
         -e HINDSIGHT_API_EMBEDDINGS_MODEL=Alibaba-NLP/gte-modernbert-base \\
-        -e HINDSIGHT_API_EMBEDDINGS_BASE_URL=https://api.together.xyz/v1 \\
+        -e HINDSIGHT_API_EMBEDDINGS_BASE_URL="$MODAL_EMBED_URL" \\
         ghcr.io/vectorize-io/hindsight:latest
 
 Environment variables:
@@ -27,6 +26,7 @@ Environment variables:
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 
@@ -39,6 +39,8 @@ from lens.adapters.base import (
 )
 from lens.adapters.registry import register_adapter
 from lens.core.errors import AdapterError
+
+log = logging.getLogger(__name__)
 
 _EP_ID_RE = re.compile(r"^\[([^\]]+)\]")
 
@@ -172,20 +174,39 @@ class HindsightAdapter(MemoryAdapter):
             return
 
         client = self._get_client()
+        failed = 0
         for item in self._pending_episodes:
-            try:
-                client.retain(
-                    bank_id=self._bank_id,
-                    content=item["content"],
-                    timestamp=item.get("timestamp"),
-                    document_id=item.get("document_id"),
+            doc_id = item.get("document_id", "?")
+            success = False
+            for attempt in range(3):
+                try:
+                    client.retain(
+                        bank_id=self._bank_id,
+                        content=item["content"],
+                        timestamp=item.get("timestamp"),
+                        document_id=doc_id,
+                    )
+                    success = True
+                    break
+                except Exception as e:
+                    log.warning(
+                        "retain failed for %r (attempt %d/3): %s",
+                        doc_id, attempt + 1, e,
+                    )
+                    import time  # noqa: PLC0415
+                    time.sleep(2 ** attempt)
+            if not success:
+                failed += 1
+                log.error(
+                    "Giving up on episode %r at checkpoint %d after 3 attempts",
+                    doc_id, checkpoint,
                 )
-            except Exception as e:
-                raise AdapterError(
-                    f"Failed to retain episode '{item.get('document_id', '?')}' "
-                    f"at checkpoint {checkpoint}: {e}"
-                ) from e
 
+        if failed:
+            log.warning(
+                "Failed to retain %d/%d episodes at checkpoint %d",
+                failed, len(self._pending_episodes), checkpoint,
+            )
         self._pending_episodes = []
 
     def search(
@@ -244,7 +265,7 @@ class HindsightAdapter(MemoryAdapter):
     def get_capabilities(self) -> CapabilityManifest:
         return CapabilityManifest(
             search_modes=["semantic", "keyword", "graph", "temporal"],
-            max_results_per_search=10,
+            max_results_per_search=5,
             extra_tools=[
                 ExtraTool(
                     name="batch_retrieve",
