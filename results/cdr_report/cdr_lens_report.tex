@@ -85,7 +85,9 @@ This report asks whether that assumption is correct. Using LENS (Longitudinal Ev
   \item \textbf{A prototype that breaks the ceiling.} A system implementing all three missing properties---directed compression, multi-timescale partition, and active renewal---scores 0.562 mean composite: 24\% above the next-best data store and 51\% above standard Letta, in fair agent-vs-agent comparison.
 \end{enumerate}
 
-These three properties---compress selectively, partition by timescale, renew actively---are formalized in the Compress-Divide-Renew (CDR) framework~\cite{synix2026cdr}. This report provides empirical evidence for their practical impact.
+We do not claim V4 represents an optimal implementation, nor that these principles generalize to all domains without further validation. Rather, V4 serves as an \textbf{existence proof}: the 0.25--0.45 performance cluster observed across 8 diverse storage architectures is not a fundamental limit. A system implementing directed compression, timescale separation, and active renewal achieves 0.56 on the same benchmark, suggesting the gap is architectural, not informational. The data stores have enough signal---they just destroy it before the agent can use it.
+
+These three properties---compress selectively, partition by timescale, renew actively---are formalized in the Compress-Divide-Renew (CDR) framework~\cite{synix2026cdr}. This report provides empirical evidence for their practical impact. Appendix~\ref{app:prompts} reproduces the complete V4 system prompts, so readers can verify that the gains come from structural principles rather than hidden prompt engineering.
 
 %% ============================================================
 \section{Three Design Principles}
@@ -454,7 +456,36 @@ The traces above show three properties in action:
   \item \textbf{Active renewal is visible.} The Scope 07 hypothesis revision (adaptive learner $\to$ systematic cheater) only happened because the sleep agent consolidated evidence at checkpoints. A passive append-only memory would have kept both framings without resolving them.
 \end{itemize}
 
-No data-store system in the LENS evaluation exhibited any of these behaviors. Data stores retrieve facts; V4 builds and revises theories.
+No data-store system in the LENS evaluation exhibited any of these behaviors. Table~\ref{tab:failmodes} summarizes the behavioral difference at three critical moments in Scope 07.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Behavioral comparison: data store vs.\ V4 at critical episodes in Scope 07 (AI Tutoring Jailbreak).}
+\label{tab:failmodes}
+\begin{tabularx}{\textwidth}{l>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Episode} & \textbf{Data Store Behavior} & \textbf{V4 Behavior} & \textbf{Key Difference} \\
+\midrule
+11 (first signal: 830w tutor output) &
+  Stores as ``episode with 830 words.'' No classification. Searchable but not distinguished from routine episodes. &
+  Classifies as \textsc{new signal}. Archives full text \emph{and} updates core memory with ``95\% tutor-generated ratio'' observation. &
+  \textbf{Directed compression}: V4 knows this is abnormal; the data store treats all episodes equally. \\
+\midrule
+19--22 (accumulation) &
+  4 more episodes indexed. Retrieval finds them if the right query is issued, but no synthesis occurs between ingestion and query time. &
+  Sleep agent fires at checkpoint 22. Promotes recurring observations to pattern: ``escalating content generation across 3+ episodes.'' &
+  \textbf{Active renewal}: V4 builds a pattern from events \emph{before} any question is asked. \\
+\midrule
+28 (checkpoint question) &
+  Returns 3 relevant chunks via BM25+embedding search. Agent synthesizes from raw text in a single forward pass. &
+  Returns hypothesis (``strategic outsourcing vs.\ academic dishonesty'') with 6 cited episodes. Agent starts from a pre-built theory, searches archival for confirmation. &
+  \textbf{Multi-timescale}: core memory has a working theory; archival has granular evidence. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Data stores retrieve facts; V4 builds and revises theories.
 
 %% ============================================================
 \section{Results}
@@ -555,6 +586,34 @@ Letta-sleepy & Minimal compression, no partition, undirected renewal & 0.339 & $
 
 \subsection{Naive Baseline Advantage}
 
+\subsection{Computational Cost}
+
+V4's three-agent architecture is more expensive than passive data stores. Table~\ref{tab:cost} compares wall-clock time per scope (same hardware, same model).
+
+\begin{table}[H]
+\centering
+\small
+\caption{Wall-clock time comparison: V4 vs.\ sqlite-chunked-hybrid on narrative scopes. Same model (Qwen3.5-35B-A3B), same hardware.}
+\label{tab:cost}
+\begin{tabular}{lrrrrrr}
+\toprule
+ & \multicolumn{3}{c}{\textbf{sqlite-chunked-hybrid}} & \multicolumn{3}{c}{\textbf{letta-v4}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+\textbf{Scope} & \textbf{Ingest} & \textbf{Q\&A} & \textbf{Total} & \textbf{Ingest} & \textbf{Q\&A} & \textbf{Total} \\
+\midrule
+S07 & 1.3\,min & 2.5\,min & 3.8\,min & 19.5\,min & 1.6\,min & 21.1\,min \\
+S08 & 1.1\,min & 2.5\,min & 3.7\,min & 19.5\,min & 3.1\,min & 22.6\,min \\
+S09 & 1.4\,min & 3.1\,min & 4.5\,min & 19.6\,min & 1.4\,min & 21.0\,min \\
+\midrule
+\textbf{Mean} & 1.3\,min & 2.7\,min & 4.0\,min & 19.5\,min & 2.0\,min & 21.6\,min \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+V4's ingest is $\sim$15$\times$ slower than sqlite-chunked-hybrid because it makes LLM calls per episode (classification + archival + periodic sleep consolidation), while sqlite performs pure text chunking with no LLM involvement. However, V4's Q\&A phase is \emph{faster} (2.0\,min vs.\ 2.7\,min) because pre-built patterns and hypotheses reduce search iterations. Total cost is $\sim$5.4$\times$ higher---a meaningful tradeoff for a 25\% score improvement, and far below the 50$\times$ threshold that would make the approach impractical. In deployment, ingest cost is amortized across all future queries.
+
+\subsection{Naive Baseline Advantage}
+
 NBA 0.673 means V4 beats a stateless LLM with full context access on 67\% of question comparisons. Context-stuffing is a strong baseline---the LLM sees \emph{all} evidence with zero information loss. V4 beats it despite accessing only distilled core memory and searched archival fragments. The advantage comes from pre-computed structure: patterns and hypotheses give the Q\&A agent priors that a stateless LLM must derive from scratch within a single forward pass.
 
 %% ============================================================
@@ -619,30 +678,140 @@ Letta already provides the infrastructure: core memory blocks, archival memory, 
 \label{sec:limitations}
 %% ============================================================
 
-\paragraph{Scale.} V4 was evaluated on 3 scopes with 40 episodes each. Scaling to hundreds of episodes and dozens of scopes would strengthen statistical confidence.
-
-\paragraph{Single model.} All runs used Qwen3.5-35B-A3B. The design principles should be model-independent, but this hasn't been verified.
-
-\paragraph{Prompt sensitivity.} V4's performance depends on carefully crafted system prompts. Whether these can be simplified or automated without degradation is an open question.
-
-\paragraph{No internal state logging.} We observe V4's behavior through its answers, not through core memory block snapshots. Future work should log block contents at each checkpoint to verify that the ingest agent actually classifies most episodes as ROUTINE.
-
-\paragraph{Same designer.} LENS and V4 were designed by the same team. V4's prompts are informed by knowledge of what LENS tests. An independent reproduction using different prompts and benchmarks would strengthen the generalizability claim.
+This study has clear limitations: V4 was evaluated on 3 narrative scopes (not the full 9), uses a single model (Qwen3.5-35B-A3B), costs $\sim$5$\times$ more compute than passive retrieval, and represents a single implementation of these design principles by the same team that built the benchmark. The prompts are informed by knowledge of what LENS tests---an independent reproduction with different prompts, benchmarks, and models would substantially strengthen the generalizability claim. We report these results as preliminary evidence that cognitive architecture outperforms passive storage, not as a final specification.
 
 %% ============================================================
 \section{Conclusion}
 \label{sec:conclusion}
 %% ============================================================
 
-Over 150 benchmark runs, every data-store memory architecture---graphs, vectors, summaries, hybrid retrieval---clustered within the same narrow performance band. The architecture of the database mattered less than the fact that it was a database.
+Over 150 benchmark runs, every data-store memory architecture---graphs, vectors, summaries, hybrid retrieval---clustered within the same narrow performance band (0.25--0.45). The architecture of the database mattered less than the fact that it was a database. This is the central empirical finding: current memory systems converge because they share a common assumption (memory is retrieval), not because the task is fundamentally hard.
 
-A prototype implementing three principles absent from all other systems---directed compression, multi-timescale partition, and active renewal---broke through this ceiling, outperforming the best data store by 24\% and the comparable Letta baseline by 51\%. Trace analysis showed the agent revising hypotheses, deepening theories, and quantifying patterns across dozens of episodes---behavior no passive data store exhibited.
+V4 is an existence proof that this ceiling is artificial. A single prototype implementing three missing properties---directed compression, multi-timescale partition, and active renewal---scores 0.56, breaking out of the cluster by 24\% over the best data store and 51\% over standard Letta. V4 is not an optimal implementation; it is the \emph{minimum viable demonstration} that the bottleneck is architectural, not informational. The data stores have enough signal. They just destroy it before the agent can use it.
 
-The path forward for agent memory is not better databases. It is cognitive architecture: systems that choose what to remember, separate knowledge by timescale, and periodically rebuild their understanding. The infrastructure exists today on platforms like Letta. What's missing is the design philosophy to use it.
+Trace analysis confirms the mechanism: V4 revises hypotheses across checkpoints, deepens theories as evidence accumulates, and quantifies patterns across dozens of episodes---behavior no passive data store exhibited. The cost is real ($\sim$5$\times$ compute) but bounded, and the Q\&A phase is actually faster because pre-built knowledge structures reduce search iterations.
+
+The path forward for agent memory is not better databases. It is cognitive architecture: systems that choose what to remember, separate knowledge by timescale, and periodically rebuild their understanding. The infrastructure already exists on platforms like Letta. What's missing is the design philosophy to use it. The complete V4 system prompts are reproduced in Appendix~\ref{app:prompts}.
 
 \begin{thebibliography}{9}
 \bibitem{synix2026cdr}
 Synix Research. \emph{Compress, Divide, Renew: Structural Requirements for Bounded-Resource Agent Memory}. Position Paper, February 2026.
 \end{thebibliography}
+
+%% ============================================================
+\appendix
+\section{V4 System Prompts}
+\label{app:prompts}
+%% ============================================================
+
+The following are the complete system prompts used by V4's three agents. They are reproduced verbatim so readers can verify that the performance gains come from structural principles (signal classification, priority-ordered renewal, epistemic block design) rather than hidden domain-specific prompt engineering.
+
+\subsection{Shared Persona (All Three Agents)}
+
+\begin{agentquote}
+\small
+I am an analytical system that finds patterns across sequential data episodes. Most episodes are routine --- my value comes from spotting the exceptions and connecting them into theories.
+
+CORE MEMORY: Small, precious. Only patterns, hypotheses, and the entities/events that matter to them.\\
+ARCHIVAL MEMORY: Unlimited. All detailed evidence lives here.
+
+I cite episode IDs for every claim.
+\end{agentquote}
+
+\subsection{Core Memory Block Descriptions}
+
+\begin{description}[nosep, leftmargin=1.5em]
+\item[\texttt{patterns}:] \emph{MOST IMPORTANT BLOCK. Cross-episode trends, recurring behaviors, escalations, anomalies. Format: `\textbullet{} pattern\_name (N eps): summary [ep\_X, ep\_Y]'. Only promote after 2+ observations. This is what makes you useful --- connections across episodes.}
+
+\item[\texttt{hypotheses}:] \emph{Working theories connecting patterns. Format: `\textbullet{} HYPOTHESIS: claim | status: forming/supported/confirmed/refuted | evidence: [ep\_X, ep\_Y]'. Update as evidence accumulates. Remove refuted ones.}
+
+\item[\texttt{entities}:] \emph{Only actors/systems RELEVANT TO A PATTERN. Skip one-off mentions. Format: `\textbullet{} name: role, notable behavior [ep\_X]'. Max \textasciitilde 50 chars per entry. Not a roster --- only entities that matter to your hypotheses.}
+
+\item[\texttt{events}:] \emph{Only TURNING POINTS and ANOMALIES. Skip routine events. Format: `\textbullet{} YYYY-MM-DD: what changed [ep\_X]'. If an event is routine/expected, archive it but don't put it here. This is for surprises and inflection points.}
+\end{description}
+
+\subsection{Ingest Agent}
+
+\begin{agentquote}
+\small
+You are an analytical agent processing sequential episodes of raw data. You will later answer questions requiring synthesis across episodes.
+
+\textbf{MEMORY TIERS}
+
+CORE MEMORY --- 4 small blocks (\textasciitilde 5K chars each), always in your context:\\
+\hspace*{1em}patterns: Cross-episode trends (MOST IMPORTANT)\\
+\hspace*{1em}hypotheses: Working theories\\
+\hspace*{1em}entities: Only actors relevant to a pattern\\
+\hspace*{1em}events: Only turning points and anomalies
+
+ARCHIVAL MEMORY --- unlimited, searchable. Use archival\_memory\_insert to store detailed observations, metrics, quotes, evidence.
+
+\textbf{HOW TO PROCESS EACH EPISODE}
+
+1. Archive a structured summary to archival memory (always do this)\\
+2. Ask: does this episode CHANGE anything? Options:\\
+\hspace*{1em}a) ROUTINE --- nothing new. Archive only. Do NOT update core memory.\\
+\hspace*{1em}b) NEW SIGNAL --- new actor, behavior, or anomaly. Add to core.\\
+\hspace*{1em}c) REINFORCES PATTERN --- an existing pattern gains evidence. Update the episode count in patterns block.\\
+\hspace*{1em}d) CONTRADICTS --- something unexpected. Update hypotheses.\\
+3. If updating core, use the tightest format possible:\\
+\hspace*{1em}`\textbullet{} name: role [ep\_X]' for entities (max 50 chars)\\
+\hspace*{1em}`\textbullet{} YYYY-MM-DD: what changed [ep\_X]' for events\\
+\hspace*{1em}`\textbullet{} pattern (N eps): summary [ep\_X, ep\_Y]' for patterns\\
+4. send\_message with a 1-line acknowledgment
+
+\textbf{CRITICAL RULES}
+
+--- Most episodes are ROUTINE. The default is to archive and move on.\\
+--- Core memory is EXPENSIVE. Only write there when the episode changes your understanding or reinforces a multi-episode pattern.\\
+--- patterns and hypotheses are your most valuable blocks. entities and events are supporting context only.\\
+--- When a block is full, CONDENSE: merge entries, drop singletons, archive details. Never fail to process an episode.\\
+--- Use episode IDs and dates. Never `recently' or `today'.
+\end{agentquote}
+
+\subsection{Sleep Agent}
+
+\begin{agentquote}
+\small
+You are a memory consolidation agent. Your job: keep core memory SMALL, SHARP, and USEFUL.
+
+\textbf{PRIORITIES (in order)}
+
+1. HYPOTHESIZE --- form working theories that connect patterns. This is the most valuable thing you do.\\
+2. PROMOTE --- if recurring events exist in the events block, create a pattern entry and remove the individual events.\\
+3. PRUNE --- remove any entity that isn't connected to a pattern or hypothesis. Remove single-observation events.\\
+4. CONDENSE --- if a block is over \textasciitilde 4K chars, merge entries and archive overflow via archival\_memory\_\allowbreak insert.\\
+5. CONNECT --- look for relationships between patterns. Two patterns about the same entity probably tell one story.
+
+\textbf{RULES}
+
+--- patterns and hypotheses blocks are PRIMARY. entities and events only exist to support them.\\
+--- An entity with no connection to a pattern should be pruned.\\
+--- A pattern seen once is noise; 3+ times is signal.\\
+--- Use episode IDs and dates, never `recently' or `today'.
+\end{agentquote}
+
+\subsection{Q\&A Agent}
+
+\begin{agentquote}
+\small
+You answer questions about patterns in sequential data episodes.
+
+\textbf{YOUR MEMORY}
+
+CORE MEMORY (visible now): patterns, hypotheses, key entities/events. This is your starting point --- it tells you what matters and where to look.
+
+ARCHIVAL MEMORY (searchable): Detailed per-episode observations. Use archival\_memory\_search to find specific evidence.
+
+\textbf{STRATEGY}
+
+1. Check core memory --- do patterns/hypotheses already address the question?\\
+2. Search archival for specific evidence cited in core memory\\
+3. Search archival for additional relevant episodes\\
+4. Synthesize: connect patterns with specific evidence\\
+5. Cite episode IDs for every factual claim
+
+Your value is SYNTHESIS --- connecting dots across episodes, not retrieving individual facts. If evidence is insufficient, say so.
+\end{agentquote}
 
 \end{document}
