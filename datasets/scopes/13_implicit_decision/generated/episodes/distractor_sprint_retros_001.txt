@@ -1,0 +1,604 @@
+CRESCENDO LABS — SPRINT 14 RETROSPECTIVE
+Date: 2025-06-04 (Wednesday)
+Time: 3:00–4:15 PM CT
+Location: Zoom (Meeting ID: 847-2291-0053, Recording: Enabled)
+Facilitator: Kai Nakamura (Scrum Master)
+Team: Horizon Squad (backend services team)
+Attendees: Kai Nakamura, Derek Lane (Tech Lead), Priti Sharma, Angela Fong, Marcus Webb, Yuto Hayashi, Simone Osei
+Sprint: Sprint 14 ("Sequoia")
+Sprint Duration: 2 weeks (2025-05-21 — 2025-06-04)
+Velocity: 21 story points completed / 26 committed (81%)
+Burndown: Day 5 on track (14/26), Day 8 deviation began (16/26 expected 20), Day 10 final: 21/26
+
+Miro Board: https://miro.com/app/board/horizon-squad-sprint14-retro
+Confluence Page: https://crescendo.atlassian.net/wiki/spaces/HOR/pages/sprint14-retro
+
+---
+
+PRE-RETRO HEALTH CHECK (anonymous poll results)
+
+| Dimension          | Score (1-5) | Trend vs Sprint 13 |
+|--------------------|-------------|---------------------|
+| Team morale        | 3.9         | +0.2                |
+| Process confidence | 3.4         | -0.3                |
+| Technical health   | 3.6         | flat                |
+| Collaboration      | 4.1         | +0.1                |
+| Sustainability     | 3.2         | -0.1                |
+
+[Kai Nakamura — 3:00 PM]
+Hey everyone, welcome back. Let me share the anonymous health check results real quick before we get started. Morale is up slightly which is nice — collaboration is our highest score at 4.1. Process confidence dropped a bit though, 3.4, which probably reflects the sizing miss and the mid-sprint scope additions. We'll dig into that.
+
+[Priti Sharma — 3:01 PM]
+Sustainability at 3.2 is the one that worries me. That's been trending down for three sprints.
+
+[Kai Nakamura — 3:02 PM]
+Noted, and we should keep that in mind as we go through the retro. Let's see if the items on the board address it.
+
+---
+
+SPRINT SUMMARY
+
+**Sprint Goal:** Launch the payment reconciliation service and complete the partner API rate limiting implementation.
+
+**What shipped:**
+- Payment reconciliation service v1 (core matching engine, settlement reports, exception queue)
+  - 14 PRs merged, 2,847 lines added, 312 lines removed
+  - Covers ACH, wire, and card settlement matching
+  - Exception queue handles unmatched transactions with configurable aging thresholds
+- Partner API rate limiting (sliding window algorithm, per-partner configurable limits)
+  - Redis-backed sliding window with 1-second granularity
+  - Admin endpoint for adjusting per-partner limits without redeployment
+  - Response headers: X-RateLimit-Remaining, X-RateLimit-Reset
+- Invoice generation hotfix (rounding error on multi-currency invoices)
+  - Root cause: floating-point arithmetic on EUR→USD conversion instead of decimal
+  - Fix: migrated all currency math to Python `decimal.Decimal` with ROUND_HALF_EVEN
+- Database connection pooling optimization (PgBouncer configuration tuning)
+  - Reduced idle connection count from 340 to 85
+  - P95 query latency improved from 23ms to 14ms under load
+
+**What didn't ship:**
+- Payment reconciliation automated retry logic (5 story points) — underestimated complexity
+  - Needs state machine (7 states), idempotency keys, dead-letter queue, backoff strategy
+  - Re-estimated at 13 story points for Sprint 15
+- Partner API usage dashboard (frontend) — blocked by design handoff delay
+  - Design team delivered mockups on May 30 (3 days late)
+  - Frontend ticket depends on finalized component library which is still in review
+  - Moved to Sprint 16 to allow design to finalize
+
+**Incidents during sprint:**
+- P2: Invoice generation produced incorrect totals for EUR→USD conversions (resolved in 4 hours)
+  - Detected: May 28, 2:17 PM CT via automated reconciliation alert
+  - Impacted: 23 invoices generated between May 26–28
+  - Resolution: Hotfix deployed May 28, 6:12 PM CT; affected invoices regenerated and resent
+- P3: Partner API returned 500 errors for 12 minutes during rate limiter deployment (configuration error)
+  - Detected: May 30, 3:42 PM CT via Datadog alert on 5xx spike
+  - Root cause: Redis connection string in deployment config pointed to staging instead of production
+  - Resolution: Config corrected, service restarted; no data loss, 47 requests returned 500
+
+**Sprint metrics:**
+| Metric              | Sprint 13 | Sprint 14 | Delta  |
+|---------------------|-----------|-----------|--------|
+| Velocity            | 24/28     | 21/26     | -3     |
+| Carry-over points   | 4         | 5         | +1     |
+| Bug escape rate     | 0         | 1         | +1     |
+| PR merge time (avg) | 19 hrs    | 18 hrs    | -1 hr  |
+| Deployment count    | 8         | 11        | +3     |
+| Incidents           | 1 (P3)   | 2 (P2+P3) | +1     |
+
+---
+
+RETRO FORMAT: START / STOP / CONTINUE
+
+[Kai Nakamura — 3:05 PM]
+Alright team, Sprint 14 is in the books. We hit 81% velocity — not where we want to be but not terrible given the unplanned incident work. Let's do our standard Start/Stop/Continue. Everyone has 5 minutes to write their items on the Miro board. Go.
+
+[5-minute silent writing period]
+
+[Kai Nakamura — 3:12 PM]
+OK, let's walk through what's on the board. I'm going to group similar items. I see 16 items total — nice. Let me cluster them. Looks like we have four groups in Start, two in Stop, and three in Continue. Let's go in order.
+
+---
+
+SECTION: START
+
+**Item: Start doing technical design reviews BEFORE sprint commitment**
+Written by: Derek Lane, Angela Fong
+Votes: 6 (all team members except Kai who facilitated)
+
+[Derek Lane — 3:14 PM]
+The payment reconciliation retry logic got pulled because we underestimated the complexity. When I actually sat down to design it, I realized it needs a state machine with 7 states, idempotency guarantees, and dead-letter handling. That's not a "5 story point" ticket — it's probably 13. If we'd done a design review before sprint planning, we would have sized it correctly and either committed to less or broken it into smaller pieces.
+
+[Angela Fong — 3:15 PM]
+Same thing happened with my partner API work two sprints ago. The ticket said "implement rate limiting" but when I dug in, the sliding window algorithm had edge cases around partner timezone boundaries that took 3 extra days. A 30-minute design review would have caught that.
+
+[Marcus Webb — 3:15 PM]
+Can you elaborate on the timezone edge case, Angela? I want to make sure we don't hit the same kind of thing again with the usage dashboard.
+
+[Angela Fong — 3:16 PM]
+Yeah, so partners in APAC have rate limit windows that reset at midnight their local time, but our Redis keys were using UTC. When the sliding window crossed the UTC midnight boundary, the counter was resetting for some partners mid-window. The fix was to key the windows by partner timezone offset, but that required a schema change in the partner configuration table. That kind of second-order complexity is exactly what a design review catches.
+
+[Priti Sharma — 3:16 PM]
+Counter-point: if we do design reviews for every ticket, it adds overhead. We're already spending 15% of our sprint on ceremonies. Can we limit it to tickets above a certain size? Like, anything over 5 story points gets a mandatory design review?
+
+[Simone Osei — 3:17 PM]
+I pulled the numbers. We spend roughly 12 hours per sprint on ceremonies right now — that's planning, standup, review, retro, and backlog grooming. Adding design reviews for big tickets would add maybe 2-3 hours if we keep them to 30 minutes each and we average 4-5 large tickets per sprint.
+
+[Derek Lane — 3:17 PM]
+That's reasonable. The small tickets are fine — it's the complex backend work that bites us.
+
+[Yuto Hayashi — 3:17 PM]
+I agree with the principle, but how do we estimate whether a ticket is 5+ points before the design review? Like, the retry logic was originally estimated at 5. It was the design review itself that revealed it was actually 13. So we need the review to know whether we need the review — it's a bit circular.
+
+[Derek Lane — 3:18 PM]
+Good point, Yuto. I think the heuristic is: if the ticket involves a new subsystem, a new integration, or distributed state management, it gets a review regardless of initial estimate. The initial estimate is a signal but it shouldn't be the only trigger.
+
+[Kai Nakamura — 3:18 PM]
+Let's formalize this. Proposal: tickets estimated at 8+ story points require a written design doc (can be lightweight — 1 page) reviewed by at least one other engineer before sprint commitment.
+
+[Marcus Webb — 3:19 PM]
+What about the threshold? 8 points seems high. The retry logic was 5 points and it was the one that blew up.
+
+[Priti Sharma — 3:19 PM]
+Marcus makes a good point. And honestly, a lot of the tickets that cause problems are the ones that look simple on the surface. The 3-point ticket that turns into 8 because nobody realized it touched the auth layer.
+
+[Kai Nakamura — 3:19 PM]
+Fair. Let's set the threshold at 5+ points. Anything 5 or above gets a design review.
+
+[Angela Fong — 3:20 PM]
+And to Yuto's point — what about the format? Does it have to be a Confluence page? Can it be a Google Doc? A Slack thread with a diagram?
+
+[Derek Lane — 3:20 PM]
+I'd say it needs to be written and persistent — so Confluence or a Notion doc linked from the Jira ticket. Slack threads get lost. The doc doesn't need to be long. Problem statement, proposed approach, known risks, and open questions. Half a page is fine for most things. The point is to force the author to think through the approach and give at least one other engineer a chance to say "wait, have you considered X?"
+
+[Derek Lane — 3:20 PM]
+Works for me.
+
+[Simone Osei — 3:20 PM]
+Can the reviewer be anyone on the team or does it need to be Derek as tech lead?
+
+[Derek Lane — 3:20 PM]
+Anyone on the team. I don't want to be a bottleneck. The goal is a second pair of eyes, not my approval specifically. If it's infrastructure work, probably pair with someone who's touched that area. If it's new feature work, pair with someone who hasn't — fresh eyes catch assumptions.
+
+[Kai Nakamura — 3:20 PM]
+Show of hands — everyone in favor?
+
+[All — various timestamps]
+[All hands raised]
+
+[Kai Nakamura — 3:21 PM]
+**Decision: We decided to require design reviews for all tickets estimated at 5+ story points before sprint commitment.** I'll add it to our team working agreement and update the sprint planning template. Design docs go on Confluence, linked from the Jira ticket, reviewed by at least one other engineer. Format: problem statement, approach, risks, open questions.
+
+---
+
+**Item: Start pairing on complex tickets**
+Written by: Yuto Hayashi
+Votes: 5
+
+[Yuto Hayashi — 3:22 PM]
+I was solo on the PgBouncer optimization and it took me 3 days to figure out the right configuration. When I finally asked Derek for help, he'd done the same thing at his previous company and had the answer in 10 minutes. If we'd paired from the start, I would have saved 2.5 days.
+
+[Priti Sharma — 3:22 PM]
+What was the actual PgBouncer issue, for context?
+
+[Yuto Hayashi — 3:22 PM]
+So our connection pool was set to transaction mode with a pool size of 50, but our application was holding connections open during long-running report generation queries. That meant the pool was exhausted during peak hours. I tried increasing pool size to 200 but that caused PostgreSQL to hit its max_connections limit. The fix was switching to statement mode for the reporting queries and keeping transaction mode for the OLTP path, but I had to figure that out by reading PgBouncer source code comments because the documentation doesn't cover mixed-mode configurations well.
+
+[Derek Lane — 3:23 PM]
+I didn't even know you were working on PgBouncer until you pinged me. That's on both of us — but also on the process. We should be pairing on infrastructure work by default because the knowledge is so tribal.
+
+[Marcus Webb — 3:23 PM]
+I noticed the same dynamic with the connection pooling. I could see in the Datadog dashboard that connection counts were spiking but I didn't connect that to Yuto's ticket. Better visibility during standups would have helped too — like, "I'm working on connection pooling and I'm stuck on the mixed-mode config."
+
+[Yuto Hayashi — 3:24 PM]
+That's fair. I think I was a bit embarrassed to say I was stuck. Three days feels like a long time to spend on configuration. But that's exactly the kind of thing pairing fixes — you don't get stuck alone in the first place.
+
+[Simone Osei — 3:24 PM]
+I'd extend that beyond infrastructure. The payment reconciliation matching engine was solo work too, and I had questions about the settlement format that Marcus could have answered immediately. Instead, I spent half a day reading documentation.
+
+[Marcus Webb — 3:24 PM]
+Yeah, the settlement file format from our payment processor has a bunch of undocumented fields and edge cases. I've been working with it for two years — I could have just told you which fields to ignore and which ones are critical. That's the kind of tribal knowledge that doesn't exist in documentation.
+
+[Simone Osei — 3:25 PM]
+Exactly. And the matching algorithm itself — I went with a deterministic approach first (exact match on transaction ID + amount + date) and then had to add fuzzy matching for partial settlements. If we'd paired, you probably would have told me upfront that partial settlements are common and I should design for fuzzy matching from the start.
+
+[Kai Nakamura — 3:25 PM]
+Pairing is great but it halves our throughput on paper. How do we balance?
+
+[Derek Lane — 3:26 PM]
+It doesn't halve throughput in practice. Paired work has fewer bugs, less rework, and shared knowledge. The research shows pairs produce 15% fewer lines of code but with 15% fewer defects, and the total calendar time is often shorter because you avoid rabbit holes.
+
+[Angela Fong — 3:26 PM]
+Also, we're not talking about full-time pairing on everything. Just for the tickets where tribal knowledge or unfamiliar infrastructure is involved. If I'm writing a straightforward CRUD endpoint, I don't need a pair. If I'm configuring a new Redis cluster or debugging a connection pool, that's a different story.
+
+[Priti Sharma — 3:27 PM]
+I'd compromise: mandatory pairing for infrastructure and data pipeline tickets (where tribal knowledge matters most), optional for feature work.
+
+[Yuto Hayashi — 3:27 PM]
+How do we define "infrastructure" versus "feature" though? The PgBouncer work started as a performance optimization for the reconciliation service. Is that infrastructure or feature-adjacent?
+
+[Derek Lane — 3:27 PM]
+I'd define infrastructure broadly: anything that touches databases, caching, deployment configuration, monitoring, or shared libraries. If you're modifying something that other services depend on, it's infrastructure.
+
+[Kai Nakamura — 3:28 PM]
+**Decision: We decided to adopt mandatory pairing for infrastructure and data pipeline tickets.** Optional for feature work but encouraged. I'll track pairing frequency in our sprint metrics to see if it correlates with velocity improvement. Derek's definition of infrastructure: databases, caching, deployment config, monitoring, shared libraries — anything other services depend on.
+
+[Simone Osei — 3:28 PM]
+One logistics question — how do we handle pairing when people are in different time zones? Angela is Central, I'm Eastern, Yuto is Pacific. That's a 3-hour spread.
+
+[Kai Nakamura — 3:29 PM]
+Good point. Our overlap window is roughly 10am–3pm CT. Pairing sessions should be scheduled within that window. If a ticket needs more pairing time than that window allows, the pair can divide work asynchronously — one person works on their portion and the other reviews + extends the next day. But the key is that no one is solo on infrastructure work without at least a pairing kickoff session.
+
+---
+
+**Item: Start doing post-incident reviews within 48 hours**
+Written by: Marcus Webb
+Votes: 7 (unanimous)
+
+[Marcus Webb — 3:30 PM]
+The invoice rounding bug on May 28th was a P2 incident. We fixed it in 4 hours, which is great. But we never did a post-incident review. I still don't fully understand why the rounding error happened, and I'm worried there are similar bugs in other currency conversion paths.
+
+[Priti Sharma — 3:30 PM]
+I had the same concern. We have currency conversions in at least four services — invoicing, reconciliation, partner payouts, and the reporting dashboard. The hotfix only touched invoicing. Did anyone check the other three?
+
+[Marcus Webb — 3:31 PM]
+No. And that's exactly the kind of thing a post-incident review would have surfaced. The action item would have been "audit all currency conversion paths for the same pattern." Without the review, it's just floating out there as a known risk that nobody owns.
+
+[Angela Fong — 3:31 PM]
+Same with the rate limiter 500 errors during deployment. We fixed the configuration error but we never dug into why the deployment process allowed a bad config to go live. Was it a missing validation? A testing gap?
+
+[Angela Fong — 3:31 PM]
+For context — the issue was that the deployment manifest had an environment variable override that pointed the Redis connection string to staging. Our CI/CD pipeline doesn't validate connection strings against a known-good list. It just deploys whatever's in the manifest. So a typo or a copy-paste error can point production to staging and nothing catches it until requests start failing.
+
+[Yuto Hayashi — 3:32 PM]
+That's actually terrifying. We should have a smoke test in the deployment pipeline that validates all connection strings resolve to production endpoints.
+
+[Angela Fong — 3:32 PM]
+Right. But that action item doesn't exist because we never did the review.
+
+[Kai Nakamura — 3:32 PM]
+We have a post-incident review process on paper but we keep deprioritizing it in favor of sprint work. The reviews keep getting pushed to "next week" and then never happen.
+
+[Simone Osei — 3:33 PM]
+I looked at our incident tracker. We've had 9 incidents in the last 6 sprints. We did post-incident reviews for 3 of them. That's a 33% completion rate. The ones we did review all produced actionable items — the ones we skipped, we have no idea if the root cause was fully addressed.
+
+[Derek Lane — 3:33 PM]
+Let's make it a hard rule: post-incident review must happen within 48 hours of resolution. If it doesn't, it blocks the next deployment. That creates enough urgency to prioritize it.
+
+[Priti Sharma — 3:34 PM]
+How long should the review take? I don't want us spending half a day on every P3 incident.
+
+[Derek Lane — 3:34 PM]
+The review itself should be 30 minutes max. The template I'm thinking of is: timeline (what happened when), root cause (five-whys), impact (who was affected, how), action items (what prevents recurrence), and owner (who's responsible for each action item). You can fill that out in 20 minutes if you were involved in the incident.
+
+[Simone Osei — 3:34 PM]
+The deployment block is aggressive. What if a P1 hotfix needs to go out?
+
+[Derek Lane — 3:35 PM]
+P1 hotfixes are exempt. But P2 and below — yes, you can't deploy new features if you haven't reviewed the last incident.
+
+[Marcus Webb — 3:35 PM]
+Does the deployment block apply to the whole team or just the individuals involved in the unreviewd incident?
+
+[Derek Lane — 3:35 PM]
+The whole team. The point is to create collective ownership. If the team knows that an unreviewed incident blocks everyone's deployments, there's social pressure to get the review done quickly. If it only blocks the individuals involved, they might be on PTO or working on something else and the review still doesn't happen.
+
+[Kai Nakamura — 3:36 PM]
+**Decision: We decided to enforce a 48-hour post-incident review requirement for all P2+ incidents.** Reviews block non-emergency deployments until completed. Derek will create a lightweight review template (root cause, timeline, action items) that we can fill out in 30 minutes. Template goes on Confluence; each review linked from the incident Jira ticket. The deployment block applies team-wide to create collective ownership.
+
+---
+
+SECTION: STOP
+
+**Item: Stop accepting mid-sprint scope changes without formal trade-off discussion**
+Written by: Priti Sharma, Simone Osei
+Votes: 6
+
+[Priti Sharma — 3:38 PM]
+We accepted two unplanned items this sprint — the invoice hotfix and the PgBouncer optimization. Both were important but neither was discussed as a formal trade-off. We just added them on top of the existing commitment. That's why we missed velocity target.
+
+[Simone Osei — 3:39 PM]
+The invoice hotfix was a legitimate P2 — we had to fix it. But the PgBouncer work could have waited until next sprint. It was framed as "urgent" but nothing was actually broken — it was a performance optimization.
+
+[Marcus Webb — 3:39 PM]
+And to be clear about the numbers: the invoice hotfix consumed about 6 engineer-hours across two people (me and Simone for the fix, plus Angela for the deployment). The PgBouncer work consumed about 28 engineer-hours — 24 for Yuto plus 4 for Derek when he helped. That's the equivalent of a full 5-point ticket that we never planned for.
+
+[Angela Fong — 3:40 PM]
+And when you add up the unplanned work — 6 hours for the hotfix, 28 for PgBouncer, plus maybe 3 hours for the rate limiter incident response — that's 37 hours of unplanned work. In a two-week sprint with 7 engineers, our total capacity is roughly 560 engineer-hours. So 37 hours is about 7% of our sprint consumed by unplanned work. That explains the velocity miss pretty neatly.
+
+[Yuto Hayashi — 3:40 PM]
+I'll take responsibility for that. I raised the PgBouncer issue in standup and Derek said "let's fix it now before it gets worse." I should have pushed back and said "let's put it in the backlog for next sprint."
+
+[Derek Lane — 3:41 PM]
+Fair criticism. I was thinking about technical debt but I should have framed it as a trade-off: "if Yuto works on PgBouncer, which ticket do we drop?"
+
+[Priti Sharma — 3:41 PM]
+And to be honest, the PgBouncer issue had been there for weeks. Connection pool utilization was high but nothing was failing. We had headroom. It felt urgent because the metrics looked bad on the dashboard, but "high utilization" is not an outage.
+
+[Kai Nakamura — 3:42 PM]
+This is a process issue. Proposal: any mid-sprint scope addition requires answering two questions:
+1. What are we dropping to make room?
+2. Who makes the trade-off call? (Answer: me + Derek)
+
+If nobody can identify what to drop, the new work goes to the backlog.
+
+[Simone Osei — 3:42 PM]
+I like that framing. It's not about saying "no" to everything — it's about making the cost explicit. If Derek had said "let's drop the partner API dashboard to make room for PgBouncer," we could have evaluated that trade-off consciously.
+
+[Marcus Webb — 3:43 PM]
+Exception for P1/P2 incidents?
+
+[Kai Nakamura — 3:44 PM]
+P1 incidents are always accepted — they're emergencies. P2 incidents go through the trade-off discussion but with an expedited timeline (same-day decision). Non-incident work always goes through the full process.
+
+[Angela Fong — 3:44 PM]
+Can we also track the scope change requests somewhere? I want to see the trend over sprints. If we're getting a lot of mid-sprint scope additions, that might indicate our backlog grooming isn't working or product is changing priorities too often.
+
+[Kai Nakamura — 3:44 PM]
+Good idea. I'll add a "scope change log" field to our sprint board. Every scope addition or removal gets logged with the date, reason, and trade-off decision.
+
+[Kai Nakamura — 3:45 PM]
+**Decision: We decided to enforce a formal trade-off discussion for all mid-sprint scope additions.** Must identify what's being dropped. P1 exempt, P2 expedited. I'll add a "Scope Change" ceremony to our working agreement and create a scope change log on the sprint board to track frequency and trends.
+
+---
+
+**Item: Stop deploying on Fridays**
+Written by: Angela Fong, Marcus Webb
+Votes: 5
+
+[Angela Fong — 3:47 PM]
+The rate limiter incident happened on a Friday afternoon deployment. If it had been worse, we'd have been debugging over the weekend. Friday deployments are a well-known antipattern in the industry.
+
+[Simone Osei — 3:47 PM]
+I remember that afternoon. I was already mentally wrapping up for the week when the Datadog alerts started firing. Not the best headspace for incident response.
+
+[Marcus Webb — 3:48 PM]
+Our deployment data backs this up. In Q2, we had 4 incidents. 3 of them happened on Friday deployments. Small sample size but the pattern is suggestive.
+
+[Marcus Webb — 3:48 PM]
+I pulled the actual data: April 11 (Friday, P3 — deployment cert rotation broke partner callbacks), May 16 (Friday, P3 — cache invalidation race condition), May 30 (Friday, P3 — the rate limiter config error), and May 28 (Wednesday, P2 — the invoice rounding bug). So the only non-Friday incident was the Wednesday invoice bug, which wasn't deployment-related at all. Every deployment-related incident this quarter happened on a Friday.
+
+[Derek Lane — 3:49 PM]
+I agree in principle but we need to be pragmatic. Sometimes the sprint ends on Friday and we want to ship before the weekend. If we ban Friday deploys, we're effectively losing a day of deployment window every sprint.
+
+[Yuto Hayashi — 3:49 PM]
+Could we deploy on Thursday instead and use Friday for monitoring and documentation? That way we get the same number of deploy days but with a buffer.
+
+[Angela Fong — 3:50 PM]
+That works if the code is ready Thursday. But sometimes PRs are still getting reviewed Thursday afternoon and we're merging Friday morning. Shifting the whole cycle left by a day is easier said than done.
+
+[Priti Sharma — 3:50 PM]
+Counter-proposal: ban Friday deploys after 2pm. Morning deploys are fine because we have the full afternoon to monitor and roll back if needed.
+
+[Marcus Webb — 3:50 PM]
+That's actually a good compromise. The rate limiter deployment went out at 3:42 PM — that's exactly the danger zone. If we'd deployed at 10 AM, we would have had 7 hours to catch and fix the issue during normal working hours.
+
+[Derek Lane — 3:50 PM]
+I can live with the 2 PM cutoff. That gives us the morning for last-minute deployments but avoids the Friday afternoon danger zone.
+
+[Kai Nakamura — 3:51 PM]
+I like that compromise. **Decision: We chose to ban deployments after 2pm on Fridays.** Morning deployments are allowed. If a deployment goes out before 2pm, the deploying engineer monitors for 2 hours before signing off for the weekend. I'll update our deployment runbook and add a deployment window check to our CI/CD pipeline — if the deploy is triggered after 2pm CT on a Friday, it requires a manual override from either me or Derek.
+
+[Angela Fong — 3:51 PM]
+Can we also add that to the deploy checklist in the README? I know some teams just look at the checklist before hitting the deploy button and don't check the runbook.
+
+[Kai Nakamura — 3:52 PM]
+Yep, I'll add it to both places.
+
+---
+
+SECTION: CONTINUE
+
+**Item: Continue daily async standups in Slack**
+Written by: Yuto Hayashi, Angela Fong
+Votes: 7 (unanimous)
+
+[Yuto Hayashi — 3:53 PM]
+The switch from synchronous standups to async Slack posts has been great. I can write my update at 8am before the office gets busy, and I can read everyone else's updates when it fits my schedule. No more standing around for 15 minutes listening to updates that aren't relevant to my work.
+
+[Angela Fong — 3:54 PM]
+Same. The async format also creates a written record. I've gone back and searched old standup posts to find when something was discussed. Can't do that with verbal standups.
+
+[Marcus Webb — 3:54 PM]
+One thing I appreciate is the thread replies. When someone posts a blocker, others can reply with suggestions directly in the thread. It's like a mini-brainstorm that happens asynchronously. Last week Priti posted about a query performance issue in her standup and I replied with a link to the index optimization guide I wrote last quarter. In a verbal standup, I might have forgotten about that guide.
+
+[Priti Sharma — 3:55 PM]
+Yeah, that was super helpful. I had that guide bookmarked within the hour and the query went from 4 seconds to 200 milliseconds.
+
+[Derek Lane — 3:55 PM]
+I was skeptical when we switched but it's working. The one thing I'd add is a weekly 15-minute sync standup for the team to discuss cross-cutting issues that are hard to convey in text. Kind of a "standup of standups."
+
+[Simone Osei — 3:55 PM]
+Agreed. Some things are just easier to hash out verbally. Like the PgBouncer issue — Yuto's standup posts mentioned he was working on connection pooling, but the nuance of being stuck on mixed-mode configuration doesn't come through in a two-sentence update. A quick weekly sync would give space for those conversations.
+
+[Yuto Hayashi — 3:56 PM]
+I'd second that. The async posts are great for status updates but not great for "I'm stuck and I don't even know the right question to ask." A weekly sync gives us a low-pressure venue for those kinds of discussions.
+
+[Kai Nakamura — 3:56 PM]
+What day works best for the weekly sync? I'm thinking midweek so we can course-correct if something is off.
+
+[Priti Sharma — 3:56 PM]
+Wednesday works for me. It's the middle of the sprint week and it doesn't conflict with our other ceremonies.
+
+[Angela Fong — 3:56 PM]
+Wednesday is good. Not Monday (too many other meetings) and not Friday (people are wrapping up).
+
+[Kai Nakamura — 3:56 PM]
+**Decision: We decided to continue async daily standups and add a weekly 15-minute sync standup on Wednesdays for cross-cutting topics.** I'll schedule it for 10:30 AM CT, which is in our overlap window for all time zones. Agenda: blockers, cross-cutting issues, and anything that doesn't fit in a Slack post.
+
+---
+
+**Item: Continue the code review SLA (24-hour turnaround)**
+Written by: Simone Osei
+Votes: 6
+
+[Simone Osei — 3:57 PM]
+The 24-hour code review SLA we adopted in Sprint 12 has been excellent. Before, PRs would sit for 3-4 days. Now the average review time is 18 hours and the longest wait this sprint was 26 hours (still close to the SLA).
+
+[Priti Sharma — 3:57 PM]
+I ran the numbers from our GitHub analytics. In Sprint 12 (before the SLA), our average PR age was 72 hours and we had 11 PRs open at peak. In Sprint 14, average PR age is 18 hours and peak open PRs was 5. That's a massive improvement in flow.
+
+[Angela Fong — 3:58 PM]
+And it reduces context-switching costs. When a PR sits for 3 days, you've moved on to something else and then you have to context-switch back when the review comments come in. With 18-hour turnaround, the code is still fresh in your head.
+
+[Marcus Webb — 3:58 PM]
+It's also improved code quality. When you know your PR will be reviewed within 24 hours, you write better descriptions and cleaner code because you know someone is actually going to look at it.
+
+[Derek Lane — 3:58 PM]
+I've noticed the same thing. PR descriptions have gotten much more detailed since the SLA. People are writing "context" sections explaining why the change was made, not just what the change is. That makes the review much faster because you're not guessing at intent.
+
+[Yuto Hayashi — 3:59 PM]
+One question — do we need to formalize what happens when the SLA is breached? Right now it's just a social norm. If someone's PR sits for 26 hours, they ping the reviewer and it gets done. But what if it sits for 48 hours?
+
+[Simone Osei — 3:59 PM]
+Hasn't happened yet, but good to think about. Maybe if a PR is past 24 hours, it automatically gets reassigned to another reviewer?
+
+[Kai Nakamura — 3:59 PM]
+Let's keep the current honor system for now. If breaches become a pattern, we'll add escalation rules. But at 18-hour average, the system is working.
+
+[Kai Nakamura — 3:59 PM]
+Agreed. **Continuing the 24-hour review SLA. No changes needed.** We'll revisit if breach frequency increases.
+
+---
+
+**Item: Continue sprint demos for stakeholders**
+Written by: Priti Sharma
+Votes: 5
+
+[Priti Sharma — 4:00 PM]
+The Friday sprint demos have been great for visibility. Product, sales, and leadership all attend. Last week, the sales team saw the payment reconciliation demo and immediately started using it in customer conversations. That wouldn't have happened if they'd just read a changelog.
+
+[Marcus Webb — 4:00 PM]
+The demos also give us direct feedback from stakeholders. During the reconciliation demo, the head of customer success asked "can it handle partial refunds?" and we hadn't thought of that case. We added it to the backlog on the spot. That kind of real-time feedback loop is invaluable.
+
+[Angela Fong — 4:00 PM]
+I also like that the demos force us to have something demo-able every sprint. It creates a natural incentive to ship incrementally rather than working on a giant feature for three sprints and demo-ing at the end.
+
+[Simone Osei — 4:01 PM]
+One thing I'd like to improve — not change, just improve — is the demo prep time. I spent about 2 hours preparing the reconciliation demo last Friday. Setting up test data, writing the script, making sure the staging environment was working. That felt like a lot.
+
+[Kai Nakamura — 4:01 PM]
+That's valid. Maybe we can create a reusable demo environment with pre-loaded test data that persists between sprints. We'll put that on the backlog as a tooling improvement.
+
+[Kai Nakamura — 4:01 PM]
+**Continuing sprint demos. No changes.** Simone will add a ticket for a persistent demo environment to the tooling backlog.
+
+---
+
+TEAM KUDOS (added at 4:03 PM)
+
+[Kai Nakamura — 4:03 PM]
+Before we wrap up, let's do a quick kudos round. Anyone want to recognize a teammate?
+
+[Simone Osei — 4:03 PM]
+Kudos to Marcus for the invoice hotfix. He diagnosed the floating-point rounding issue in under an hour. The fact that he immediately knew to check the `decimal.Decimal` migration path saved us a lot of time.
+
+[Marcus Webb — 4:04 PM]
+Thanks, Simone. And back at you — the reconciliation matching engine is solid. The test coverage is excellent; 94% branch coverage is way above our team average.
+
+[Derek Lane — 4:04 PM]
+Kudos to Angela for the rate limiter deployment, even though it had the config issue. The sliding window implementation itself is clean and well-documented. The Redis integration tests she wrote are going to save us hours in future sprints.
+
+[Angela Fong — 4:05 PM]
+Appreciate that, Derek. And kudos to Yuto for grinding through the PgBouncer optimization. It wasn't glamorous work but the performance improvement is real — our P95 query latency dropped by 40%.
+
+[Yuto Hayashi — 4:05 PM]
+Thanks, Angela. And kudos to Priti for the sprint demos. She always makes our work look polished for stakeholders. That takes effort.
+
+[Priti Sharma — 4:06 PM]
+And kudos to Kai for keeping us organized. Seven decisions in one retro is a lot and they all feel actionable.
+
+---
+
+ACTION ITEMS SUMMARY
+
+| # | Action | Owner | Deadline | Jira Ticket |
+|---|--------|-------|----------|-------------|
+| 1 | Add design review requirement (5+ pts) to working agreement | Kai | Sprint 15 Day 1 | HOR-847 |
+| 2 | Create lightweight design doc template (problem, approach, risks, open questions) | Derek | Sprint 15 Day 3 | HOR-848 |
+| 3 | Add pairing policy to working agreement (mandatory for infra/data pipeline) | Kai | Sprint 15 Day 1 | HOR-849 |
+| 4 | Create post-incident review template (timeline, root cause, impact, action items, owner) | Derek | Sprint 15 Day 3 | HOR-850 |
+| 5 | Add scope change ceremony to working agreement | Kai | Sprint 15 Day 1 | HOR-851 |
+| 6 | Create scope change log on sprint board | Kai | Sprint 15 Day 1 | HOR-852 |
+| 7 | Update deployment policy (no Friday deploys after 2pm) | Kai | Sprint 15 Day 1 | HOR-853 |
+| 8 | Add deployment window check to CI/CD pipeline (Friday 2pm cutoff, manual override) | Angela | Sprint 15 Day 5 | HOR-854 |
+| 9 | Update deploy checklist in README with Friday cutoff rule | Angela | Sprint 15 Day 3 | HOR-855 |
+| 10 | Schedule Wednesday weekly sync standup (10:30 AM CT) | Kai | Sprint 15 Day 1 | HOR-856 |
+| 11 | Track pairing frequency in sprint metrics | Kai | Ongoing | — |
+| 12 | Conduct post-incident reviews for invoice bug and rate limiter incident | Marcus, Angela | Sprint 15 Day 5 | HOR-857, HOR-858 |
+| 13 | Audit all currency conversion paths for floating-point rounding pattern | Marcus | Sprint 15 Day 5 | HOR-859 |
+| 14 | Add persistent demo environment to tooling backlog | Simone | Sprint 15 Day 3 | HOR-860 |
+
+---
+
+DECISIONS LOG
+
+1. **We decided to require design reviews for tickets estimated at 5+ story points** before sprint commitment. Lightweight design doc (1 page) reviewed by at least one other engineer. Format: problem statement, proposed approach, known risks, open questions. Doc goes on Confluence, linked from Jira ticket.
+
+2. **We decided to adopt mandatory pairing for infrastructure and data pipeline tickets.** Optional for feature work. Infrastructure defined as: databases, caching, deployment configuration, monitoring, shared libraries — anything other services depend on. Pairing sessions scheduled within the 10am–3pm CT overlap window.
+
+3. **We decided to enforce 48-hour post-incident reviews for P2+ incidents.** Reviews block non-emergency deployments until completed. Deployment block applies team-wide to create collective ownership. Template: timeline, root cause (five-whys), impact, action items, owner. Target: 30 minutes per review.
+
+4. **We decided to enforce formal trade-off discussions for all mid-sprint scope additions.** Must identify what's being dropped. P1 exempt, P2 expedited (same-day decision). Scope changes logged on the sprint board for trend tracking.
+
+5. **We chose to ban deployments after 2pm on Fridays.** Morning deployments allowed with 2-hour monitoring requirement. CI/CD pipeline will enforce the cutoff with a manual override option for Kai or Derek.
+
+6. **We decided to continue async standups and add a weekly 15-minute Wednesday sync standup.** Scheduled at 10:30 AM CT. Agenda: blockers, cross-cutting issues, and anything that doesn't fit in a Slack post.
+
+7. **Continuing the 24-hour code review SLA and sprint demos.** No changes. Will revisit SLA escalation rules if breach frequency increases.
+
+---
+
+SPRINT 15 ("REDWOOD") PLANNING PREP
+
+[Kai Nakamura — 4:07 PM]
+Quick preview for Sprint 15 planning. Here's what's in the backlog:
+- Payment reconciliation retry logic (re-estimated at 13 pts, needs design review)
+- Partner API usage dashboard (awaiting design handoff, tentatively Sprint 16)
+- Automated settlement file ingestion (new, 8 pts)
+- Currency conversion audit (action item from today, 3 pts)
+- CI/CD deployment window enforcement (action item from today, 2 pts)
+
+[Derek Lane — 4:08 PM]
+The retry logic design doc is already in progress. I'll have it ready for review by Monday so we can discuss it at Tuesday's planning session.
+
+[Marcus Webb — 4:08 PM]
+The currency audit should be quick. I already know the four codepaths — I just need to review each one and write up findings. If any of them have the same floating-point issue, the fix is the same: migrate to `decimal.Decimal`.
+
+[Simone Osei — 4:09 PM]
+I can pair with Marcus on the currency audit since I wrote the reconciliation matching engine and it's one of the affected codepaths. Good opportunity to apply our new pairing policy.
+
+[Kai Nakamura — 4:09 PM]
+Perfect. That's exactly the kind of thing pairing is for.
+
+---
+
+[Kai Nakamura — 4:10 PM]
+Good retro, team. Seven decisions in 75 minutes — that's efficient. I'll have the working agreement updated by tomorrow morning. Sprint 15 planning is Thursday at 10am. Come prepared with your ticket estimates and design review flags.
+
+[Derek Lane — 4:11 PM]
+One more thing — can we get the retro board printed and posted in the team area? I find it helpful to have the decisions visible.
+
+[Priti Sharma — 4:11 PM]
+We could also pin a summary in the #horizon-squad Slack channel. Not everyone walks past the team area but everyone reads Slack.
+
+[Kai Nakamura — 4:12 PM]
+I'll print the decisions section and post it. Good idea.
+
+[Kai Nakamura — 4:12 PM]
+And yes, Priti, I'll pin it in Slack too. Double coverage.
+
+[Angela Fong — 4:12 PM]
+Thanks, everyone. Good sprint, good retro. See you Thursday for planning.
+
+[Yuto Hayashi — 4:13 PM]
+See you all Thursday.
+
+[Simone Osei — 4:13 PM]
+Bye, team.
+
+[Marcus Webb — 4:13 PM]
+Later, all.
+
+---
+
+END OF EPISODE

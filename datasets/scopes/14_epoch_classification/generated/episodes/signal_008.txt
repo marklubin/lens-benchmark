@@ -1,0 +1,663 @@
+================================================================================
+FOLDLY ENGINEERING — SLACK EXPORT
+================================================================================
+Workspace     : foldly-eng
+Channel       : #engineering
+Channel ID    : C04XKQR7N2P
+Export Date   : 2025-04-19
+Messages      : 214
+Participants  : Priya Kaur, Marcus Webb, Jess Tanaka, Danny Reeves, Lina Okafor, Ravi Mehta
+Channel Desc  : Main engineering channel — builds, deploys, feature chat
+================================================================================
+
+[2025-04-19 09:15:33] lina.okafor
+staging environment update: i have the server provisioned and the application deployed. stripe test mode webhooks are pointing to staging. the staging DB is a clone of prod from last night's backup (with customer PII scrubbed). i need one more day to finalize the deployment script and write up the process
+
+[2025-04-19 09:15:51] lina.okafor
+some details on the setup for anyone curious: the staging instance is running on a separate Hetzner VPS, 4 vCPUs / 8GB RAM, same OS and postgres version as prod. i matched the nginx config as closely as possible. TLS is via Let's Encrypt, same as prod
+
+[2025-04-19 09:16:01] priya.kaur
+nice. when can we start using it?
+
+[2025-04-19 09:16:14] lina.okafor
+the deploy script is a bash script right now. it does a git pull on the staging branch, runs migrations if any, restarts the gunicorn workers, and runs a quick health check against /api/health. if the health check fails it rolls back to the previous release tag
+
+[2025-04-19 09:16:24] lina.okafor
+monday. i'll demo the deploy flow at standup. basically: push to the staging branch, deployment script runs, tests execute on staging, then if everything passes you can promote to prod
+
+[2025-04-19 09:16:38] danny.reeves
+how does the promotion to prod work? is it the same script or a separate one?
+
+[2025-04-19 09:16:44] lina.okafor
+separate script. the promote script tags the current staging commit, pulls it on the prod server, runs migrations, restarts workers, and does the same health check. if the health check fails it rolls back. both scripts log every step to a deploy log file
+
+[2025-04-19 09:16:48] marcus.webb
+so no more deploying from my laptop at 6am?
+
+[2025-04-19 09:17:02] lina.okafor
+the staging stripe account is using stripe test mode — test API keys, test webhooks, test clock. you can trigger test events from the stripe CLI or the dashboard. it processes everything the same as prod except no real charges
+
+[2025-04-19 09:17:12] lina.okafor
+correct. no more deploying from anyone's laptop at any time. all deploys go through the staging pipeline
+
+[2025-04-19 09:17:22] marcus.webb
+what about the database? is the staging DB going to stay in sync with prod or does it drift?
+
+[2025-04-19 09:17:29] lina.okafor
+it'll drift over time — that's expected. the staging DB is a snapshot from last night. i'm going to set up a weekly re-clone from prod (again, PII scrubbed via a pg_dump filter script). if you need fresh data sooner you can request a manual re-clone
+
+[2025-04-19 09:17:35] marcus.webb
+honestly? good. the 6am deploy that started all this was one of the worst decisions i've made
+
+[2025-04-19 09:17:42] jess.tanaka
+how does the PII scrubbing work? like what fields does it blank out?
+
+[2025-04-19 09:17:49] lina.okafor
+it replaces customer names with "Test Customer N", emails with "testN@example.com", and zeroes out stored payment method tokens. the scrubbing script is in the repo under scripts/scrub_staging_db.py — i'd appreciate a review on that actually, i want to make sure i'm not missing any PII fields
+
+[2025-04-19 09:17:55] jess.tanaka
+i'll take a look at the scrubbing script. want to make sure we're covering everything in the user_profiles table too, there's a phone_number column and an address field
+
+[2025-04-19 09:17:58] jess.tanaka
+:raised_hands: progress
+
+[2025-04-19 09:18:06] lina.okafor
+good catch on phone_number and address — i'll add those to the scrubbing list before the monday demo
+
+[2025-04-19 09:18:15] danny.reeves
+is the staging URL going to be something we can share with the team? or is it behind a VPN?
+
+[2025-04-19 09:18:22] lina.okafor
+it's behind HTTP basic auth for now. credentials are in 1Password under "Staging Environment". long term i want to put it behind our SSO but that's a separate task
+
+[2025-04-19 09:18:31] priya.kaur
+HTTP basic auth is fine for now. let's not scope creep the staging setup
+
+---
+
+[2025-04-19 09:45:22] priya.kaur
+i've been thinking about our deployment process more broadly. lina's staging environment is a great start, but we need to formalize the whole flow. here's what i'm proposing:
+
+1. developer creates a branch and makes changes
+2. developer opens a PR
+3. at least 1 teammate reviews and approves
+4. merge to main triggers deploy to staging
+5. engineer verifies on staging
+6. manual promote to production
+
+thoughts?
+
+[2025-04-19 09:45:40] priya.kaur
+i'm writing this up because i want us all on the same page. last week showed what happens when deployment is ad hoc
+
+[2025-04-19 09:45:55] marcus.webb
+sounds right. question — what about urgent fixes? if we find another billing bug, do we still go through the full flow?
+
+[2025-04-19 09:46:08] danny.reeves
+yeah, same question. like what if something is actively breaking in prod and we need a fix in 10 minutes?
+
+[2025-04-19 09:46:18] priya.kaur
+for true emergencies, we can do an expedited review — reviewer looks at the PR immediately, 15-minute SLA. but we never skip the review step. the incident taught us that emergency fixes without review can introduce new bugs
+
+[2025-04-19 09:46:30] marcus.webb
+15 minutes is reasonable. as long as we all agree that someone has to be available to review. what if the reviewer is asleep?
+
+[2025-04-19 09:46:37] priya.kaur
+we're a 6-person team and we're all in roughly the same timezone. if it's 3am, whoever is up pages someone. but honestly if it's 3am and it's not data loss or a security incident, it can wait until morning
+
+[2025-04-19 09:46:42] danny.reeves
+can we add a step between 3 and 4? like automated tests running on the PR before it can be merged?
+
+[2025-04-19 09:46:51] lina.okafor
++1 to that. the whole point of having tests is that they run automatically. otherwise we'll forget to run them manually
+
+[2025-04-19 09:47:05] priya.kaur
+yes. that's the CI pipeline lina's building. the plan is: PR triggers test run, tests must pass before merge is allowed
+
+[2025-04-19 09:47:16] lina.okafor
+i'm setting up GitHub Actions for the CI. it'll run pytest, check for linting issues, and eventually run a basic smoke test against the staging environment. the GitHub Actions config is straightforward — i've got a draft yaml already
+
+[2025-04-19 09:47:22] marcus.webb
+how long do the tests take to run right now?
+
+[2025-04-19 09:47:28] danny.reeves
+:chef_kiss:
+
+[2025-04-19 09:47:33] danny.reeves
+about 45 seconds for the full suite right now. that'll grow but it shouldn't be a bottleneck for a while
+
+[2025-04-19 09:47:41] marcus.webb
+45 seconds is totally fine. i was worried it'd be like 10 minutes and we'd all be sitting around waiting
+
+[2025-04-19 09:47:52] jess.tanaka
+what about the collaboration feature i'm building? it's half done and i've been deploying changes to prod as i go. do i need to retroactively go through this process?
+
+[2025-04-19 09:48:03] priya.kaur
+can you give us a quick status on the collaboration feature? just so everyone knows where it stands
+
+[2025-04-19 09:48:09] jess.tanaka
+sure. right now the basic sharing model works — you can share a document with another user by email, and they can view it. editing permissions are partially implemented (the backend supports it but the UI doesn't expose it yet). i still need to build the real-time presence indicators and the comment thread system
+
+[2025-04-19 09:48:15] priya.kaur
+no retroactive enforcement. but starting monday when staging is ready, all new changes follow the process. the collaboration feature gets a PR and a review before the next deploy
+
+[2025-04-19 09:48:24] jess.tanaka
+that's fair. i have a couple more things to push before monday — the edit permission toggle in the sharing modal and the basic permissions check middleware. i'll get those in today and tomorrow under the old flow, and then monday everything new goes through staging
+
+[2025-04-19 09:48:31] priya.kaur
+that's fine. just be careful with what you push between now and monday. run the tests locally before deploying
+
+[2025-04-19 09:48:38] jess.tanaka
+fair enough. i'll create a branch and open a PR for the current state
+
+[2025-04-19 09:48:45] danny.reeves
+jess, let me know if you want help writing tests for the collaboration feature. i can knock out the basic sharing and permissions tests pretty quickly
+
+[2025-04-19 09:48:52] jess.tanaka
+that would be great actually. i'll pair with you on it next week
+
+[2025-04-19 09:49:01] ravi.mehta
+as a non-engineer lurker — this process makes me feel better about what we're selling to enterprise customers. "we have code review and staging environments" is a lot better than "we move fast"
+
+[2025-04-19 09:49:08] priya.kaur
+:100:
+
+---
+
+[2025-04-19 10:30:11] danny.reeves
+test coverage update. we now have 23 tests:
+
+billing module (12 tests):
+- webhook handler: 4 tests (idempotency, retries, event processing)
+- subscription lifecycle: 4 tests (create, upgrade, downgrade, cancel)
+- metered billing: 2 tests (usage reporting, deactivated user exclusion)
+- invoice generation: 2 tests
+
+auth module (7 tests):
+- login flow: 3 tests
+- SSO/SAML: 2 tests
+- role-based permissions: 2 tests
+
+document operations (4 tests):
+- upload validation: 2 tests (file type, size limit)
+- search: 2 tests
+
+all passing. i'm going to keep adding more but this covers the critical paths identified in the post-mortem
+
+[2025-04-19 10:30:28] danny.reeves
+quick note on the test structure: i organized them by module in tests/ with a conftest.py that sets up a clean test database. each test gets a fresh transaction that rolls back at the end, so tests don't interfere with each other. the billing tests mock the stripe API using stripe-mock
+
+[2025-04-19 10:30:42] priya.kaur
+danny this is outstanding. 23 tests in 3 days. how does it feel?
+
+[2025-04-19 10:30:51] danny.reeves
+feels like i should have been doing this from day one
+
+[2025-04-19 10:31:05] danny.reeves
+honestly? it feels like a safety net. i deployed the search filter fix yesterday and the tests caught a regression i would have missed — the multi-select filter was breaking the date range filter. 2 minutes to find the bug instead of a customer report
+
+[2025-04-19 10:31:15] danny.reeves
+the bug was in how i was constructing the SQL WHERE clause. the multi-select filter was using OR conditions that clobbered the date range's AND condition because of operator precedence. the test had a case that combined both filters and asserted the correct result count
+
+[2025-04-19 10:31:28] marcus.webb
+ok i'm a convert. the subscription lifecycle tests caught a bug in my downgrade flow too. the test expected the prorated amount to be calculated a certain way and it wasn't. would have been a billing error
+
+[2025-04-19 10:31:38] marcus.webb
+specifically the test creates a subscription on day 1, upgrades on day 15, then downgrades on day 20, and checks that the prorated credit is calculated correctly. my code was using the wrong start date for the proration window — it was using the original subscription start date instead of the most recent plan change date
+
+[2025-04-19 10:31:46] lina.okafor
+that downgrade proration bug — would that have overbilled or underbilled the customer?
+
+[2025-04-19 10:31:52] marcus.webb
+overbilled. the customer would have gotten less credit than they deserved for the unused portion of the higher plan. not a huge amount in this test case but it adds up
+
+[2025-04-19 10:31:58] jess.tanaka
+we're 3 days into having tests and they've already caught 2 bugs. imagine if we'd had them from the start
+
+[2025-04-19 10:32:05] danny.reeves
+i try not to think about that too much
+
+[2025-04-19 10:32:15] priya.kaur
+let's not dwell on what we didn't do. let's focus on doing it right going forward
+
+[2025-04-19 10:32:22] danny.reeves
+next week i'm planning to add:
+- more edge cases in billing (partial months, mid-cycle plan changes, currency rounding)
+- error handling tests (what happens when stripe is down, when the DB connection drops)
+- API endpoint tests (HTTP status codes, response shapes, auth enforcement)
+
+[2025-04-19 10:32:30] danny.reeves
+goal is 50 tests by end of next week. we'll never get to 100% coverage but i want to cover every path that touches money or user data
+
+[2025-04-19 10:32:38] priya.kaur
+50 is a great target. prioritize billing and auth — those are where bugs cost us the most
+
+[2025-04-19 10:32:44] marcus.webb
+i'll help with the billing edge cases. i know where the weird corners are in that code better than anyone since i wrote most of it
+
+[2025-04-19 10:32:51] danny.reeves
+deal. let's pair on those monday afternoon
+
+[2025-04-19 10:32:58] jess.tanaka
+i'll own the API endpoint tests for the document operations. i know the collaboration endpoints best and i can cover those too
+
+[2025-04-19 10:33:06] priya.kaur
+love the ownership here. let's make sure we track the test count in standup — it's a good metric for the team
+
+---
+
+[2025-04-19 11:15:44] ravi.mehta
+customer update: crestview capital has decided to proceed with the enterprise plan despite the incident. they were impressed by our transparency and the speed of our response. their words: "we'd rather work with a team that fixes problems fast than a team that pretends problems don't exist"
+
+[2025-04-19 11:15:58] ravi.mehta
+some context on how that conversation went: i had a 30-minute call with their CTO, Dana Park, yesterday afternoon. she was initially concerned about data integrity — specifically whether the billing issue could indicate deeper problems with how we handle their documents. i walked her through the root cause and explained that the billing system and the document storage system are completely separate codebases with no shared state
+
+[2025-04-19 11:16:08] priya.kaur
+that's great news. ravi did you share the post-mortem with them?
+
+[2025-04-19 11:16:15] ravi.mehta
+she also asked what we're doing to prevent recurrence. i told her about the staging environment, the code review process, and the test suite. she specifically asked if we have automated tests for billing — i told her we now have 12 and growing
+
+[2025-04-19 11:16:22] marcus.webb
+did she ask about the timeline for the process changes?
+
+[2025-04-19 11:16:29] ravi.mehta
+she asked when staging would be live and i told her monday. she seemed satisfied with that. she also asked if we'd be willing to share our post-mortem and i said yes — which brings me to:
+
+[2025-04-19 11:16:32] ravi.mehta
+yes, i shared a customer-facing version — timeline, root cause, actions taken. they appreciated the candor
+
+[2025-04-19 11:16:40] ravi.mehta
+the customer-facing version omits some internal details (like who deployed at 6am, and the specific dollar amounts of the incorrect charges). it focuses on: what happened, why it happened, what we've done about it, and what we're doing to prevent it
+
+[2025-04-19 11:16:48] priya.kaur
+that's the right approach. transparency without oversharing
+
+[2025-04-19 11:16:55] marcus.webb
+glad something good came out of this
+
+[2025-04-19 11:17:02] ravi.mehta
+one more thing from the crestview call — Dana mentioned they're evaluating us against two competitors and the post-mortem actually put us ahead in their evaluation. their reasoning was that the competitors haven't had incidents (or haven't disclosed them), which means crestview doesn't know how they'd handle one
+
+[2025-04-19 11:17:10] jess.tanaka
+that's a surprisingly mature take from a customer
+
+[2025-04-19 11:17:18] danny.reeves
+:tada: crestview on board
+
+[2025-04-19 11:17:25] ravi.mehta
+also a quick note on the other enterprise accounts — brightpath wellness and northlake logistics are both continuing as well. brightpath's account manager said the refund was handled "very professionally" and they have no concerns. northlake didn't even bring up the incident on our last check-in call — they're focused on their document migration timeline
+
+[2025-04-19 11:17:33] priya.kaur
+so all 3 enterprise customers retained. ravi, this is a great outcome. your relationship management through this was excellent
+
+[2025-04-19 11:17:40] ravi.mehta
+thanks. honestly the engineering team's response made my job easy. i just had to describe what you all actually did
+
+[2025-04-19 11:17:48] lina.okafor
+team effort :muscle:
+
+---
+
+[2025-04-19 13:45:08] lina.okafor
+i've been thinking about what else we need to prevent incidents. right now our only monitoring is the basic uptime check on the stripe webhook and PagerDuty. we don't have:
+
+- application-level error monitoring (no Sentry, no Datadog, nothing)
+- request latency tracking
+- database query performance monitoring
+- alert thresholds for API error rates
+- any kind of dashboard showing system health
+
+if the duplicate billing bug had happened at 3am instead of 6am, we wouldn't have known until a customer called
+
+[2025-04-19 13:45:22] lina.okafor
+i went through our current setup this morning. here's what we actually have:
+- 1 PagerDuty rule that fires if the /health endpoint returns non-200 for 5 minutes
+- stripe webhook event log (only accessible from the stripe dashboard, no alerting)
+- nginx access logs (on the server, no aggregation, no alerting)
+- postgres logs (default logging level, no slow query tracking)
+
+that's it. we're basically flying blind except for "is the server up or not"
+
+[2025-04-19 13:45:35] priya.kaur
+what do you recommend?
+
+[2025-04-19 13:45:42] marcus.webb
+yeah i've been wondering about this too. last week when we were debugging the duplicate charges, i was tailing the nginx logs on the server and grepping for stripe webhook calls. it took me 20 minutes to even figure out which requests were relevant
+
+[2025-04-19 13:45:50] lina.okafor
+exactly. and that was while you were already looking at the server. if nobody had been looking, those logs would have just rolled off the disk after 7 days with nobody ever seeing them
+
+[2025-04-19 13:46:01] lina.okafor
+sentry for error tracking, basic grafana dashboard for request metrics. we can use the built-in postgres stats for DB monitoring. i can have error tracking up by end of week and the dashboard within 2 weeks
+
+[2025-04-19 13:46:12] lina.okafor
+more detail on what i'm thinking:
+
+sentry (this week):
+- capture all unhandled exceptions
+- capture all 500 responses
+- set up alerts for error rate spikes
+- tag errors by module (billing, auth, documents) so we can route to the right person
+
+grafana + prometheus (next 2 weeks):
+- request count by endpoint
+- response time percentiles (p50, p95, p99)
+- error rate by endpoint
+- active database connections
+- stripe webhook processing time and success rate
+
+[2025-04-19 13:46:20] danny.reeves
+can we also track webhook processing time in sentry? like add a custom span for how long it takes to process each stripe event type?
+
+[2025-04-19 13:46:24] priya.kaur
+do it. add sentry first — i want to know about errors before customers tell us about them
+
+[2025-04-19 13:46:32] lina.okafor
+danny: yes, sentry supports performance monitoring with custom spans. i'll instrument the webhook handler so we can see processing time by event type. good idea
+
+[2025-04-19 13:46:38] jess.tanaka
+what about alerting? like, who gets paged and when?
+
+[2025-04-19 13:46:44] lina.okafor
+for now i'm thinking:
+- any unhandled exception in billing code → page marcus and priya immediately
+- error rate above 5% for any endpoint for 5 minutes → page the channel
+- server health check failure (existing PagerDuty rule) → page me and priya
+- everything else → slack notification to #engineering, no page
+
+we can adjust thresholds once we have baseline data
+
+[2025-04-19 13:46:48] lina.okafor
+on it
+
+[2025-04-19 13:46:55] marcus.webb
+i'm fine being on the billing alert. makes sense given i own that code
+
+[2025-04-19 13:47:02] priya.kaur
+the alerting tiers make sense. let's start conservative and tune once we see what normal looks like. better to get a few false alarms initially than miss a real one
+
+[2025-04-19 13:47:09] danny.reeves
+are we going to run grafana on the same server as the app or separate?
+
+[2025-04-19 13:47:15] lina.okafor
+separate. i'll spin up a small monitoring VPS. grafana + prometheus + node_exporter. i don't want monitoring to compete with the application for resources, and if the app server goes down i still want monitoring to be up so we can see what happened
+
+[2025-04-19 13:47:22] danny.reeves
+smart. isolated failure domains
+
+[2025-04-19 13:47:29] priya.kaur
+lina, can you put together a quick cost estimate for the monitoring setup? sentry has a free tier but grafana hosting has costs
+
+[2025-04-19 13:47:35] lina.okafor
+sentry free tier gives us 5K errors/month which should be plenty (ideally we have close to zero). the monitoring VPS will be another $15/month on Hetzner. grafana and prometheus are self-hosted, no license cost. total incremental cost: $15/month
+
+[2025-04-19 13:47:42] priya.kaur
+$15/month to not be blind. approved
+
+---
+
+[2025-04-19 14:30:22] priya.kaur
+i want to document our new deployment process before we start using staging on monday. writing it up now. here's the draft:
+
+---
+**Foldly Deployment Process v1.0**
+
+**Effective: 2025-04-21**
+
+1. Create a feature branch from `main`
+2. Make changes, commit to branch
+3. Open a Pull Request against `main`
+4. Automated tests run on PR (CI pipeline)
+   - All tests must pass before merge is allowed
+5. At least 1 teammate must review and approve the PR
+   - For billing/auth/data changes: 2 approvals required
+6. Merge PR to `main`
+7. Merge triggers automatic deployment to staging
+8. Engineer verifies the change on staging
+   - For billing changes: test with Stripe test mode
+   - For auth changes: test SSO flow
+   - For document changes: test upload/download/search
+9. Engineer promotes from staging to production
+   - Promotion requires passing staging verification
+10. Monitor production for 30 minutes post-deploy
+    - Check Sentry for new errors
+    - Check Grafana for anomalies (when available)
+
+**Emergency Hotfix Process**:
+- Same flow, but reviewer has 15-minute SLA
+- Staging verification can be abbreviated
+- Post-deploy monitoring extended to 1 hour
+- Incident channel stays open until monitoring period ends
+
+**Never**:
+- Deploy from a local machine directly to production
+- Merge without tests passing
+- Deploy without at least 1 code review
+---
+
+[2025-04-19 14:30:40] priya.kaur
+this is intentionally simple. we're 6 people, we don't need a 30-page change management policy. but we need something written down that we all agree to follow
+
+[2025-04-19 14:30:52] lina.okafor
+question on step 7 — is the deploy to staging truly automatic on merge, or does someone have to trigger it?
+
+[2025-04-19 14:30:58] lina.okafor
+right now the deploy script is manual. i can set up a GitHub Actions workflow that triggers on merge to main and runs the deploy script via SSH. that would make it fully automatic
+
+[2025-04-19 14:31:01] marcus.webb
+looks good. clear and reasonable. the 2-approval requirement for billing changes is smart
+
+[2025-04-19 14:31:08] priya.kaur
+lina — let's make it automatic. if the tests pass and the PR is approved and merged, deploy to staging should just happen. the less manual steps, the fewer we'll skip
+
+[2025-04-19 14:31:15] lina.okafor
+agreed. i'll add that to the GitHub Actions pipeline. merge to main → deploy to staging → run smoke tests on staging → post result to the PR thread
+
+[2025-04-19 14:31:24] jess.tanaka
+i like that it includes what to do for emergencies. no ambiguity
+
+[2025-04-19 14:31:31] jess.tanaka
+one question — step 8, "engineer verifies on staging." does that mean the person who wrote the PR, or can it be anyone?
+
+[2025-04-19 14:31:38] priya.kaur
+the person who wrote the PR. they know what to look for. but if they're unavailable, the reviewer can verify
+
+[2025-04-19 14:31:44] marcus.webb
+what about step 5, the review — is there a convention for what a "good" review looks like? like, are we just checking for obvious bugs, or are we looking at test coverage, code style, etc.?
+
+[2025-04-19 14:31:48] danny.reeves
+:thumbsup: can we put this somewhere more permanent than a slack message? maybe a CONTRIBUTING.md in the repo?
+
+[2025-04-19 14:31:55] priya.kaur
+marcus: for now, reviewer checks: (1) does it work, (2) does it have tests if it should, (3) are there obvious bugs or security issues, (4) is the code understandable. we don't need a formal rubric yet. we'll develop norms as we do more reviews
+
+[2025-04-19 14:32:03] marcus.webb
+works for me
+
+[2025-04-19 14:32:12] priya.kaur
+good idea. i'll add it to the repo. our first actual process document in version control
+
+[2025-04-19 14:32:19] danny.reeves
+we should also add a section in the CONTRIBUTING.md about how to run the tests locally. something like "run `pytest tests/` before pushing" — not everyone will remember the command
+
+[2025-04-19 14:32:26] priya.kaur
+good point. i'll include a "Development Setup" section with the test command, linting, and how to run the app locally
+
+[2025-04-19 14:32:35] lina.okafor
+we're growing up :cry:
+
+[2025-04-19 14:32:42] jess.tanaka
+i have a small concern about the 2-approval requirement for billing changes. we're a 6-person team. what if marcus is the one making a billing change and i'm the only other person available? do we really need 2 people to approve, or is 1 sufficient for a small team?
+
+[2025-04-19 14:32:49] priya.kaur
+the 2-approval rule is specifically because billing bugs have the highest blast radius. we saw what happened with one billing bug — $12K in incorrect charges. i'd rather have the extra friction on billing changes than save 20 minutes of review time
+
+[2025-04-19 14:32:55] jess.tanaka
+fair. the $12K argument wins
+
+[2025-04-19 14:32:58] marcus.webb
+RIP "just push it, we'll fix it later" — april 1 - april 13, 2025. gone too soon. or not soon enough
+
+[2025-04-19 14:33:05] danny.reeves
+poured one out for cowboy deploys
+
+[2025-04-19 14:33:11] lina.okafor
+may they rest in peace and never return
+
+[2025-04-19 14:33:22] priya.kaur
+:joy: let's call it a learning experience
+
+[2025-04-19 14:33:30] ravi.mehta
+from the business side — having this document will also be useful when enterprise customers ask about our development process during security questionnaires. "see section 5 of our deployment process" is way better than "we, uh, have code review"
+
+[2025-04-19 14:33:38] priya.kaur
+another great reason to get this in writing. thanks ravi
+
+---
+
+[2025-04-19 15:20:04] marcus.webb
+random question while i'm in the billing code: does anyone know if we're logging stripe webhook delivery attempts anywhere? i realized during the incident that i had no way to tell how many times stripe retried a failed webhook before it succeeded
+
+[2025-04-19 15:20:12] lina.okafor
+we're not logging that right now. stripe sends a `stripe-signature` header and the event has an `attempt_count` field but we're not persisting it. once sentry is up we'll get visibility into failed webhook processing at least
+
+[2025-04-19 15:20:19] marcus.webb
+ok. i'm adding a log line to the webhook handler that records the event ID, event type, and attempt count. that way we'll have it in the application logs even before sentry is up
+
+[2025-04-19 15:20:26] danny.reeves
+good idea. while you're in there, can you also log the processing time? just a start/end timestamp around the handler. that'll be useful for the grafana dashboard later
+
+[2025-04-19 15:20:33] marcus.webb
+sure, adding that too
+
+[2025-04-19 15:20:40] lina.okafor
+structured logging would be ideal — JSON lines format. that way when we eventually ship logs to a log aggregator we can query on event_type, processing_time_ms, etc. instead of parsing free-form text
+
+[2025-04-19 15:20:48] marcus.webb
+i'll use python's logging module with a JSON formatter. do we have a preference on the JSON logging library? python-json-logger?
+
+[2025-04-19 15:20:55] lina.okafor
+python-json-logger is fine. it's lightweight and we're already using the stdlib logger
+
+[2025-04-19 15:21:02] marcus.webb
+cool, i'll add it to requirements.txt and set it up for the webhook handler. we can migrate the rest of the app to structured logging later
+
+---
+
+[2025-04-19 16:15:33] jess.tanaka
+heads up — i just pushed the edit permission toggle to the sharing modal. it's live in prod now (last deploy under the old process). tested it manually: you can share a document with "can view" or "can edit" permissions, and the recipient sees the right UI based on their permission level
+
+[2025-04-19 16:15:41] jess.tanaka
+also pushed the permissions check middleware. every API endpoint that touches a document now checks whether the requesting user has the appropriate permission level. previously we only checked ownership — so a shared user could view but technically call the edit endpoints too. that's fixed now
+
+[2025-04-19 16:15:48] danny.reeves
+nice. did you test the case where someone tries to edit a document they only have view access to? what error do they get?
+
+[2025-04-19 16:15:55] jess.tanaka
+403 Forbidden with a JSON body: {"error": "insufficient_permissions", "message": "You do not have edit access to this document"}. the frontend shows a toast notification
+
+[2025-04-19 16:16:03] danny.reeves
+perfect. i'll add a test for that endpoint on monday
+
+[2025-04-19 16:16:10] priya.kaur
+jess, this is good work. and i appreciate you noting this is the last deploy under the old process. monday onwards it goes through staging
+
+[2025-04-19 16:16:18] jess.tanaka
+understood. i'll create a branch and open a PR for the next round of collaboration changes
+
+---
+
+[2025-04-19 16:50:11] priya.kaur
+EOD roundup. one week since the incident. where are we?
+
+[2025-04-19 16:50:22] priya.kaur
+let's go around — marcus first since billing was the epicenter
+
+[2025-04-19 16:50:35] marcus.webb
+billing audit complete. 2 additional bugs found and fixed (both reviewed). pydantic types added to all billing data structures. 12 billing tests passing. billing.py is still one file but it's typed and tested now
+
+[2025-04-19 16:50:43] marcus.webb
+the 2 bugs i found during the audit: (1) the metered billing calculation wasn't excluding deactivated users from the seat count — we were charging for users who had been deactivated mid-cycle, and (2) the invoice PDF generation was rounding cents differently than stripe, causing a mismatch between what the invoice showed and what the customer was actually charged. neither was customer-facing yet but they would have been eventually
+
+[2025-04-19 16:50:51] priya.kaur
+both of those are exactly the kind of bugs that would have blown up in 3 months. good catches
+
+[2025-04-19 16:51:01] danny.reeves
+23 tests total across billing, auth, and document operations. working on expanding coverage next week. CI pipeline structure is ready — just needs the staging server to hook into
+
+[2025-04-19 16:51:09] danny.reeves
+specific goals for next week: hit 50 tests, get CI running on every PR, and start tracking code coverage metrics. not to hit a specific coverage percentage but to know where our gaps are
+
+[2025-04-19 16:51:17] priya.kaur
+danny, you've been doing the work of a QA team of 3. seriously
+
+[2025-04-19 16:51:24] jess.tanaka
+upload validation shipped. started security review of other endpoints — found and fixed 3 issues (missing auth checks on 2 admin endpoints, SQL injection vector in search). all PRs reviewed
+
+[2025-04-19 16:51:32] jess.tanaka
+the SQL injection was in the document search endpoint. the search query parameter was being interpolated directly into the SQL string instead of using parameterized queries. i switched it to use SQLAlchemy's text() with bind parameters. the 2 admin endpoints (user management and billing override) were accessible to any authenticated user — i added the role check middleware
+
+[2025-04-19 16:51:40] marcus.webb
+wait, the admin endpoints were exposed? could a regular user have accessed the billing override endpoint?
+
+[2025-04-19 16:51:45] jess.tanaka
+theoretically yes, but the endpoints require you to know the URL and the right request format. there's no link to them in the UI for non-admin users. security through obscurity, which is obviously not real security. it's fixed now — the middleware checks for admin role before the request handler runs
+
+[2025-04-19 16:51:48] lina.okafor
+staging environment ready for monday demo. sentry integration in progress — should be live by tuesday. backup process verified and scheduled
+
+[2025-04-19 16:51:55] lina.okafor
+on the backup process — i verified that the daily pg_dump runs correctly, the backup is uploaded to S3, and i can restore from a backup to a clean database. tested the full restore cycle yesterday. the backup includes the full schema, all data, and the indexes. rotation policy: keep 7 daily backups, 4 weekly, and 2 monthly
+
+[2025-04-19 16:52:03] priya.kaur
+lina, the backup verification is huge. having backups is useless if you can't restore from them
+
+[2025-04-19 16:52:12] ravi.mehta
+all 3 enterprise customers confirmed and retained. refunds fully processed. crestview converting to paid. relationship management ongoing
+
+[2025-04-19 16:52:20] ravi.mehta
+for the refunds — total of $12,847 refunded across 31 affected accounts. all refunds processed through stripe, all customers notified via email. 3 customers replied to thank us for the proactive communication. zero churn from the incident
+
+[2025-04-19 16:52:27] priya.kaur
+zero churn. that's the number i care about most
+
+[2025-04-19 16:52:35] priya.kaur
+one week ago we had zero tests, zero code review, zero staging, and a $12K billing disaster. today we have 23 tests, a code review process, staging coming online monday, and all our customers retained. i'm proud of how this team responded. the real test is whether we maintain this discipline when the next deadline pressure hits
+
+[2025-04-19 16:52:44] danny.reeves
+the process makes it easier to maintain the discipline. it's harder to skip code review when there's a GitHub branch protection rule preventing it than when it's just a verbal agreement
+
+[2025-04-19 16:52:51] marcus.webb
+agreed. the constraints are there to protect us from our future selves
+
+[2025-04-19 16:52:58] lina.okafor
+the process protects us from ourselves. that's the whole point
+
+[2025-04-19 16:53:06] jess.tanaka
+i also want to call out that we did all of this while still shipping features. jess's collaboration improvements, marcus's billing fixes, danny's test suite — we didn't stop product work to do process work. we did both
+
+[2025-04-19 16:53:13] priya.kaur
+good point jess. that's important context
+
+[2025-04-19 16:53:22] priya.kaur
+well said. have a good weekend everyone. monday we start the new era
+
+[2025-04-19 16:53:30] marcus.webb
+have a good one folks
+
+[2025-04-19 16:53:36] danny.reeves
+:wave: see you monday
+
+[2025-04-19 16:53:42] lina.okafor
+rest up. next week is going to be fun — staging demo, sentry rollout, 50 tests, and hopefully zero incidents
+
+[2025-04-19 16:53:49] ravi.mehta
+enjoy the weekend everyone. i'll have the crestview onboarding plan ready for monday
+
+[2025-04-19 16:53:55] jess.tanaka
+:saluting_face: have a good one
+
+================================================================================
+END EXPORT — 214 messages, 2025-04-19
+================================================================================

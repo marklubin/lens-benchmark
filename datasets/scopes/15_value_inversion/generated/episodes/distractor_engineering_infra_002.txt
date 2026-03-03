@@ -1,0 +1,604 @@
+VERDANA ANALYTICS — INTERNAL
+DOCUMENT TYPE: CI/CD PIPELINE + INFRASTRUCTURE OPTIMIZATION
+DATE: MAY 27, 2025
+SUBJECT: ENGINEERING INFRASTRUCTURE — POST-LAUNCH IMPROVEMENTS
+
+PREPARED BY: Kevin McNulty (DevOps)
+REVIEWED BY: Marcus Okafor (CTO)
+DISTRIBUTION: Engineering Team, Product Leads
+CLASSIFICATION: INTERNAL — DO NOT DISTRIBUTE EXTERNALLY
+
+***
+
+SECTION 1: CI/CD PIPELINE STATUS
+
+Our CI/CD pipeline has been running in production for 12 days. Here's the current state and the improvements I've been working on. I've been tracking every run and collecting metrics since day one so we have a clean baseline before making changes.
+
+CURRENT PIPELINE:
+
+```
+GitHub PR → GitHub Actions CI → Tests + Lint → Build Docker Image → Push to ECR
+                                                                        ↓
+                                                              Manual Approval (Slack)
+                                                                        ↓
+                                                              ECS Rolling Deploy
+                                                                        ↓
+                                                              Canary Check (5 min)
+                                                                        ↓
+                                                              Full Rollout
+```
+
+PIPELINE CONFIGURATION DETAILS:
+
+- GitHub Actions Runner: ubuntu-24.04, 4 vCPU / 16 GB RAM (standard GitHub-hosted runner)
+- Python: 3.12.4 (pinned in `.python-version`)
+- Package manager: uv 0.2.x (locked via `uv.lock`)
+- Docker: BuildKit enabled, multi-stage Dockerfile
+- ECR: Private repository in us-east-1, lifecycle policy retains last 50 images
+- ECS: Rolling deployment with minimum healthy percent 50%, maximum percent 200%
+- Canary: Health check endpoint `/api/health` polled every 15 seconds for 5 minutes post-deploy. If error rate exceeds 1% or p95 latency exceeds 500ms during canary window, automatic rollback triggers.
+- Slack integration: Deploy approval posts to #deploys channel. Any engineer can approve with a thumbs-up reaction. Approval expires after 4 hours.
+
+PIPELINE METRICS (last 12 days):
+- Total CI runs: 87
+- Average CI duration: 8 minutes 42 seconds
+- Median CI duration: 8 minutes 15 seconds
+- Longest CI run: 14 minutes 18 seconds (a test-heavy PR from Amir)
+- Shortest CI run: 6 minutes 51 seconds (docs-only PR from Priya — tests still ran, need to add path filtering)
+- CI failures: 9 (all legitimate test failures, no infrastructure flakes)
+- Deployments to production: 23
+- Successful deployments: 22
+- Rollbacks: 1 (May 19 — the connection pool config change that caused the P2 incident was deployed then reverted)
+- Mean time from PR merge to production: 12 minutes
+- Mean time from PR push to green CI: 8 minutes 42 seconds
+- Approval wait time (median): 3 minutes 12 seconds (most deploys approved quickly during business hours)
+- Approval wait time (p95): 47 minutes (overnight PRs merged by US team, approved next morning by early arrivals)
+
+CI FAILURE BREAKDOWN:
+
+| Date | PR | Author | Failure Reason | Resolution |
+|:---|:---|:---|:---|:---|
+| May 16 | #71 | Amir | Unit test — missing mock for new Kafka topic | Fixed in next push |
+| May 17 | #73 | Priya | Type error caught by mypy — Optional[str] vs str | Fixed in next push |
+| May 18 | #74 | Amir | Integration test timeout — testcontainer Kafka startup slow | Re-ran, passed (borderline — see note below) |
+| May 19 | #76 | Kevin | Lint failure — unused import | Fixed in next push |
+| May 20 | #78 | Priya | Unit test assertion failure — date formatting edge case | Legitimate bug, fixed |
+| May 21 | #79 | Amir | Integration test — DB migration order dependency | Fixed migration script |
+| May 22 | #80 | Marcus | Type error — incorrect return type annotation | Fixed in next push |
+| May 24 | #84 | Amir | Unit test — connector retry logic off by one | Legitimate bug, fixed |
+| May 26 | #88 | Kevin | Integration test — port conflict with testcontainers | Re-ran, passed (see note below) |
+
+NOTE ON FLAKY RUNS: The May 18 and May 26 failures both involved testcontainers. In both cases the issue was startup timing — the container was healthy but not yet accepting connections when the test tried to connect. I've increased the readiness timeout from 10s to 30s in PR #90. This isn't technically an infrastructure flake since the timeout was genuinely too low, but I want to track it in case we see more. Zero flakes from GitHub Actions infrastructure itself — runner provisioning, caching, etc. have all been rock solid.
+
+BREAKDOWN OF CI TIME:
+| Step | Average Duration | P10 | P50 | P90 | Notes |
+|:---|:---|:---|:---|:---|:---|
+| Checkout + setup | 28s | 22s | 27s | 35s | git clone + Python install |
+| Install dependencies | 1m 45s | 38s | 1m 20s | 2m 55s | uv install — cached most of the time |
+| Lint (ruff) | 12s | 10s | 12s | 14s | Fast |
+| Type check (mypy) | 1m 8s | 58s | 1m 6s | 1m 22s | Slow — growing codebase |
+| Unit tests | 3m 22s | 2m 48s | 3m 15s | 4m 10s | 142 tests |
+| Integration tests | 1m 35s | 1m 12s | 1m 30s | 2m 5s | DB + Kafka tests with testcontainers |
+| Build Docker image | 1m 12s | 32s | 1m 8s | 1m 55s | Multi-stage build with caching |
+| Push to ECR | 22s | 15s | 20s | 35s | Layer caching helps |
+| **Total** | **8m 42s** | **6m 51s** | **8m 15s** | **12m 20s** | |
+
+The P90 for dependency install (2m 55s) happens when the uv cache is cold — typically the first run after a `requirements.txt` or `uv.lock` change. This is unavoidable. The P90 for Docker build (1m 55s) is the same story — cold cache after a Dockerfile or requirements change.
+
+DEPLOY CADENCE:
+
+We've been averaging about 2 deploys per business day, which feels healthy for a team of 4 engineers. Breakdown by author:
+
+| Author | PRs Merged | Deploys | Notes |
+|:---|:---|:---|:---|
+| Amir | 12 | 8 | Some PRs batched into single deploy |
+| Priya | 9 | 6 | |
+| Kevin | 7 | 5 | Mostly infra/DevOps changes |
+| Marcus | 4 | 4 | Code reviews + occasional hands-on |
+| **Total** | **32** | **23** | |
+
+***
+
+SECTION 2: CI/CD IMPROVEMENTS — IN PROGRESS
+
+I've identified four improvements to the pipeline, ranging from quick wins to longer-term investments. Prioritized by impact and effort.
+
+IMPROVEMENT 1: PARALLEL TEST EXECUTION
+
+Current: All 142 tests run sequentially in a single process. This is the single biggest contributor to CI time.
+
+Proposed: Split tests into 4 parallel groups using pytest-xdist. The split is based on test file — xdist distributes test files across workers rather than individual tests, which avoids issues with test-level fixtures.
+
+Technical details:
+- Adding `pytest-xdist` to dev dependencies
+- CI step changes from `uv run pytest tests/` to `uv run pytest tests/ -n 4`
+- GitHub Actions runner has 4 vCPUs so 4 workers is the natural fit
+- Need to verify no test interdependencies (shared DB state, file locks, etc.)
+- Integration tests use separate testcontainer instances per worker — verified this works locally
+
+Expected impact: Test step drops from 3m 22s to ~1m 10s.
+Status: PR #87 open, testing on a feature branch. Amir found one test (`test_connector_sync_ordering`) that relied on test execution order — fixed by adding explicit setup in the test. Running the full suite with `-n 4` locally 10 times, all green.
+
+IMPROVEMENT 2: DOCKER LAYER CACHING
+
+Current: Docker builds use GitHub Actions cache, but the cache hit rate is only 60% because our requirements.txt changes frequently. Every time someone adds or bumps a dependency, the entire `pip install` layer is invalidated.
+
+Proposed: Use a two-stage Dockerfile — base image with dependencies (cached for weeks) and app image with source code (rebuilt each time). The base image is tagged with a hash of `uv.lock` so it only rebuilds when dependencies actually change.
+
+```
+# Stage 1: Base (cached unless uv.lock changes)
+FROM python:3.12-slim AS base
+COPY uv.lock pyproject.toml ./
+RUN uv sync --no-dev
+
+# Stage 2: App (rebuilt each time)
+FROM base AS app
+COPY src/ ./src/
+COPY alembic/ ./alembic/
+```
+
+The CI workflow computes `sha256(uv.lock)` and checks ECR for a base image with that tag. If it exists, Docker pulls it and only builds stage 2. If not, it builds both stages and pushes the base image.
+
+Expected impact: Docker build drops from 1m 12s to ~25s for most builds. Full rebuilds (when dependencies change) will be ~1m 30s due to the extra push step, but these happen maybe once or twice a week.
+Status: Implemented, merged in PR #85. Cache hit rate since merge: 92% (up from 60%).
+
+IMPROVEMENT 3: MYPY INCREMENTAL MODE
+
+Current: mypy runs a full check every CI run. As our codebase grows, this will get slower.
+
+Proposed: Enable mypy incremental mode with persistent cache. The cache is stored as a GitHub Actions cache artifact keyed on the mypy version + Python version + commit SHA of the base branch. On PR runs, we restore the cache from the base branch and run mypy incrementally — it only rechecks files that changed.
+
+Technical details:
+- Cache key: `mypy-{mypy_version}-{python_version}-{base_branch_sha}`
+- Fallback key: `mypy-{mypy_version}-{python_version}-` (latest cache from any commit)
+- mypy cache directory: `.mypy_cache/` — stored and restored between runs
+- Incremental mode is mypy's default, but without a persistent cache it's useless in CI (each run starts fresh)
+- Risk: cache corruption could cause false negatives (mypy misses a real error). Mitigation: weekly scheduled CI run with `--no-incremental` to catch any drift.
+
+Expected impact: Type check drops from 1m 8s to ~20s for most runs. Full check (~1m 8s) on cache miss.
+Status: Testing — need to validate cache correctness. PR #89. I've been running both modes side-by-side on feature branches for the past 3 days. Incremental mode has reported the same results as full mode in all 14 runs so far.
+
+Priya raised a concern about `--follow-imports=skip` interacting badly with incremental mode. I tested this — we don't use `--follow-imports=skip` anywhere in our mypy config, so it's not an issue. But good catch.
+
+IMPROVEMENT 4: DEPLOY PREVIEW ENVIRONMENTS
+
+Current: Developers test locally or on staging. No per-PR preview environments. The staging environment is shared, which means only one PR can be on staging at a time. We've had a few scheduling conflicts where Amir needed staging for a demo while Priya was testing a migration.
+
+Proposed: Spin up an ephemeral ECS service for each PR with a unique URL (e.g., `pr-87.preview.verdana-internal.dev`). Automatically teardown when PR is closed or after 48 hours of inactivity. Each preview gets its own ECS task and connects to a shared preview RDS instance (separate from staging and production).
+
+Architecture:
+- GitHub Actions workflow triggered on PR open/sync
+- Terraform module creates: ECS service (1 task), ALB target group, Route53 record
+- Preview database: shared RDS instance (`preview-db`) with per-PR schema (schema name = `pr_{number}`)
+- Kafka: shared preview cluster with per-PR topic prefix
+- Redis: shared preview instance with per-PR key prefix
+- Teardown: GitHub Actions workflow triggered on PR close, or scheduled cleanup Lambda runs every 6 hours and removes previews with no traffic for 48 hours
+
+Expected impact: Better testing, fewer staging conflicts, ability for product/design to review before merge. Hannah (product) has been asking for this — she wants to review UI changes without cloning the repo and running locally.
+Estimated cost: ~$15/PR/day (ECS + RDS connection). At our current volume (~3 open PRs at any time), that's ~$45/day or ~$1,350/month. This is significant relative to our total infra cost.
+Status: Scoping phase — estimated 2 weeks of Kevin's time. Deprioritized in favor of more urgent work (DR failover testing, parallel CI). Targeting Q3 if the team decides the cost is justified.
+
+Marcus's note: "I like the idea but want to see us hit 200 accounts before we invest in preview environments. At our current pace the staging conflicts are annoying but manageable. Revisit in July."
+
+PROJECTED CI TIME AFTER IMPROVEMENTS (1, 2, and 3):
+| Step | Current | Projected | Savings | Status |
+|:---|:---|:---|:---|:---|
+| Checkout + setup | 28s | 28s | — | No change planned |
+| Install dependencies | 1m 45s | 1m 45s | — | No change planned |
+| Lint (ruff) | 12s | 12s | — | Already fast |
+| Type check (mypy) | 1m 8s | 20s | -48s | PR #89, testing |
+| Unit tests | 3m 22s | 1m 10s | -2m 12s | PR #87, testing |
+| Integration tests | 1m 35s | 1m 35s | — | No change planned |
+| Build Docker image | 1m 12s | 25s | -47s | PR #85, merged |
+| Push to ECR | 22s | 22s | — | Already fast |
+| **Total** | **8m 42s** | **5m 57s** | **-2m 45s** | |
+
+Target: Under 6 minutes from PR push to green CI. We're close. Once PR #87 and #89 land, I expect we'll consistently be in the 5-6 minute range. The long tail (P90) should drop from 12m 20s to under 8 minutes.
+
+For context, the industry benchmark for similar-sized projects is 5-10 minutes. We're in good shape.
+
+***
+
+SECTION 3: AWS COST OPTIMIZATION
+
+Two weeks of production data gave me enough signal to identify cost optimization opportunities. Below is a detailed breakdown of our AWS spend and specific findings.
+
+CURRENT MONTHLY AWS COST BREAKDOWN:
+
+| Service | Monthly Cost | % of Total | Notes |
+|:---|:---|:---|:---|
+| RDS (primary + replica) | $676 | 30.2% | db.r6g.xlarge × 2 |
+| ElastiCache (Redis) | $1,104 | 49.3% | 6-node cluster (3 shards, 1 replica each) |
+| ECS Fargate | $198 | 8.8% | 2-16 tasks, 1 vCPU / 2 GB each |
+| MSK (Kafka) | $142 | 6.3% | 3-broker cluster, kafka.t3.small |
+| ECR | $8 | 0.4% | Image storage |
+| CloudWatch | $18 | 0.8% | Logs + metrics |
+| Route53 + ALB | $52 | 2.3% | Load balancer + DNS |
+| S3 | $6 | 0.3% | Backups + artifacts |
+| Other (VPC, NAT, etc.) | $35 | 1.6% | NAT gateway, data transfer |
+| **Total** | **$2,239** | **100%** | |
+
+OBSERVATION: Redis is nearly half our AWS bill. This is the biggest opportunity.
+
+FINDING 1: REDIS CLUSTER IS OVER-PROVISIONED
+
+Current: 3-shard Redis Cluster with 1 replica per shard = 6 nodes × cache.r6g.large (13.07 GB RAM, 2 vCPU each)
+Current cost: $1,104/month
+Current utilization:
+- Memory: 3.2% (2.5 GB used out of 78.4 GB total across cluster)
+- CPU: 0.8% average, 2.1% peak
+- Network: 12 Mbps average, 45 Mbps peak
+- Connections: 24 average, 68 peak
+- Operations: 1,200 ops/sec average, 3,800 ops/sec peak
+- Cache hit rate: 94.6%
+
+This is dramatically over-provisioned. At our current scale (112 accounts), a single cache.r6g.medium node (6.38 GB RAM) would handle our workload with room to grow to 500+ accounts. The 3-shard cluster was provisioned for a projected 10,000-account workload that we're nowhere near.
+
+However: Marcus and I agreed pre-launch to keep the cluster to avoid a migration later. I still think that was the right call, but I want to flag the cost. Redis cluster migrations involve downtime and application changes (different connection handling for cluster vs. standalone mode).
+
+Detailed cost comparison:
+
+| Configuration | Nodes | Monthly Cost | Capacity | When to Use |
+|:---|:---|:---|:---|:---|
+| Current (3-shard cluster) | 6 × r6g.large | $1,104 | ~10,000 accounts | If we grow fast |
+| Downsized cluster | 3 × r6g.medium | $552 | ~3,000 accounts | 200-3,000 accounts |
+| Standalone + replica | 2 × r6g.medium | $368 | ~1,000 accounts | 200-1,000 accounts |
+| Standalone (no replica) | 1 × r6g.medium | $184 | ~500 accounts | If we accept HA risk |
+
+Alternative: Downgrade to a 3-node cluster with cache.r6g.medium nodes
+Savings: $1,104 → $552/month = $552/month saved
+Risk: If we grow faster than expected, we'd need to scale the cluster, which requires downtime. Scaling from 3 medium nodes to 6 large nodes requires a blue-green migration (~2 hours of engineering time + 15 minutes of downtime).
+
+RECOMMENDATION: Keep current setup until we reach 200 accounts, then re-evaluate. If growth is slower than projected, downgrade in Q3. The $552/month savings is real but not urgent — it's about 25% of total infra cost.
+
+Marcus's note: "Agreed. Flag for Q3 review. I'd rather over-pay for headroom than deal with a Redis migration while we're trying to close deals."
+
+FINDING 2: ECS FARGATE MINIMUM TASKS
+
+Current: Minimum 2 tasks, scaling to 16. Each task: 1 vCPU, 2 GB RAM.
+Current cost: ~$198/month (based on actual usage with autoscaling)
+
+Observation: Between midnight and 6 AM ET, traffic drops to near zero. We're paying for 2 idle tasks during those 6 hours.
+
+Traffic pattern (requests/minute):
+- 12 AM - 6 AM ET: 0-2 req/min
+- 6 AM - 9 AM ET: 15-40 req/min (ramp up)
+- 9 AM - 6 PM ET: 50-120 req/min (business hours)
+- 6 PM - 12 AM ET: 10-30 req/min (wind down)
+
+Alternative: Scale to 0 tasks overnight with a cold-start Lambda that wakes the service on first request. The Lambda would sit behind the ALB and, on receiving a request, trigger ECS scale-up and return a "warming up" response. Subsequent requests hit the ALB health check loop until the task is healthy.
+
+Savings: ~$35/month (2 tasks × 6 hours/day × 30 days × Fargate pricing)
+Complexity: New Lambda function, ALB listener rule changes, cold-start handling in client SDKs
+Risk: Cold start latency (14 seconds) for first request after overnight. This includes ECS task provisioning (8s), container startup (4s), and application startup (2s).
+
+RECOMMENDATION: Not worth the complexity. $35/month savings doesn't justify cold start UX impact or the engineering effort to build and maintain the scale-to-zero mechanism. If any customer's automated systems make early-morning API calls, they'd hit a 14-second delay that could cause timeouts.
+
+Amir asked about this in standup — he agreed it's not worth it. "If even one customer has a cron job at 5 AM that times out because we wanted to save $35, that's a bad trade."
+
+FINDING 3: CLOUDWATCH LOGS RETENTION
+
+Current: 30-day retention on all log groups (12 log groups total)
+Current cost: ~$18/month total for CloudWatch (metrics + logs)
+Log volume: ~2.1 GB/day across all log groups
+Observation: We're also ingesting logs into Datadog via a Firehose subscription filter. CloudWatch logs are redundant after Datadog ingestion.
+
+Log group breakdown:
+
+| Log Group | Daily Volume | Purpose | Datadog Ingested? |
+|:---|:---|:---|:---|
+| /ecs/verdana-api | 1.2 GB | Application logs | Yes |
+| /ecs/verdana-worker | 0.5 GB | Background workers | Yes |
+| /ecs/verdana-scheduler | 0.1 GB | Cron jobs | Yes |
+| /rds/verdana-primary | 0.15 GB | Slow query log | Yes |
+| /msk/verdana-kafka | 0.1 GB | Broker logs | No (not needed) |
+| /lambda/various | 0.05 GB | Lambda invocations | Yes |
+| **Total** | **~2.1 GB/day** | | |
+
+Alternative: Reduce CloudWatch retention to 3 days (for emergency access if Datadog is down). Rely on Datadog for log analysis and alerting.
+Savings: ~$5/month (not a huge number, but it's a one-line change and reduces our data surface area)
+Risk: Minimal — Datadog retains logs for 15 days, which covers our needs. If Datadog has an outage lasting more than 3 days, we'd lose some log coverage, but that's an extreme edge case. We also have S3 log exports as a backup (7-day retention in the `verdana-logs-archive` bucket).
+
+RECOMMENDATION: Implement. PR #91 changes retention to 3 days. Already tested in staging — no issues.
+
+FINDING 4: RESERVED INSTANCES FOR RDS
+
+Current: On-demand billing for RDS
+Instance type: db.r6g.xlarge (4 vCPU, 32 GB RAM) — primary + 1 read replica
+On-demand cost: $338/month per instance × 2 = $676/month total
+
+Observation: Our database workload is consistent (primary always running, replica always running). The instance type hasn't changed since launch. CPU utilization averages 22% on the primary and 8% on the replica, with peaks at 45% and 15% respectively. We're not going to change instance types anytime soon.
+
+Reserved Instance options:
+
+| Option | Term | Monthly Cost (per instance) | Savings vs On-Demand | Total Monthly (2 instances) |
+|:---|:---|:---|:---|:---|
+| On-demand (current) | — | $338 | — | $676 |
+| 1-year RI, no upfront | 1 year | $214 | 37% | $428 |
+| 1-year RI, partial upfront | 1 year | $198 | 41% | $396 |
+| 3-year RI, partial upfront | 3 years | $142 | 58% | $284 |
+
+Alternative: 1-year Reserved Instance for both primary and replica (db.r6g.xlarge), no upfront payment
+Savings: $676 → $428/month = $248/month saved (37% discount)
+Commitment: 1-year term, no refund. If we need to change instance types, we'd be paying for unused RIs.
+
+RECOMMENDATION: Wait until month 3 (August). If we're still running the same instance class, commit to the RI. We shouldn't lock into a 1-year commitment until we're confident in our scaling trajectory. If our account growth matches projections, we might need to upgrade to db.r6g.2xlarge by Q4, which would make the RI wasteful.
+
+Marcus asked about the 3-year option. My view: too early. 3-year commitment requires high confidence in our architecture, and we're 2 weeks into production. The 58% discount is attractive but the risk of being locked into the wrong instance type outweighs the savings at this stage.
+
+COST OPTIMIZATION SUMMARY:
+
+| Finding | Monthly Savings | Effort | Risk | Recommendation |
+|:---|:---|:---|:---|:---|
+| Redis downsize | $552 | Medium (migration) | Medium | Defer to Q3 |
+| ECS scale-to-zero | $35 | High (new infra) | Medium | Skip |
+| CloudWatch retention | $5 | Low (config change) | Low | Implement now |
+| RDS Reserved Instances | $248 | Low (AWS console) | Low-Medium | Defer to August |
+| **Total potential** | **$840** | | | |
+
+If we implement all four, we'd drop from $2,239/month to ~$1,399/month (37% reduction). Realistically, the CloudWatch change now and the RDS RI in August gets us to $1,986/month with minimal risk.
+
+***
+
+SECTION 4: INFRASTRUCTURE MONITORING IMPROVEMENTS
+
+Since launch, I've been building out our monitoring and alerting to catch issues before they become incidents. Datadog is our primary monitoring platform. Here's what's been added in the past two weeks.
+
+NEW DASHBOARDS ADDED (post-launch):
+
+1. "Deploy Tracker" — Shows each deployment with before/after metrics (latency, error rate, CPU). Makes it easy to identify if a deploy caused a regression. Each deploy is annotated on the time-series graphs as a vertical line with the PR number and author. The dashboard includes:
+   - P50/P95/P99 latency with deploy annotations
+   - Error rate (4xx and 5xx separately) with deploy annotations
+   - CPU and memory utilization per ECS task
+   - Active connection count
+   - Deployment duration and rollback indicator
+   This dashboard was invaluable during the May 19 incident — we could immediately see the latency spike correlated with the 2:15 PM deploy.
+
+2. "Customer Health" — Per-account metrics: API call rate, error rate, connector sync status. Helps customer support identify accounts with issues before users report them. Dashboard includes:
+   - Top 20 accounts by API volume (last 24h)
+   - Accounts with elevated error rates (>5% 4xx or any 5xx)
+   - Connector sync status grid (green/yellow/red per account per connector)
+   - Account onboarding funnel (created → first API call → first connector → active)
+   Hannah (product) and Lisa (customer success) both have this bookmarked. Lisa checks it every morning and has already caught two accounts with stale connectors before the customers noticed.
+
+3. "Cost Monitor" — Daily AWS cost breakdown by service. Alerts if daily cost exceeds $120 (150% of average). This caught a Kafka log retention misconfiguration that was accumulating 5 GB/day of unnecessary logs. Details:
+   - Daily cost by service (stacked bar chart)
+   - 7-day rolling average cost trend
+   - Cost per account (total AWS cost / active accounts) — currently $19.99/account/month
+   - Projected monthly cost based on trailing 7-day average
+   The Kafka log issue was interesting — MSK's default log retention is 7 days but our broker config had `log.retention.hours=-1` (infinite). We were accumulating logs that would never be cleaned up. Fixed in the MSK config on May 25, reclaimed 35 GB of storage.
+
+4. "CI/CD Health" — Pipeline metrics pulled from GitHub Actions API. Shows:
+   - CI duration trend (last 30 days)
+   - Failure rate by step (tests, lint, build, etc.)
+   - Deploy frequency and success rate
+   - Time from PR open to deploy (lead time)
+   This is a lightweight version of DORA metrics. I want to formalize this into a proper DORA dashboard eventually, but this gives us the basics.
+
+NEW ALERTS ADDED:
+
+| Alert | Condition | Channel | Severity | Escalation |
+|:---|:---|:---|:---|:---|
+| Deploy regression | Error rate >2× post-deploy (5-min window) | #ops-alerts | P2 | Page on-call if persists >10 min |
+| Customer health | Any account 0 API calls for 24h (previously active) | #customer-health | P3 | No page — CS team reviews daily |
+| Cost spike | Daily AWS cost >$120 | #ops-alerts | P3 | No page — review next business day |
+| Certificate expiry | <30 days (increased from 14) | #ops-alerts | P2 | Page on-call at <7 days |
+| ECS task crash | Task exits with non-zero code | #ops-alerts | P2 | Page if >2 crashes in 10 min |
+| RDS connection saturation | Active connections >80% of max | #ops-alerts | P1 | Page immediately |
+| Replication lag | RDS replica lag >1 second | #ops-alerts | P2 | Page if persists >5 min |
+| Kafka consumer lag | Any consumer group lag >10,000 messages | #ops-alerts | P2 | Page if persists >15 min |
+
+ALERT HISTORY (last 12 days):
+
+| Date | Alert | Resolution |
+|:---|:---|:---|
+| May 17 | Cost spike ($127) | Kafka log retention issue — fixed May 25 (root cause identified later) |
+| May 19 | Deploy regression | Connection pool incident — reverted deploy |
+| May 23 | RDS connection saturation | Connection pool incident (P2) — resolved with per-account limits |
+| May 25 | Cost spike ($134) | Same Kafka issue — fixed same day |
+
+Four alerts in 12 days feels about right. No false positives yet, which is good — I'd rather have too few alerts than too many. Alert fatigue is a real risk and I want to keep the signal-to-noise ratio high.
+
+ON-CALL ROTATION:
+
+We've set up a simple on-call rotation in PagerDuty:
+- Week 1: Kevin (DevOps) — primary, Marcus — secondary
+- Week 2: Amir — primary, Kevin — secondary
+- Week 3: Priya — primary, Amir — secondary
+- Week 4: Marcus — primary, Priya — secondary
+
+The rotation started May 20. Kevin handled the first week (including the May 23 incident). Amir is on-call this week (May 27 - June 2). So far no pages during off-hours — both incidents happened during business hours.
+
+Amir asked if we could exclude him from on-call during the week of June 9 (he has a conference). I'll swap him with Priya for that week. Updating PagerDuty schedule in PR #92.
+
+***
+
+SECTION 5: DATABASE PERFORMANCE ANALYSIS
+
+Two weeks of production data reveals interesting query patterns. I pulled these metrics from our RDS Performance Insights dashboard and correlated with Datadog APM traces.
+
+DATA VOLUME SUMMARY:
+- Total rows in `events` table: 2.4 million
+- Daily ingest rate: ~180,000 rows/day
+- Total database size: 4.2 GB (data) + 1.8 GB (indexes) = 6.0 GB
+- Table count: 34
+- Largest table: `events` (4.1 GB)
+- Second largest: `connector_sync_log` (180 MB)
+
+TOP 10 SLOWEST QUERIES (by p95 latency):
+
+| Rank | Query Pattern | P50 Latency | P95 Latency | P99 Latency | Frequency | Notes |
+|:---|:---|:---|:---|:---|:---|:---|
+| 1 | Aggregation with 5+ GROUP BY columns | 180ms | 340ms | 520ms | 12/day | Power users building complex reports |
+| 2 | Full-text search on event payload | 140ms | 280ms | 450ms | 45/day | Users searching within JSON events |
+| 3 | Cross-connector JOIN queries | 110ms | 220ms | 380ms | 8/day | Correlating data across sources |
+| 4 | Time-range scan >30 days | 95ms | 180ms | 290ms | 22/day | Historical analysis |
+| 5 | COUNT DISTINCT on high-cardinality column | 85ms | 165ms | 240ms | 35/day | Unique user/session counting |
+| 6 | Nested JSON path query | 70ms | 140ms | 210ms | 60/day | Deep payload extraction |
+| 7 | Multi-tenant account listing | 55ms | 120ms | 185ms | 200/day | Admin queries |
+| 8 | Connector sync status check | 40ms | 85ms | 130ms | 500/day | Frequent polling |
+| 9 | Event insert (batch 1000) | 35ms | 75ms | 110ms | 300/day | Kafka consumer writes |
+| 10 | Simple SELECT by ID | 1ms | 3ms | 8ms | 5,000/day | API key validation, etc. |
+
+ANALYSIS:
+- None of these are concerning at current scale. The slowest query (340ms p95) is well within acceptable limits. Our API SLA target is 500ms p95, and even the heaviest aggregation query is under that.
+- The connector sync status check (#8) is called frequently and could benefit from Redis caching. Filed as a ticket (JIRA-247). The sync status only changes when a sync completes (every 15 minutes), so caching with a 60-second TTL would eliminate ~95% of these queries. Amir is picking this up for his June sprint.
+- Event batch inserts (#9) are efficiently using COPY command. No optimization needed. We tested INSERT vs COPY during pre-launch and COPY was 4x faster for batch sizes >500.
+- Full-text search (#2) will become a problem at scale. The current implementation uses PostgreSQL's built-in `tsvector` with a GIN index, which works fine for 2.4M rows but will degrade at 50M+. We should evaluate pgvector or Elasticsearch for search workloads in Q3. I've created a research ticket (JIRA-248) for Priya to investigate options.
+- The cross-connector JOIN (#3) is the most architecturally interesting query. It joins the `events` table with itself across different `connector_id` values within the same account. At scale, this will need a materialized view or pre-computed correlation table. Not urgent at 8 queries/day.
+
+INDEX USAGE REPORT:
+
+| Index | Table | Size | Scans/Day | Notes |
+|:---|:---|:---|:---|:---|
+| events_pkey | events | 52 MB | 5,000 | Primary key — heavily used |
+| idx_events_account_created | events | 180 MB | 4,200 | Account + timestamp range — our workhorse index |
+| idx_events_connector_id | events | 95 MB | 800 | Connector-specific queries |
+| idx_events_payload_tsvector | events | 320 MB | 45 | Full-text search — large index, low usage |
+| idx_events_event_type | events | 68 MB | 350 | Event type filtering |
+| idx_connector_sync_account | connector_sync_log | 12 MB | 500 | Sync status lookups |
+
+The full-text index (`idx_events_payload_tsvector`) is our largest index at 320 MB but only gets 45 scans/day. This is fine for now — the index is what makes those full-text queries possible at all. Without it, those 280ms queries would be multi-second sequential scans.
+
+No unused indexes detected. All indexes have been scanned at least once in the past 7 days.
+
+CONNECTION POOL UTILIZATION:
+- Pool size: 100 connections (configured in pgbouncer)
+- Average active: 18 of 100 connections (18%)
+- Peak active: 52 of 100 connections (52%) — during the May 23 incident
+- After per-account limits: peak 38 of 100 (38%)
+- Idle connections: typically 4-6 (pgbouncer keeps a small warm pool)
+- Connection wait time (p95): <1ms (no queuing)
+- Assessment: healthy headroom. At current growth rate, we'd hit 80% utilization (our alert threshold) at approximately 600 accounts. We'll need to increase the pool size or optimize connection usage before then.
+
+REPLICATION LAG:
+- Average: 12ms
+- P95: 45ms
+- Peak: 180ms (during bulk data ingestion from a new customer onboarding with 500K historical events)
+- Time above 100ms: 3 minutes total in 12 days (all during that one bulk import)
+- Assessment: well within acceptable limits for read-after-write consistency on the replica. Our application uses the replica for read-heavy dashboard queries and the primary for writes and real-time reads. The 12ms average lag means dashboard data is effectively real-time.
+
+VACUUM AND MAINTENANCE:
+- autovacuum running normally on all tables
+- No bloat detected (checked with `pgstattuple`)
+- `events` table: 0.3% dead tuple ratio (healthy — autovacuum is keeping up with the insert rate)
+- Last manual ANALYZE: not needed, autovacuum handles it
+- WAL disk usage: 2.1 GB (well within the 50 GB allocated)
+
+***
+
+SECTION 6: UPCOMING INFRASTRUCTURE WORK
+
+Prioritized task list for the next 3 weeks. This was reviewed with Marcus in our weekly 1:1 on May 27.
+
+| Task | Priority | Owner | Target | Effort | Dependencies |
+|:---|:---|:---|:---|:---|:---|
+| Parallel CI tests (pytest-xdist) | Medium | Kevin | June 1 | 2 days | PR #87 — final review from Amir |
+| mypy incremental mode | Low | Kevin | June 8 | 1 day | PR #89 — validation ongoing |
+| CloudWatch retention reduction | Low | Kevin | June 1 | 30 min | PR #91 — ready to merge |
+| DR failover test | High | Marcus + Kevin | June 15 | 3 days | Coordinate maintenance window |
+| Redis connector cache | Medium | Amir | June 10 | 2 days | JIRA-247 |
+| Kafka log retention fix | Done | Kevin | Completed May 25 | — | — |
+| PagerDuty schedule update | Low | Kevin | May 28 | 30 min | PR #92 |
+| Testcontainer timeout increase | Low | Kevin | May 28 | 30 min | PR #90 — ready to merge |
+
+DR FAILOVER TEST DETAILS:
+
+The DR failover test is the highest priority item. We need to validate that our disaster recovery plan actually works before we promise any SLAs to customers. The test plan:
+
+1. Announce maintenance window to customers (30-minute window)
+2. Promote RDS read replica to primary
+3. Update ECS task definitions to point to new primary
+4. Verify application connectivity and data integrity
+5. Run a subset of integration tests against the promoted instance
+6. Demote old primary and reconfigure as replica
+7. Verify replication is working in the new direction
+8. Document actual failover time vs. projected (target: <15 minutes)
+
+Marcus and I will run this together. We're targeting a Saturday morning (June 14 or 15) to minimize customer impact. I'll send the maintenance window notification to customers by June 8.
+
+Priya volunteered to be on standby during the DR test in case we need application-level debugging. I'll add her to the calendar invite.
+
+***
+
+APPENDIX A: GITHUB ACTIONS WORKFLOW FILE (abbreviated)
+
+For reference, here's the core of our CI workflow:
+
+```yaml
+name: CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: verdana_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --dev
+      - run: uv run ruff check .
+      - run: uv run mypy src/
+      - run: uv run pytest tests/unit/ -v
+      - run: uv run pytest tests/integration/ -v
+      - uses: docker/build-push-action@v5
+        with:
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ env.ECR_REGISTRY }}/verdana:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+(Actual file is more complex — includes ECR login, deploy steps, Slack notifications, etc. This is the testing portion.)
+
+APPENDIX B: INFRASTRUCTURE DIAGRAM
+
+```
+                     ┌──────────────┐
+                     │  CloudFront  │
+                     │   CDN/WAF    │
+                     └──────┬───────┘
+                            │
+                     ┌──────┴───────┐
+                     │     ALB      │
+                     │ (us-east-1)  │
+                     └──────┬───────┘
+                            │
+              ┌─────────────┼─────────────┐
+              │             │             │
+       ┌──────┴───┐  ┌─────┴────┐  ┌─────┴────┐
+       │ ECS Task │  │ ECS Task │  │ ECS Task │
+       │  (API)   │  │  (API)   │  │ (Worker) │
+       └────┬─────┘  └────┬─────┘  └────┬─────┘
+            │              │             │
+     ┌──────┴──────────────┴─────────────┴──────┐
+     │                                          │
+┌────┴─────┐  ┌──────────┐  ┌─────┐  ┌────────┐
+│   RDS    │  │ ElastiCache│  │ MSK │  │   S3   │
+│ Primary  │  │  (Redis)  │  │(Kafka)│ │Backups │
+│ + Replica│  │ 6-node    │  │3-node│  │       │
+└──────────┘  └──────────┘  └─────┘  └────────┘
+```
+
+***
+
+DOCUMENT STATUS: INTERNAL
+PREPARED BY: Kevin McNulty
+REVIEWED BY: Marcus Okafor
+DATE: May 27, 2025
+NEXT REVIEW: June 27, 2025 (monthly)
+VERSION: 1.0

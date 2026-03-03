@@ -1,0 +1,551 @@
+RIVULET ENGINEERING — ARCHITECTURE DISCUSSION: AUTHENTICATION SESSION MANAGEMENT
+Date: 2025-06-03 (Tuesday)
+Time: 2:00–3:15 PM PT
+Location: Zoom (recorded) + #arch-discussions Slack channel
+Attendees: Sarah Kim, Mike Torres, David Okafor, Priya Chandrasekaran, Lin Zhang, Rachel Fernandez
+Optional/Observer: James Holden (joined at 2:55 PM), Natasha Volkov (QA, listening in)
+Document: Architecture Decision Record draft (ADR-017)
+Context: Follow-up from Monday standup re: session management issues
+Recording: Auto-uploaded to Zoom Cloud — link shared in #arch-discussions post-meeting
+Facilitator: Priya Chandrasekaran
+Note-taker: Lin Zhang
+
+---
+
+PRE-MEETING SLACK — #arch-discussions — 1:47 PM
+
+[Sarah Kim — 1:47 PM]
+Heads up — I'll be sharing my screen for the 2PM session management discussion. I have slides and a code sample. If anyone has trouble with Zoom screen share, the slides are also in the #arch-discussions shared drive under `2025-06-03_session_arch_options.pdf`.
+
+[Rachel Fernandez — 1:49 PM]
+Thanks Sarah. I'll be there but might drop for 10 min around 2:30 — have a quick sync with the Observability team about the new Datadog dashboards.
+
+[David Okafor — 1:51 PM]
+Will be there. I pulled the latest support ticket numbers this morning in case we need them for context.
+
+[Mike Torres — 1:53 PM]
+Same. I have the connection pool metrics from last week's incident if anyone wants to see the graphs.
+
+[Lin Zhang — 1:55 PM]
+I'll take notes. Can someone remind me to hit record when we start?
+
+[Priya Chandrasekaran — 1:56 PM]
+I'll remind you. See everyone in a few.
+
+---
+
+MEETING NOTES
+
+[Priya Chandrasekaran — 2:01 PM]
+OK we're recording — Lin, confirm? Great. Alright, let's get into it. Context for anyone who wasn't in standup yesterday: we've had 8 support tickets in the last three weeks about users getting randomly logged out. Mike traced it to two root causes — a timezone bug in the session cleanup job, and connection pool saturation causing session lookup timeouts. Both stem from using PostgreSQL as our session store. Sarah, you said you had some ideas?
+
+[Sarah Kim — 2:03 PM]
+Yeah, so I spent this morning researching options and I want to propose a direction. Let me share my screen.
+
+[Sarah Kim shares screen — slides titled "Auth Session Architecture: Options Analysis"]
+
+[Sarah Kim — 2:03 PM]
+Can everyone see this OK?
+
+[David Okafor — 2:03 PM]
+Looks good.
+
+[Lin Zhang — 2:03 PM]
+Yep, clear on my end.
+
+[Sarah Kim — 2:04 PM]
+Great. So the current state: we're using Django's built-in database session backend. Sessions are stored in the `django_session` table in PostgreSQL. Every authenticated request does a SELECT on this table to validate the session. Session cleanup runs via a cron job every 6 hours.
+
+Just so we're all looking at the same thing, here's the relevant setting from our Django config:
+
+```python
+# settings/base.py
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_COOKIE_AGE = 1209600  # 14 days in seconds
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = True
+SESSION_SAVE_EVERY_REQUEST = True
+```
+
+And the cleanup job in our crontab:
+
+```
+0 */6 * * * python manage.py clearsessions
+```
+
+The problems we've identified:
+1. Timezone mismatch in cleanup job — valid sessions being deleted
+2. Connection pool contention during peak load — session lookups timing out
+3. Session table growing linearly — 15K rows now, projected 60K by end of year
+4. No horizontal scaling — all session reads go to the primary database
+
+Mike, do you want to quickly show the connection pool numbers from last week?
+
+[Mike Torres — 2:07 PM]
+Sure, let me pull that up. So last Tuesday between 10 and 11 AM Pacific — which is when our West Coast enterprise customers are doing their morning dashboards and our East Coast customers are doing post-lunch work — we peaked at 47 out of 50 connections in the pool. The session lookups alone were consuming about 30% of that. Here's what the pool utilization looked like:
+
+```
+2025-05-27 10:14:03 UTC  pool_size=50  active=43  idle=4  waiting=3
+2025-05-27 10:22:17 UTC  pool_size=50  active=47  idle=1  waiting=9
+2025-05-27 10:31:41 UTC  pool_size=50  active=46  idle=2  waiting=6
+2025-05-27 10:38:55 UTC  pool_size=50  active=44  idle=3  waiting=4
+```
+
+Those "waiting" connections are requests that are blocked until a connection frees up. When the wait exceeds our 2-second timeout, the session lookup fails and the user gets logged out. That's what the support tickets are about.
+
+[Priya Chandrasekaran — 2:09 PM]
+And just to be clear, we can't just increase the pool size?
+
+[Mike Torres — 2:09 PM]
+We can up to a point. Our RDS instance is a `db.r6g.xlarge` — PostgreSQL recommends max connections of about 2x vCPUs, so we're looking at maybe 80-100 max. We could bump to 80, but that's a band-aid. The growth trajectory puts us right back here by Q4.
+
+[David Okafor — 2:10 PM]
+For ticket context — the 8 tickets are SUP-4398 through 4402, then SUP-4421 and SUP-4423. Two of the enterprise customers, TritonMetrics and Haverfield Analytics, have flagged it as a P1 blocker in their weekly sync. The Haverfield account team is getting heat from their CISO.
+
+[Priya Chandrasekaran — 2:11 PM]
+Thanks David. OK Sarah, continue with the proposal.
+
+[Sarah Kim — 2:11 PM]
+Right. So given those problems, I want to propose we move to JWT-based authentication. Here's my reasoning.
+
+[Slide: "Proposal: JWT (JSON Web Tokens)"]
+
+JWT fundamentally changes the model. Instead of storing sessions server-side and looking them up on every request, we encode the session data INTO the token itself. The server signs the token with a secret key, and on each request, it just verifies the signature — no database lookup at all.
+
+For anyone not familiar with the format, a JWT is three base64-encoded segments separated by dots: `header.payload.signature`. The header specifies the algorithm, the payload contains claims (key-value pairs with the session data), and the signature is a cryptographic hash that proves the payload hasn't been tampered with.
+
+Benefits:
+- **Stateless**: Zero server-side storage for sessions. The token IS the session.
+- **Horizontal scaling**: Any server instance can validate any token because it just needs the signing key. No shared session store needed. We could go from 3 API servers to 30 and sessions would just work.
+- **Performance**: Token verification is a cryptographic operation — sub-millisecond. No database query, no connection pool usage, no I/O at all.
+- **No cleanup job**: Tokens have built-in expiry (`exp` claim). They're self-invalidating. The timezone bug goes away entirely because the client is responsible for expiry enforcement.
+- **CDN-friendly**: Since tokens are self-contained, we could push auth validation to the edge if we ever go that route.
+
+[Lin Zhang — 2:14 PM]
+Quick question on the scaling point — when you say any server instance can validate, does that mean we could remove the ALB session affinity config?
+
+[Sarah Kim — 2:14 PM]
+Exactly. Right now we have sticky sessions enabled on the ALB because the session cookie has to route to the same backend that has the PostgreSQL connection. With JWT, there's no affinity needed — any backend can validate any token because they all share the same public key. That's a meaningful simplification for the infra team too.
+
+OK, moving on to the implementation details. I'm thinking:
+- Short-lived access tokens: 15-minute expiry, signed with RS256
+- Long-lived refresh tokens: 7-day expiry, stored in HttpOnly cookies
+- Token payload: `sub` (user ID), `tid` (tenant ID), `roles` (array), `iat`, `exp`
+- Refresh flow: client POSTs to `/api/auth/refresh` with the refresh token cookie, gets a new access token
+
+Here's a concrete example of what the token payload looks like:
+
+```json
+{
+  "sub": "usr_7f3a2b1c",
+  "tid": "tnt_haverfield",
+  "roles": ["analyst", "dashboard_editor"],
+  "iat": 1717444800,
+  "exp": 1717445700,
+  "jti": "tok_9d8e7f6a5b4c"
+}
+```
+
+That encodes to about 400 bytes total in the JWT. I also sketched out the middleware. It's actually simpler than what we have now:
+
+```python
+class JWTAuthMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.public_key = load_rsa_public_key(settings.JWT_PUBLIC_KEY_PATH)
+
+    def __call__(self, request):
+        token = self._extract_token(request)
+        if token:
+            try:
+                payload = jwt.decode(
+                    token,
+                    self.public_key,
+                    algorithms=["RS256"],
+                    options={"require": ["exp", "sub", "tid"]}
+                )
+                request.user_id = payload["sub"]
+                request.tenant_id = payload["tid"]
+                request.user_roles = payload.get("roles", [])
+            except jwt.ExpiredSignatureError:
+                return JsonResponse({"error": "token_expired"}, status=401)
+            except jwt.InvalidTokenError:
+                return JsonResponse({"error": "invalid_token"}, status=401)
+        return self.get_response(request)
+```
+
+No database call. No session table. No connection pool usage for auth. It's clean.
+
+[Natasha Volkov — 2:16 PM]
+Sorry, quick testing question — for our integration test suite, does this change the auth fixture setup? Currently we're creating session objects in the test database.
+
+[Sarah Kim — 2:16 PM]
+Good question, Natasha. For tests, we'd have a utility function that mints test JWTs with a test signing key. Actually simpler than the current fixtures because you don't need to set up a session row in the database. I can include a `create_test_jwt()` helper in the PR.
+
+[Natasha Volkov — 2:17 PM]
+OK cool, that would help. We have about 340 integration tests that use the session fixture so I want to make sure we have a clean migration path for the test suite.
+
+[Mike Torres — 2:17 PM]
+How big is the token payload? I'm thinking about header size.
+
+[Sarah Kim — 2:17 PM]
+Good question. With the fields I listed, the encoded JWT is about 400-500 bytes. Well within HTTP header limits. Even if we add custom claims later — permissions, feature flags — we're looking at maybe 800 bytes max. The HTTP spec allows headers up to 8KB, and most proxies and CDNs support at least 4KB per header. So we have plenty of room.
+
+[David Okafor — 2:18 PM]
+What about the migration path? We have 15,000 active sessions. We can't just invalidate everyone.
+
+[Sarah Kim — 2:19 PM]
+Right, so I was thinking a dual-mode transition. We deploy the JWT middleware alongside the existing session middleware. New logins get JWTs, existing sessions continue to work against the database backend until they naturally expire (our current max age is 14 days). After 14 days, we remove the database session middleware entirely. Zero downtime, no forced logouts.
+
+I wrote out the middleware chain for the transition period:
+
+```python
+# settings/base.py — during migration
+MIDDLEWARE = [
+    # ...
+    "rivulet.auth.middleware.DualAuthMiddleware",  # tries JWT first, falls back to session
+    # ...
+]
+```
+
+The `DualAuthMiddleware` checks for a Bearer token first. If present and valid, it uses the JWT path. If no Bearer token, it falls back to the Django session backend. After 14 days when all database sessions have expired, we swap `DualAuthMiddleware` for `JWTAuthMiddleware` and remove the session backend entirely.
+
+[David Okafor — 2:21 PM]
+That's a clean migration story. I like that we're not forcing anyone to re-authenticate.
+
+[Lin Zhang — 2:22 PM]
+What about the frontend? Right now we're sending the session cookie and Django handles everything. With JWT we'd need to change the login flow, add token storage, handle refresh...
+
+[Sarah Kim — 2:22 PM]
+The access token goes in the Authorization header as a Bearer token. The refresh token stays in an HttpOnly cookie — same mechanism as the current session cookie, so the browser handles it automatically. The main frontend change is:
+1. Login endpoint returns the access token in the response body (and sets the refresh cookie)
+2. Frontend stores the access token in memory (NOT localStorage — that's an XSS vector)
+3. Frontend adds `Authorization: Bearer <token>` to every API request
+4. When a 401 comes back, frontend hits the refresh endpoint before retrying
+
+I can write the frontend auth service. It's maybe 150 lines of TypeScript. The core of it is an Axios interceptor:
+
+```typescript
+// authService.ts
+let accessToken: string | null = null;
+
+api.interceptors.request.use((config) => {
+  if (accessToken) {
+    config.headers.Authorization = `Bearer ${accessToken}`;
+  }
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    if (error.response?.status === 401 && !error.config._retry) {
+      error.config._retry = true;
+      const { data } = await api.post('/api/auth/refresh');
+      accessToken = data.access_token;
+      error.config.headers.Authorization = `Bearer ${accessToken}`;
+      return api(error.config);
+    }
+    return Promise.reject(error);
+  }
+);
+```
+
+[Lin Zhang — 2:24 PM]
+OK that's straightforward. And for SSR pages — we have a few server-rendered views — the refresh cookie would be sent with those requests and the backend would handle it the same way?
+
+[Sarah Kim — 2:24 PM]
+For SSR, we'd still use the refresh cookie flow. The server-side render function would read the refresh cookie, call the token endpoint, get an access token, and inject it into the page state for the client-side hydration. I'll document the SSR flow in the ADR.
+
+[David Okafor — 2:25 PM]
+What about the mobile app? Same flow?
+
+[Sarah Kim — 2:25 PM]
+Same flow. The mobile SDK already supports Bearer token auth — we just never used it because we were doing cookie-based sessions. Actually, this would simplify the mobile auth code. Right now we have a hacky cookie jar management layer that's caused bugs. The mobile team — I talked to Rajan about it this morning — he said they'd be happy to rip out the cookie jar code and use Bearer tokens instead. He estimated half a day of work on the iOS side, similar for Android.
+
+[Priya Chandrasekaran — 2:27 PM]
+I like the direction. It solves all three of our immediate problems — the cleanup bug, the connection pool issue, and the scaling concern. What are the risks?
+
+[Sarah Kim — 2:27 PM]
+Main risk is key management. If the RSA private key is compromised, all tokens are compromised. But we'd use AWS KMS for key storage and rotation, which is what we already do for our encryption-at-rest keys. So it's a solved problem operationally.
+
+The key rotation flow would be:
+1. Generate new key pair in KMS
+2. Deploy new private key for signing, add new public key to the verification set
+3. New tokens signed with new key; old tokens still verified by old key
+4. After the longest token lifetime (7 days for refresh tokens), remove the old public key
+
+We already have this pattern implemented for our API signing keys in the partner integration layer.
+
+Second risk is token size growth. If we start putting too much in the payload, the tokens get large. But that's a code review issue, not an architectural one. We can set a lint rule or a middleware check that rejects tokens over a certain size.
+
+[Rachel Fernandez — 2:29 PM]
+One more risk I'd flag — clock skew. JWT validation depends on the server clock being accurate. If a server's NTP drifts, tokens could be rejected or accepted past their expiry. I know our EC2 instances use Amazon Time Sync, but it's worth calling out.
+
+[Sarah Kim — 2:30 PM]
+Good call. The PyJWT library has a `leeway` parameter for exactly this — you can set a grace period, usually 30-60 seconds. I'd set `leeway=30` in our config. That handles normal NTP drift without opening a significant security window.
+
+[Mike Torres — 2:30 PM]
+I have some concerns. Can I walk through them?
+
+[Priya Chandrasekaran — 2:31 PM]
+Please.
+
+[Mike Torres — 2:31 PM]
+So, first — I agree the current session backend is broken and we need to move off it. No argument there. And JWT is elegant in theory. But I want to make sure we think through some edge cases.
+
+First concern: **token revocation**. Say a user changes their password because they think their account was compromised. With database sessions, we delete the session row and they're immediately logged out everywhere. With JWT, the token is valid until it expires. For 15 minutes, the potentially compromised session is still active.
+
+[Sarah Kim — 2:33 PM]
+That's why the access token is short-lived — 15 minutes. The blast radius of a compromised token is limited.
+
+[Mike Torres — 2:33 PM]
+15 minutes is a long time if someone is actively exploiting a compromised token against a B2B analytics platform. They could export customer data, modify dashboards, change billing settings. Our customers are enterprise — they'll ask about this in security reviews.
+
+Let me put some numbers on it. Our data export API can pull about 50,000 rows per request with a 30-second timeout. In 15 minutes, a compromised token could exfiltrate roughly 1.5 million rows of customer analytics data. For a company like TritonMetrics or Haverfield, that's their entire dataset.
+
+But that's not even my main concern. My main concern is: what happens when a customer says "I need to be able to revoke all sessions for a user immediately"? This is a standard enterprise requirement. It's in our own security questionnaire that we send to customers. Question 47: "Describe your ability to terminate all active sessions for a specific user within [X] minutes." Our current answer is "immediately." With JWT, our answer becomes "within 15 minutes" at best.
+
+With JWT, the answer is: you can't. Not without maintaining a revocation list.
+
+[Sarah Kim — 2:36 PM]
+You could use a token blacklist. On revocation, add the token's `jti` (unique ID) to a blacklist. Check the blacklist on each request.
+
+[Mike Torres — 2:36 PM]
+Right, but now you're doing a lookup on every request — which is exactly what we're trying to avoid. You'd need to store the blacklist somewhere that's fast to query. If you put it in PostgreSQL, we're back to the same connection pool problem. If you put it in Redis... well, then you're maintaining a server-side store anyway.
+
+And the blacklist only grows. Every revoked token stays in the blacklist until its natural expiry. If you have a thousand users and you revoke tokens with 15-minute lifetimes, you're accumulating blacklist entries at scale. You'd need a cleanup job for the blacklist — which is the same pattern we're trying to get away from.
+
+I guess my point is: if you need revocation — and we do, for enterprise customers — JWT's "stateless" benefit starts to erode. You end up building state back in through the side door.
+
+[David Okafor — 2:39 PM]
+That's a fair point. The compliance team will definitely ask about immediate revocation. We had a customer security audit last quarter where they specifically asked "can you terminate all active sessions for a user within 60 seconds?"
+
+[Priya Chandrasekaran — 2:39 PM]
+Which customer was that?
+
+[David Okafor — 2:40 PM]
+Haverfield. Their security team did a full vendor assessment in Q1. The session termination question was one of their mandatory requirements — not a nice-to-have. They're on a $340K ARR contract, so we need to keep them happy.
+
+[Sarah Kim — 2:40 PM]
+We could keep the access token lifetime really short — like 5 minutes — and just not implement a blacklist. If someone needs immediate revocation, we revoke the refresh token (which IS server-side), and within 5 minutes all access tokens expire naturally.
+
+[Mike Torres — 2:41 PM]
+Five-minute tokens mean the refresh endpoint gets hit 12 times per hour per user. At 500 concurrent users, that's 6,000 refresh requests per hour, each writing a new refresh token to the database and minting a new JWT. That's more database load than the current session lookup pattern.
+
+Let me actually do the math. Currently, our average user makes about 40 API requests per hour. At 500 concurrent users, that's 20,000 session lookups per hour — each a fast indexed SELECT. With 5-minute JWTs and 500 users, we'd have 6,000 refresh operations per hour, each involving a SELECT of the old refresh token, an INSERT of the new one, and a DELETE of the old one. So 18,000 database operations for refresh alone. Plus the refresh token table would need its own cleanup job. We're not saving as much as it looks on paper.
+
+[Sarah Kim — 2:43 PM]
+Only the refresh token is in the database. The access token validation is still stateless. So the 20,000 session lookups per hour go to zero — those are all validated in-memory. The 6,000 refresh operations are a net reduction in database load.
+
+[Mike Torres — 2:44 PM]
+True, but we've traded one database query per request (session lookup) for one database query every 5 minutes (refresh) plus the complexity of managing two token types, key rotation, blacklists if we want real revocation... I'm not sure the juice is worth the squeeze.
+
+And I haven't even mentioned the operational complexity. Right now if we need to debug a session issue, we look at one table. With JWT we're looking at access tokens (stateless, no server-side record), refresh tokens (in the database), potentially a blacklist (in Redis or PostgreSQL), and key rotation state (in KMS). The debugging surface area expands significantly.
+
+[Priya Chandrasekaran — 2:45 PM]
+OK, I think we're getting into the weeds a bit. Mike, you've raised legitimate concerns. Are you proposing an alternative, or just flagging risks?
+
+[Mike Torres — 2:46 PM]
+Both. I think the concerns are architectural, not just risk-flagging. But I want to think through an alternative more carefully before I propose it. Can I have a day to put something together?
+
+[Priya Chandrasekaran — 2:46 PM]
+Sure. Let's plan to continue this discussion Thursday. Sarah, great work on the analysis — the JWT option is well-researched. Mike, bring your counter-proposal Thursday. Everyone, let's think about this more.
+
+[Lin Zhang — 2:47 PM]
+Quick logistics — same time Thursday? 2 PM?
+
+[Priya Chandrasekaran — 2:47 PM]
+Let me check... I have a 1:1 at 2:30 Thursday. Can we do 10 AM?
+
+[Sarah Kim — 2:47 PM]
+10 works for me.
+
+[Mike Torres — 2:47 PM]
+Same.
+
+[David Okafor — 2:48 PM]
+I have a customer call at 10:30 but I can join for the first half hour and catch up on the recording.
+
+[Rachel Fernandez — 2:48 PM]
+10 AM Thursday works.
+
+[Priya Chandrasekaran — 2:48 PM]
+OK, 10 AM Thursday. I'll send the calendar invite. Lin, can you update the ADR with today's discussion? Sarah and Mike, add your respective sections too.
+
+[Sarah Kim — 2:48 PM]
+Sounds good. I'll write up the JWT proposal in the ADR doc so we have it formalized regardless of which way we go. ADR-017 in the architecture repo.
+
+[Mike Torres — 2:49 PM]
+I'll add my concerns to the ADR as well so we have the full picture.
+
+[Lin Zhang — 2:49 PM]
+I'll have the meeting notes cleaned up and posted in #arch-discussions by 4 PM.
+
+[Priya Chandrasekaran — 2:49 PM]
+Thanks everyone. Good discussion.
+
+---
+
+SLACK THREAD — #arch-discussions — 2:50 PM
+
+[Sarah Kim]
+For anyone who missed the meeting, the recording is in Zoom and I'll have the ADR-017 draft up in the architecture repo by EOD. tl;dr: proposed JWT for session management, Mike has concerns about revocation. We're continuing Thursday.
+
+[Rachel Fernandez]
+Thanks for the summary. Quick q — does this affect the WebSocket auth? Currently the WS connection uses the session cookie for the initial handshake.
+
+[Sarah Kim]
+Good catch. With JWT, the WS handshake would use the Bearer token in the query string or a protocol-level header. The token would be validated once on connection and then the WS stays open. Actually cleaner than the current approach since we don't need sticky sessions for WS auth — the token is self-contained.
+
+Something like:
+
+```javascript
+const ws = new WebSocket(`wss://api.rivulet.io/ws?token=${accessToken}`);
+```
+
+Or using the Sec-WebSocket-Protocol header to pass the token. I'd lean toward query string for simplicity since the connection is already over TLS.
+
+[Rachel Fernandez]
+Oh interesting, that might actually solve my ALB sticky session issue. Let me think about that. Right now I have `stickiness.enabled=true` and `stickiness.type=app_cookie` on the target group just for the WS connections, and it's been causing uneven load distribution. If we can drop sticky sessions entirely, that's a nice side benefit.
+
+[Natasha Volkov]
+From a testing perspective — if we go JWT, I'll need about 2 days to update the integration test auth fixtures. Happy to start on that in parallel once the direction is confirmed Thursday.
+
+[Sarah Kim]
+That would be great Natasha. I can give you the `create_test_jwt()` utility function as a head start even before the decision — it's useful regardless.
+
+[James Holden]
+Late to the party — was heads down on the archival tests all afternoon. Quick thought: whatever we choose, can we make sure the session middleware is pluggable? I'd rather not go through this migration again in a year if requirements change.
+
+I've been bitten by this before at a previous company — we hard-coded session logic into the middleware and when we needed to switch from Redis to DynamoDB it was a 6-week project. If we define a clean interface now, swapping backends becomes a configuration change.
+
+[Sarah Kim]
++1. I'm designing the JWT middleware as a drop-in replacement for the Django session middleware. Same interface for downstream code (`request.user_id`, `request.tenant_id`), different backend. We could swap implementations without touching any view code.
+
+Here's the abstract interface I'm thinking:
+
+```python
+class AuthBackend(ABC):
+    @abstractmethod
+    def authenticate(self, request: HttpRequest) -> Optional[AuthContext]:
+        """Return AuthContext or None if unauthenticated."""
+        pass
+
+@dataclass
+class AuthContext:
+    user_id: str
+    tenant_id: str
+    roles: list[str]
+```
+
+Both the JWT backend and the session backend would implement this. The middleware just calls `backend.authenticate(request)` and sets the attributes on the request object.
+
+[James Holden]
+:thumbsup: That's exactly what I had in mind. Clean separation.
+
+[Mike Torres]
+Good call James. I'll keep that in mind for my counter-proposal too. Pluggable is the right approach regardless.
+
+[David Okafor]
+One more thing for the group — I talked to the compliance team this afternoon about the revocation requirement. They confirmed that "immediate session termination" is a contractual obligation for our SOC 2 Type II and for 3 of our enterprise contracts (Haverfield, TritonMetrics, and Cascade Dynamics). Whatever solution we pick needs to satisfy that. Just flagging it so Mike and Sarah can factor it in.
+
+[Sarah Kim]
+Noted. I'll address it explicitly in the ADR.
+
+[Mike Torres]
+Appreciate the data point David. That's exactly the kind of requirement that shapes the architecture.
+
+---
+
+SLACK THREAD — #backend-eng — 3:15 PM
+
+[Lin Zhang]
+FYI for the backend team — we had an architecture discussion today about replacing the PostgreSQL session backend. Sarah proposed JWT, Mike raised concerns about token revocation. Continuing Thursday at 10 AM. ADR-017 is being drafted in the architecture repo. If you have opinions, add them to the ADR or join Thursday's meeting.
+
+[Rajan Patel]
+Sarah mentioned this to me earlier about the mobile side. Whatever y'all decide, if we're moving to Bearer tokens I can start prototyping the mobile auth changes this week. The cookie jar code in the iOS SDK is a nightmare — I'd love to rip it out.
+
+[Lin Zhang]
+Probably worth waiting until Thursday to start any work. We might end up with a different approach.
+
+[Rajan Patel]
+Fair enough. I'll be on standby.
+
+---
+
+SLACK DM — Sarah Kim → Priya Chandrasekaran — 4:22 PM
+
+[Sarah Kim]
+Hey, just wanted to check — do you think the JWT approach is dead? Mike seemed pretty opposed.
+
+[Priya Chandrasekaran]
+Not dead, but his revocation concern is legitimate. Our enterprise customers will push on it. Let's see what he proposes Thursday. Could be that we end up with JWT anyway but with a clearer revocation strategy.
+
+[Sarah Kim]
+OK. I'll keep refining the ADR. I think the revocation concern is manageable — short-lived tokens with refresh token revocation covers 95% of cases. But I get that the last 5% matters for enterprise.
+
+[Priya Chandrasekaran]
+Exactly. Let's not pre-decide. See what Thursday brings. Either way, we need to fix this in the next sprint — the customer pressure from Haverfield isn't going away.
+
+[Sarah Kim]
+Agreed. I'll have the full ADR draft with pros, cons, and the migration plan ready by tomorrow EOD.
+
+[Priya Chandrasekaran]
+Perfect. Thanks Sarah.
+
+---
+
+SLACK DM — Mike Torres → David Okafor — 5:03 PM
+
+[Mike Torres]
+Hey David — thanks for the compliance data point in the thread. That "immediate termination" requirement is exactly what I was thinking about. Do you have the specific contractual language from the Haverfield agreement? It would help me frame the constraints section of my counter-proposal.
+
+[David Okafor]
+I'll dig it out tomorrow morning. From memory it says something like "Provider must be capable of terminating all active user sessions within 60 seconds upon request from Customer's security administrator." I'll get the exact wording.
+
+[Mike Torres]
+Perfect, thanks. That 60-second SLA is really the design constraint here.
+
+---
+
+ADR-017 DRAFT (committed to architecture repo, 5:45 PM)
+
+# ADR-017: Session Management Architecture
+
+## Status
+PROPOSED — under discussion
+
+## Context
+The current PostgreSQL-backed session store is causing user-facing issues:
+- Timezone bug in cleanup job deleting valid sessions
+- Connection pool contention causing session lookup timeouts during peak load
+- Session table growing linearly (15K+ rows) with no horizontal scaling path
+
+8 support tickets (SUP-4398–4402, SUP-4421, SUP-4423) in 3 weeks. Two enterprise customers (TritonMetrics, Haverfield Analytics) have flagged as P1.
+
+## Options Under Consideration
+
+### Option A: JWT-Based Authentication
+- Proposed by: Sarah Kim
+- See detailed analysis in meeting notes (2025-06-03)
+- Pros: Stateless, horizontally scalable, no session store, self-expiring
+- Cons: Token revocation requires blacklist (reintroduces state), key management complexity
+- Open concern: Enterprise customers require immediate session revocation capability (contractual obligation for SOC 2 Type II and 3 enterprise contracts)
+
+### Option B: [PENDING — Mike Torres to propose 2025-06-05]
+
+## Design Principles (agreed)
+- Session middleware must be pluggable — clean interface (`AuthBackend` ABC) allowing backend swap without view code changes
+- Migration must be zero-downtime with no forced user logouts
+- Must satisfy "terminate all sessions within 60 seconds" contractual requirement
+
+## Decision
+PENDING — reconvening 2025-06-05 at 10:00 AM PT
+
+## Consequences
+TBD
+
+---
+
+END OF EPISODE

@@ -1,0 +1,600 @@
+RIVULET ENGINEERING — ARCHITECTURE REVIEW: CACHING STRATEGY
+Date: 2025-06-13 (Friday)
+Time: 10:00–11:30 AM PT
+Location: Conference Room A + Zoom (hybrid)
+Facilitator: Priya Chandrasekaran (Engineering Manager)
+Note-taker: Anika Patel (rotating)
+Attendees (in-room): Sarah Kim, Mike Torres, David Okafor, Priya Chandrasekaran, Lin Zhang, Rachel Fernandez, James Holden, Anika Patel, Carlos Rivera
+Attendees (remote): Tomas Eriksson (SRE, joining from Stockholm office), Wendy Nakamura (QA Lead)
+
+Agenda:
+1. Caching strategy proposal and decision (David) — 45 min
+2. Dashboard widget performance update (David) — 15 min
+3. Sprint 24 burndown review (Priya) — 15 min
+
+Pre-read materials:
+- [Confluence] API Response Time Instrumentation Report (David, shared 2025-06-11)
+- [Google Doc] Redis Caching Architecture Proposal v2 (David, shared 2025-06-12)
+- [Jira] FALCON-09 — Dashboard Widget Performance (linked PRs)
+
+---
+
+ITEM 1: CACHING STRATEGY PROPOSAL AND DECISION (10:00–10:48 AM)
+
+[Priya Chandrasekaran — 10:00 AM]
+Alright, let's get started. I know people have calls at 11:30 so we'll try to stay on time. David, you've got the floor for the caching proposal. I know a few of you already read through the doc he shared yesterday — if you haven't, don't worry, he's going to walk through the whole thing. David, go ahead.
+
+[David Okafor — 10:01 AM]
+Thanks Priya. OK so — I've been working on a caching strategy for our API layer and I want to walk through the proposal and get a decision today. We've been running without any structured caching and it's starting to hurt — the dashboard widgets are the most visible symptom but it's a broader problem.
+
+Let me share the data. I instrumented our top 20 API endpoints last week with response time tracking. I added a middleware that captures P50, P95, and P99 latency for each endpoint, bucketed by tenant tier. The instrumentation PR is #1862 if anyone wants to look at the implementation — it's a lightweight decorator pattern, no performance impact on the endpoints themselves. Here's what I found:
+
+**Most expensive endpoints (P95 response time):**
+1. `GET /api/dashboards/{id}/widgets` — 2,800ms (multiple aggregation queries)
+2. `GET /api/analytics/query` — 1,200ms (arbitrary query execution)
+3. `GET /api/tenants/{id}/usage` — 890ms (billing aggregation)
+4. `GET /api/data-sources` — 420ms (joins across 3 tables)
+5. `GET /api/dashboards` — 380ms (list with summary stats)
+
+For reference, the next five are all under 200ms and don't need attention right now.
+
+The dashboard widgets endpoint is the worst offender. When a user opens a dashboard with 8 widgets, the frontend fires 8 parallel requests, each running an aggregation query. That's 8 x 2.8s = 22.4 seconds of database time per dashboard load. Users are complaining.
+
+[Lin Zhang — 10:06 AM]
+Just to add some frontend context — the 8 parallel requests happen because each widget type has its own data fetcher. We fire them all with `Promise.all()` on mount. The loading spinner shows until the slowest widget resolves, so even though most widgets finish in 1-2 seconds, the user sees the spinner until the last one at 2.8 seconds. It's a bad experience. We've had three support tickets about it in the last two weeks alone.
+
+[David Okafor — 10:07 AM]
+Right. And it's getting worse as we onboard more tenants with larger datasets. The events table is at 48 million rows now and growing by about 2 million a week.
+
+But here's the thing: most of this data doesn't change frequently. Analytics data is append-only — once an event is recorded, it doesn't change. Dashboard configurations change maybe once a day. Usage stats are recomputed hourly. We're doing expensive queries for data that's essentially static between updates.
+
+[Wendy Nakamura — Zoom — 10:08 AM]
+David, quick question before you get into the proposal — did the instrumentation show any pattern by tenant? I'm wondering if this is concentrated on a few heavy tenants or distributed evenly.
+
+[David Okafor — 10:09 AM]
+Good question. It's somewhat concentrated. Our top 5 tenants by data volume account for about 60% of the total query time. But even smaller tenants are seeing 800ms+ on the widgets endpoint because the query plan is suboptimal regardless of data size — I'll cover that fix in agenda item 2. The caching benefits everyone, but the biggest impact will be on those high-volume tenants.
+
+OK, so the proposal.
+
+**Proposal: Redis caching layer with a 5-minute TTL for API responses.**
+
+Here's the architecture:
+
+```
+Client → API Server → Cache Check (Redis) → Hit? → Return cached response
+                                           → Miss? → Execute query → Store in Redis (5-min TTL) → Return response
+```
+
+**Cache key structure:**
+```
+cache:{endpoint}:{tenant_id}:{hash_of_query_params}
+```
+
+The tenant_id in the key ensures tenant isolation — Tenant A can never receive Tenant B's cached data. The hash is SHA-256 of the sorted query parameters, so `?start=2025-01-01&end=2025-06-01` and `?end=2025-06-01&start=2025-01-01` produce the same cache key.
+
+[Tomas Eriksson — Zoom — 10:12 AM]
+David, just to clarify — are you hashing the full query string or the normalized parameters? I've seen bugs where URL encoding differences cause cache misses for semantically identical requests.
+
+[David Okafor — 10:12 AM]
+Good point. I'm normalizing first — lowercasing keys, sorting alphabetically, then hashing the canonical form. So `?Start=2025-01-01` and `?start=2025-01-01` hit the same cache entry. Here's the normalization function:
+
+```python
+def normalize_cache_params(params: dict) -> str:
+    """Produce a canonical string from query params for cache key hashing."""
+    normalized = {k.lower(): str(v) for k, v in sorted(params.items())}
+    return json.dumps(normalized, sort_keys=True, separators=(',', ':'))
+```
+
+[Tomas Eriksson — Zoom — 10:13 AM]
+That works. Thanks.
+
+[David Okafor — 10:13 AM]
+OK continuing with the proposal.
+
+**TTL strategy:**
+- Dashboard widget data: 5 minutes (data is append-only, 5-min staleness is acceptable)
+- Dashboard list/config: 60 seconds (config changes should reflect quickly)
+- Analytics query results: 5 minutes (same as widgets)
+- Usage/billing data: 15 minutes (recomputed hourly anyway)
+- Data source list: 30 seconds (infrequently changes but should be responsive)
+
+I've put together a table of all endpoints with their proposed TTLs in the Confluence doc. The five I listed are the ones that matter most. Everything else either has a TTL of 30 seconds or isn't worth caching because it's already fast.
+
+[Anika Patel — 10:15 AM]
+For the billing data — 15-minute TTL — do we need to worry about tenants seeing stale usage numbers on their settings page? If someone just upgraded their plan, would they see old usage stats?
+
+[David Okafor — 10:15 AM]
+The usage endpoint aggregates historical data. Plan changes are a different endpoint that isn't cached. So they'd see their new plan instantly but the usage chart might show data up to 15 minutes old, which is already the case because the usage aggregation job runs hourly. No practical difference for the user.
+
+[Anika Patel — 10:16 AM]
+Got it, that makes sense.
+
+[David Okafor — 10:16 AM]
+**Cache invalidation:**
+- TTL-based expiry is the primary mechanism (simple, reliable)
+- Explicit invalidation on write: when a dashboard is updated, we invalidate all cache keys for that dashboard
+- Bulk invalidation: `cache:flush:{tenant_id}:*` pattern delete for tenant-level cache reset
+- No cache warming — we'll rely on the first request after expiry to populate the cache (miss penalty is acceptable)
+
+For the explicit invalidation, I'm using Redis `SCAN` with pattern matching rather than `KEYS` to avoid blocking Redis on large keyspaces. The invalidation happens asynchronously — the write endpoint returns immediately and fires a background task to clear cache entries.
+
+```python
+async def invalidate_dashboard_cache(tenant_id: str, dashboard_id: str):
+    """Invalidate all cache entries for a specific dashboard."""
+    pattern = f"cache:dashboards/{dashboard_id}/*:{tenant_id}:*"
+    cursor = 0
+    while True:
+        cursor, keys = await cache_redis.scan(cursor, match=pattern, count=100)
+        if keys:
+            await cache_redis.delete(*keys)
+        if cursor == 0:
+            break
+```
+
+[Mike Torres — 10:18 AM]
+Quick question on that — you're using `SCAN` which is correct, but the pattern `cache:dashboards/{dashboard_id}/*:{tenant_id}:*` could match a lot of keys if someone has dozens of query parameter combinations. Have you estimated the maximum keyspace size per tenant?
+
+[David Okafor — 10:19 AM]
+I ran the numbers. Worst case: a tenant with 20 dashboards, each with 8 widgets, each queried with 5 different date ranges = 800 cache keys per tenant. With 200 tenants, that's 160K keys total. Each key's value is a serialized JSON response averaging 2-5KB. Total memory: roughly 400MB-800MB, well within the 13GB we're provisioning.
+
+[Mike Torres — 10:20 AM]
+OK, that's comfortable. And SCAN with 160K keys is fine — 1600 iterations at count=100, takes maybe 200ms total. No blocking concern.
+
+[David Okafor — 10:20 AM]
+Exactly.
+
+**Redis instance:**
+I'm proposing we use a separate Redis instance from the session store. Sessions are critical infrastructure — if the session Redis has a memory issue because of cache data, we don't want it to affect authentication. Carlos, is that feasible?
+
+[Carlos Rivera — 10:21 AM]
+Yes. I'll provision a second ElastiCache cluster for caching. Different instance type though — caching is more memory-intensive and less latency-sensitive than sessions. I'd go with an r6g.large (13GB memory) for the cache cluster versus the t3.medium for sessions. Single-node is fine for cache since it's not critical — if it goes down, requests just hit the database directly (graceful degradation).
+
+Cost-wise, the r6g.large is about $0.252/hour in us-east-1, so roughly $183/month. Compared to the database CPU time we're burning on redundant queries, it's a significant net savings. I can put together a cost comparison if leadership needs it for the budget review.
+
+[Priya Chandrasekaran — 10:23 AM]
+I don't think we need a formal cost analysis — $183/month is within my approval threshold and the performance improvement justifies it easily. But go ahead and note it in the architecture decision record.
+
+[David Okafor — 10:23 AM]
+Perfect. Graceful degradation is key — the cache is an optimization, not a requirement. If Redis is unavailable, the API still works, just slower. I've added a circuit breaker around the Redis calls: if we get 5 consecutive connection failures within 30 seconds, we trip the circuit and bypass cache entirely for 60 seconds before retrying. Here's the config:
+
+```python
+CACHE_CIRCUIT_BREAKER = {
+    "failure_threshold": 5,
+    "recovery_timeout": 60,  # seconds
+    "expected_exceptions": [ConnectionError, TimeoutError, RedisError],
+}
+```
+
+[Tomas Eriksson — Zoom — 10:25 AM]
+I like the circuit breaker. Can we emit a metric when it trips? I want it to show up on our SRE dashboard so we get alerted if the cache cluster goes unhealthy.
+
+[Carlos Rivera — 10:25 AM]
+Absolutely. I'll add a CloudWatch custom metric for circuit breaker state changes. We can set a P1 alarm on it.
+
+[Mike Torres — 10:26 AM]
+Quick clarification — this is a completely separate Redis from the session store, right? Different cluster, different connection pool?
+
+[David Okafor — 10:26 AM]
+Correct. Separate ElastiCache cluster, separate connection pool, separate configuration. The cache Redis and the session Redis are completely isolated. In the application config, they're different environment variables:
+
+```
+# Session store (existing)
+REDIS_SESSION_URL=redis://session-redis.xxxxx.cache.amazonaws.com:6379/0
+
+# Cache store (new)
+REDIS_CACHE_URL=redis://cache-redis.xxxxx.cache.amazonaws.com:6379/0
+```
+
+[Carlos Rivera — 10:27 AM]
+I want to emphasize that. We'll have two Redis clusters:
+1. `session-redis` — ElastiCache Multi-AZ, 3 nodes, for authentication sessions
+2. `cache-redis` — ElastiCache single-node, for API response caching
+Different security groups, different monitoring dashboards, different scaling policies.
+
+The session cluster stays on its current Multi-AZ deployment with automatic failover. The cache cluster is single-node because if it goes down, we just get cache misses — no data loss, no service interruption. If we eventually need high availability on the cache side, I can add a read replica, but I don't think we need it yet.
+
+[Sarah Kim — 10:28 AM]
+I support separate clusters. Mixing session state and cache data is a recipe for trouble. Cache data can be evicted if memory pressure is high — sessions should never be evicted. Redis uses an LRU eviction policy by default, which would be fine for cache data but catastrophic for sessions. Keeping them separate means we can configure each cluster's eviction policy independently.
+
+[James Holden — 10:29 AM]
+Agreed. And from a compliance perspective, session data has different retention requirements than cache data. Separate clusters makes audit trails cleaner.
+
+[Priya Chandrasekaran — 10:30 AM]
+Good. David, what's the expected impact?
+
+[David Okafor — 10:30 AM]
+Based on the access patterns I measured:
+- Dashboard widget endpoint: P95 drops from 2,800ms to ~50ms on cache hit (the first load after expiry is still 2,800ms)
+- Cache hit rate estimate: 75-85% during working hours (users tend to view the same dashboards repeatedly)
+- Database load reduction: 30-40% fewer queries during peak hours
+- Connection pool headroom: significant — cached requests don't touch the database at all
+
+For the hit rate estimate, I looked at our access logs for the last 30 days. The top 50 dashboard-tenant pairs account for 78% of all widget requests. These dashboards are typically viewed by multiple users throughout the day — team dashboards, executive dashboards, ops dashboards. With a 5-minute TTL, the first viewer after each expiry takes the hit, and everyone else gets cached responses.
+
+Net effect: most dashboard loads will feel instant (sub-100ms) instead of taking 3+ seconds.
+
+[Lin Zhang — 10:33 AM]
+From the frontend perspective, this is huge. We've been getting complaints about dashboard load times since we crossed 100 active users. The 8-widget parallel request pattern means users see a loading spinner for 3+ seconds on every dashboard visit. If we get that to sub-100ms, the dashboards will feel native.
+
+I've actually been prototyping a stale-while-revalidate pattern on the frontend too — we could serve the last cached response from localStorage immediately and refresh in the background. But if the backend cache gets us to sub-100ms, the frontend optimization becomes less urgent. We can always layer it on later if needed.
+
+[Wendy Nakamura — Zoom — 10:34 AM]
+From a QA perspective, can we add a response header indicating whether the response came from cache? Something like `X-Cache: HIT` or `X-Cache: MISS`? It'll make testing and debugging a lot easier.
+
+[David Okafor — 10:35 AM]
+Great idea. I'll add `X-Cache-Status` with values `HIT`, `MISS`, `BYPASS` (circuit breaker tripped), and `EXPIRED` (key existed but TTL exceeded). I'll also include `X-Cache-TTL` with the remaining seconds until expiry.
+
+[Wendy Nakamura — Zoom — 10:35 AM]
+Perfect. That'll help with the test plan too. I can write assertions against those headers.
+
+[James Holden — 10:36 AM]
+What about cache stampede? If a popular dashboard's cache expires and 50 users request it simultaneously, we'd get 50 cache misses all hitting the database at once.
+
+[David Okafor — 10:36 AM]
+Good catch. I'm implementing a cache-aside pattern with a distributed lock. When a cache miss occurs, the first request acquires a lock (Redis SETNX with a 5-second TTL), executes the query, and populates the cache. Subsequent requests during the lock period wait briefly (100ms) and then check the cache again. If the cache is populated, they get the cached response. If the lock times out without populating the cache, they fall through to the database.
+
+```python
+def get_cached_or_compute(cache_key, compute_fn, ttl):
+    # Try cache first
+    cached = redis.get(cache_key)
+    if cached:
+        return deserialize(cached)
+
+    # Try to acquire computation lock
+    lock_key = f"lock:{cache_key}"
+    acquired = redis.set(lock_key, "1", nx=True, ex=5)
+
+    if acquired:
+        # We got the lock — compute and cache
+        try:
+            result = compute_fn()
+            redis.set(cache_key, serialize(result), ex=ttl)
+            return result
+        finally:
+            redis.delete(lock_key)
+    else:
+        # Someone else is computing — wait and check cache
+        time.sleep(0.1)
+        cached = redis.get(cache_key)
+        if cached:
+            return deserialize(cached)
+        # Lock holder might have failed — compute directly
+        return compute_fn()
+```
+
+The lock TTL of 5 seconds is a safety net. If the lock holder crashes or takes too long, the lock auto-expires and the next requester can take over. We never get stuck in a permanent lock state.
+
+[Mike Torres — 10:40 AM]
+That's the right pattern. The sleep(0.1) is a bit crude though — could we use Redis pub/sub to notify waiters when the cache is populated?
+
+[David Okafor — 10:40 AM]
+We could, but it adds complexity for marginal benefit. The 100ms wait covers 95% of cases (our slowest query is 2.8s, and even the median dashboard query completes in ~500ms, so 100ms is usually enough for the lock holder to finish). If not, the fallback to direct compute is safe — it's just less efficient. I'd rather ship the simple version and optimize if we see stampede issues in production.
+
+[Tomas Eriksson — Zoom — 10:41 AM]
+I've seen the pub/sub approach work well at scale, but David's right that it's overkill for our traffic level. At 50 concurrent users on a popular dashboard, the stampede window is tiny. The lock + sleep approach is standard and well-understood.
+
+[Mike Torres — 10:42 AM]
+Fair enough. Ship simple, iterate.
+
+[Rachel Fernandez — 10:42 AM]
+One thing I want to flag — for the WebSocket layer, when we push real-time updates to dashboards, should those updates also invalidate the relevant cache entries? Otherwise a user might get a real-time update via WebSocket and then on page refresh see stale cached data that's older than what they just saw.
+
+[David Okafor — 10:43 AM]
+Hmm, that's a good edge case. The WebSocket push happens when new events are ingested, which means the underlying data has changed. We should invalidate the affected cache keys when we push a WebSocket update. I'll add that to the implementation — the WebSocket handler already knows the tenant_id and dashboard_id, so it's straightforward to trigger invalidation from there.
+
+[Rachel Fernandez — 10:44 AM]
+Great. I can help wire that up when I'm in the WebSocket code for the migration.
+
+[Priya Chandrasekaran — 10:44 AM]
+Alright, I think we have a solid proposal. Any objections to going with this approach?
+
+[Sarah Kim]
+No objections. The architecture is clean and the separation from sessions is the right call.
+
+[Mike Torres]
+Looks good to me. The stampede handling is pragmatic.
+
+[Rachel Fernandez]
+Can we also cache WebSocket subscription state? When a client reconnects after a brief disconnect, it re-subscribes to all channels. If we cache the subscription list in Redis, we can restore subscriptions faster.
+
+[David Okafor]
+Different use case but same infrastructure. Let's add it as a follow-up. For now, the API caching is the priority.
+
+[James Holden]
+I'm good. The graceful degradation approach means low risk — worst case, cache isn't working and we're back to the current behavior.
+
+[Tomas Eriksson — Zoom]
+No objections from SRE. The circuit breaker and separate cluster design are exactly what I'd want. I'll review the monitoring setup with Carlos once the cluster is provisioned.
+
+[Priya Chandrasekaran — 10:47 AM]
+Alright, we're going with it. **Decision: We're implementing Redis caching with a 5-minute default TTL for API responses.** David, you're the owner. Carlos, provision the cache Redis cluster. Target: staging deployment by end of next week.
+
+**Action items from Item 1:**
+- [ ] David: Implementation PR by Wednesday (cache middleware, lock pattern, invalidation)
+- [ ] Carlos: Provision `cache-redis` ElastiCache cluster by Monday
+- [ ] Carlos: Grafana dashboard for cache cluster metrics (hit rate, memory, latency)
+- [ ] Carlos + Tomas: CloudWatch alarm for circuit breaker state changes
+- [ ] David: Add `X-Cache-Status` and `X-Cache-TTL` response headers
+- [ ] David + Rachel: Wire WebSocket update events to cache invalidation (follow-up)
+- [ ] Wendy: Draft QA test plan for cache behavior (HIT/MISS/BYPASS scenarios)
+- [ ] Rachel: File follow-up ticket for WebSocket subscription caching
+
+[David Okafor]
+On it. I'll have a PR up by Wednesday.
+
+[Carlos Rivera]
+Cache cluster will be ready by Monday. I'll start the Terraform changes this afternoon.
+
+---
+
+ITEM 2: DASHBOARD WIDGET PERFORMANCE UPDATE (10:48–11:05 AM)
+
+[David Okafor — 10:48 AM]
+Quick update on the widget performance ticket (FALCON-09). Two separate improvements:
+
+First, the composite index fix I mentioned in standup. I added a composite index on `(tenant_id, event_type, created_at)` to the events table. The aggregation query for widgets was doing a full scan on 48M rows because the existing index only covered `(tenant_id, created_at)` and the query filters on `event_type` too. After adding the index:
+
+Before:
+```
+EXPLAIN ANALYZE: Seq Scan on events → 2,340ms, rows=48,000,000
+```
+
+After:
+```
+EXPLAIN ANALYZE: Index Scan using idx_events_tenant_type_created → 89ms, rows=12,400
+```
+
+That's a 26x improvement on the database side. Combined with the caching layer, dashboard widgets should go from 2.8 seconds to sub-100ms for cached responses and ~150ms for cache misses.
+
+[Tomas Eriksson — Zoom — 10:51 AM]
+David, did adding that index have any impact on write performance? We're doing a lot of INSERTs into the events table.
+
+[David Okafor — 10:52 AM]
+Minimal. I checked the INSERT latency before and after: P95 went from 1.2ms to 1.4ms. The index is on three columns but they're all narrow types — UUID, varchar(50), and timestamp. The B-tree maintenance cost is negligible compared to the query improvement. I ran the migration during our low-traffic window on Wednesday night and the index creation took about 3 minutes on the 48M row table using `CREATE INDEX CONCURRENTLY` so there was no table lock.
+
+[Sarah Kim — 10:53 AM]
+Good call using `CONCURRENTLY`. I've been burned by index creation locks before.
+
+[David Okafor — 10:53 AM]
+Second, I refactored the widget query builder to push aggregation down to the database instead of fetching raw rows and aggregating in Python. The old code was doing:
+
+```python
+# Old: fetch all events, aggregate in Python
+events = Event.objects.filter(tenant=tenant, type=event_type, created__range=(start, end))
+result = {}
+for event in events:
+    key = event.created.date()
+    result.setdefault(key, []).append(event.value)
+# ... compute averages, sums, etc.
+```
+
+New code:
+```python
+# New: aggregate in PostgreSQL
+result = (
+    Event.objects
+    .filter(tenant=tenant, type=event_type, created__range=(start, end))
+    .values(day=TruncDate('created'))
+    .annotate(avg_value=Avg('value'), sum_value=Sum('value'), count=Count('id'))
+    .order_by('day')
+)
+```
+
+This reduces data transfer from database to application by ~99% for large date ranges. Instead of fetching 50K rows and aggregating in Python, we get back 30 pre-aggregated rows.
+
+[Mike Torres — 10:56 AM]
+That's a classic optimization. I'm surprised it wasn't done that way originally.
+
+[David Okafor — 10:56 AM]
+Legacy code. The original implementation was written when the events table had 10K rows and the Python aggregation was fast enough. Nobody revisited it as the table grew. This is one of those gradual degradation issues — it worked fine for a year and then suddenly it didn't.
+
+[Wendy Nakamura — Zoom — 10:57 AM]
+Did the aggregation refactor change any of the returned values? I want to make sure our integration tests are covering the new query path.
+
+[David Okafor — 10:57 AM]
+The output format is identical — same JSON shape, same field names. The values are mathematically equivalent, though there might be tiny floating-point differences in averages because PostgreSQL and Python handle float division slightly differently. I added a tolerance check in the tests.
+
+[Sarah Kim — 10:58 AM]
+That's a huge improvement. Were there any test failures from the refactor?
+
+[David Okafor — 10:58 AM]
+Two tests failed because they were testing the Python aggregation logic directly. I updated them to test the query output instead. All tests pass now. PR #1865, merged yesterday. I also added a new test that compares the old aggregation path with the new one on a fixture dataset to verify equivalence, just as a safety net.
+
+[Priya Chandrasekaran — 10:59 AM]
+Great work. This was a top customer complaint. What's the measured impact in staging?
+
+[David Okafor — 11:00 AM]
+Staging numbers with the new index and the push-down aggregation (no cache yet):
+- Dashboard with 8 widgets: 1.2 seconds total (down from 8+ seconds)
+- Single widget load: 150ms P95 (down from 2,800ms)
+
+Once the cache layer is in place, repeat loads will be sub-50ms.
+
+[Wendy Nakamura — Zoom — 11:01 AM]
+I ran the regression suite against staging after the merge and everything passed. I also did a manual walkthrough on the Analytics Pro dashboard, which has the most widgets — it's noticeably faster. Page load felt almost instant compared to last week.
+
+[David Okafor — 11:02 AM]
+Thanks Wendy. Glad to hear it's holding up in staging.
+
+[Lin Zhang — 11:03 AM]
+The frontend is going to feel so much snappier. I'm going to add skeleton loading states to the widgets — with sub-second loads, the skeletons will barely flash, which feels more polished than a full loading spinner. I've got a prototype branch with the skeleton components already, I just need to wire them into the widget container. Should be a small PR early next week.
+
+[Priya Chandrasekaran — 11:04 AM]
+Nice. Alright, let's move to the burndown.
+
+---
+
+ITEM 3: SPRINT 24 BURNDOWN (11:05–11:25 AM)
+
+[Priya Chandrasekaran — 11:05 AM]
+Sprint 24 burndown. We committed 14 story points. Where are we?
+
+Completed (10 points):
+- FALCON-04: Data retention policy (James) — merged, 3 pts
+- FALCON-09: Dashboard widget performance (David) — merged, 3 pts
+- FALCON-12: Rate limiter refactor (Mike) — merged, 2 pts
+- PR #1858: Session cleanup timezone fix (Mike) — merged, 1 pt
+- PR #1847: Export pipeline schema migration (Sarah) — merged, 1 pt
+
+In Progress (4 points):
+- FALCON-07: Analytics query builder frontend (Lin) — 2 pts, on track for Monday
+- FALCON-14: WebSocket migration (Rachel) — 2 pts, dashboard consumer in progress
+
+Not Started:
+- FALCON-11: Tenant onboarding rewrite (Anika) — 2 pts, deferred to Sprint 25
+
+We also picked up unplanned work:
+- PR #1871: Redis session store (Mike) — 5 pts equivalent, merged today
+- Export pipeline v2 (Sarah) — 3 pts equivalent, PR up
+- Caching strategy design (David) — 2 pts equivalent, proposal approved today
+
+[Lin Zhang — 11:08 AM]
+Quick update on FALCON-07 — the query builder is functionally complete. I'm finishing up the field auto-complete dropdown and adding keyboard navigation. I should have it ready for code review by end of day today, which puts the merge on track for Monday after review.
+
+[Rachel Fernandez — 11:09 AM]
+For FALCON-14, I've got the dashboard consumer converted to the new WebSocket framework. The chat consumer is next — it's smaller so I expect to finish it early next week. The tricky part was handling the subscription multiplexing, but I've got a pattern working now. PR should be up by Tuesday.
+
+[Priya Chandrasekaran — 11:10 AM]
+Good. So we committed 14, completed 10, have 4 in progress, and picked up about 10 points of unplanned work. The unplanned work is all high-value — the session store and caching strategy are foundational. But it means we're carrying FALCON-11 into Sprint 25.
+
+[Anika Patel — 11:11 AM]
+That's fine. The onboarding rewrite was waiting on the billing API changes that Stripe just shipped last week. I can start fresh in Sprint 25 with the new Stripe API. I've already been reading through their migration guide — the new `Subscription Schedules` API is much cleaner than what we were using. Should make the implementation simpler than what I originally scoped.
+
+[David Okafor — 11:12 AM]
+Anika, do you need any backend changes for the Stripe integration? If there's API work, I can pick it up in parallel.
+
+[Anika Patel — 11:12 AM]
+I think I'm good — the new Stripe API handles most of what we were doing manually. But I'll flag it if something comes up. Thanks.
+
+[Priya Chandrasekaran — 11:13 AM]
+OK. Sprint 25 planning is Monday. Key items:
+1. Multi-workspace Phase 1 (database migration) — David
+2. Redis caching implementation — David
+3. Tenant onboarding rewrite — Anika
+4. Export pipeline production rollout — Sarah
+5. WebSocket migration completion — Rachel
+6. Redis session store staging validation and production rollout — Mike
+
+That's a heavy sprint. I might need to push some items to Sprint 26. Let's discuss priority on Monday.
+
+[James Holden — 11:14 AM]
+I've got some bandwidth next sprint if anyone needs a hand. The retention policy was my big deliverable and it's done. I can pick up whatever needs coverage.
+
+[Priya Chandrasekaran — 11:14 AM]
+Great, I'll keep that in mind for planning. We might need you on the multi-workspace migration testing — David's going to need reviewers who understand the tenant isolation model.
+
+[Mike Torres — 11:15 AM]
+The session store staging validation should be quick — the code is merged, the infrastructure is ready, it's just flipping the feature flag and monitoring. Maybe half a day. I can also help with the caching implementation review since I've worked with the Redis patterns before.
+
+[Carlos Rivera — 11:16 AM]
+I'll have monitoring dashboards ready for both Redis clusters (session and cache) before Monday. Grafana dashboards with connection count, memory usage, hit rate, latency percentiles. I've already got the session dashboard templated from when we set up the session cluster — I'll clone it and adapt it for the cache cluster.
+
+[Tomas Eriksson — Zoom — 11:17 AM]
+Carlos, can you add those dashboards to the SRE shared folder? I want the on-call team to have visibility too.
+
+[Carlos Rivera — 11:17 AM]
+Will do. I'll also add the cache cluster to our runbook so on-call knows what to do if it goes unhealthy.
+
+[Priya Chandrasekaran — 11:18 AM]
+Good. One more thing — the SOC 2 audit prep. Carlos, where do we stand?
+
+[Carlos Rivera — 11:18 AM]
+Two remaining gaps:
+1. Session audit trail — covered by Phase 3 of Mike's session work
+2. Data access audit logging — need to add audit events for data exports, dashboard sharing, and permission changes
+
+I'm targeting both for Sprint 26. The auditor does their on-site review in late July, so we have about 6 weeks.
+
+[Mike Torres — 11:19 AM]
+Phase 3 of the session work includes the audit trail — login/logout events, session creation/destruction, IP tracking. I've got the schema designed, just need to wire it up to the new session middleware. It's probably 3-4 story points.
+
+[James Holden — 11:20 AM]
+For the data access audit logging, I can take that. It overlaps with the retention policy work I just finished — I already have hooks into the export pipeline for tracking data lifecycle events. Adding audit events for sharing and permissions should be straightforward.
+
+[Carlos Rivera — 11:21 AM]
+That would be great. The auditor specifically asked about "who accessed what data and when" — we need to log when someone views an export, shares a dashboard, or changes tenant permissions. Timestamp, user ID, action, and the affected resource.
+
+[Priya Chandrasekaran — 11:22 AM]
+Let's make sure it doesn't slip. It's a deal-blocker for Meridian Health. They won't sign the enterprise contract without SOC 2 Type II certification.
+
+[Anika Patel — 11:23 AM]
+Just capturing the action items for the sprint planning doc:
+- David: Multi-workspace Phase 1 + Redis caching implementation
+- Mike: Session store production rollout + caching PR review
+- Anika: Tenant onboarding rewrite with new Stripe API
+- Sarah: Export pipeline production rollout
+- Rachel: WebSocket migration completion + cache invalidation wiring
+- James: SOC 2 data access audit logging
+- Carlos: Redis monitoring dashboards + cache cluster provisioning + runbook update
+- Lin: Analytics query builder merge + skeleton loading states
+
+[Priya Chandrasekaran — 11:24 AM]
+Thanks Anika. Everyone please come to Monday's planning with your capacity estimates. If you have PTO or other commitments next sprint, let me know before end of day today so I can factor it into planning.
+
+Alright, that's a wrap. Good meeting everyone. Have a good weekend.
+
+[Mike Torres — 11:25 AM]
+Thanks all. I'll be running the staging deployment over lunch if anyone wants to watch the session store flip — I'll post in #deploys.
+
+---
+
+SLACK THREAD — #random — 11:45 AM
+
+[Lin Zhang]
+Who's up for lunch? Thinking about that new ramen place on 4th.
+
+[Rachel Fernandez]
+I'm in. 12:15?
+
+[Anika Patel]
+Same. @mtorres @dokafor?
+
+[Mike Torres]
+Can't — I'm running the staging deployment for the session store over lunch. Grab me something?
+
+[David Okafor]
+I'll come. Spicy miso for Mike?
+
+[Mike Torres]
+You know it. :fire:
+
+[James Holden]
+I'll join. Need to get out of this chair — been debugging Glacier transitions all morning.
+
+[Lin Zhang]
+@jholden wait, what Glacier issue? Is that the S3 lifecycle policy for the retention work?
+
+[James Holden]
+Yeah — objects are transitioning to Glacier correctly but the retrieval API was returning a 403 instead of a proper "object is archived, initiate restore" error. Turns out we were missing the `s3:RestoreObject` permission in the IAM policy. Carlos helped me sort it out. All good now.
+
+[Carlos Rivera]
+Count me in too. I need to explain to someone why we now have two Redis clusters and it's a good thing.
+
+[Anika Patel]
+Haha. "We spent $183/month so your dashboards don't take 3 seconds to load." Easiest sell ever.
+
+[Rachel Fernandez]
+OK so that's me, Lin, Anika, David, James, Carlos. Meet in the lobby at 12:10?
+
+[David Okafor]
+Works for me. I'll grab Mike's order on the way back.
+
+[Lin Zhang]
+See everyone downstairs.
+
+---
+
+SLACK THREAD — #deploys — 12:32 PM
+
+[Mike Torres]
+Starting session store staging deployment. Flipping feature flag `USE_REDIS_SESSIONS` to `true` in staging environment. Will monitor for 30 minutes and report back.
+
+[Mike Torres]
+Session store flag is live in staging. Redis connection pool initialized, first sessions being created. Watching Grafana for anomalies.
+
+[Carlos Rivera]
+Monitoring from my end too. Session Redis cluster metrics look normal — 0.3% memory utilization, connection count at 4 (expected for 2 app server instances × 2 pool connections each).
+
+---
+
+END OF EPISODE

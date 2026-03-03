@@ -1,0 +1,607 @@
+RIVULET ENGINEERING — ARCHITECTURE DISCUSSION: AUTH SESSION MANAGEMENT (CONTINUED)
+Date: 2025-06-05 (Thursday)
+Time: 2:00–3:30 PM PT
+Location: Zoom (recorded) + #arch-discussions Slack channel
+Attendees: Sarah Kim (Staff Engineer, Platform), Mike Torres (Senior Engineer, Backend), David Okafor (Senior Engineer, Infrastructure), Priya Chandrasekaran (Engineering Manager), Rachel Fernandez (Senior Engineer, Notifications), James Holden (Engineer, Data Platform), Lena Novak (Engineer, Frontend), Carlos Reyes (Security Lead)
+Context: Continuation of ADR-017 discussion — Mike presenting counter-proposal
+Recording link: https://rivulet.zoom.us/rec/share/arch-2025-06-05
+Notetaker: Rachel Fernandez
+
+---
+
+PRE-MEETING LOGISTICS (1:55–2:00 PM)
+
+[Priya Chandrasekaran — 1:55 PM]
+Alright, folks are trickling in. Give it a couple minutes for everyone to join.
+
+[Lena Novak — 1:56 PM]
+Hey all. I'm joining from the Portland office today so apologies if audio is a bit echoey — the conference room mics aren't great.
+
+[Rachel Fernandez — 1:57 PM]
+I can hear you fine, Lena.
+
+[James Holden — 1:57 PM]
+Same here.
+
+[Carlos Reyes — 1:58 PM]
+Quick note before we start — I have a hard stop at 3:15. I've got a call with the SOC 2 auditors at 3:30 and need prep time.
+
+[Priya Chandrasekaran — 1:59 PM]
+Noted, Carlos. We'll make sure any security-relevant items happen before then.
+
+[David Okafor — 1:59 PM]
+Mike, you sharing your screen or presenting from slides?
+
+[Mike Torres — 2:00 PM]
+Terminal and Grafana. No slides — just data and a whiteboard doc.
+
+---
+
+MEETING NOTES
+
+AGENDA:
+1. ADR-017 counter-proposal (Mike) — 30 min
+2. Export pipeline status update (Sarah) — 20 min
+3. Q3 roadmap preview (Priya) — 25 min
+4. Open items / action items — 10 min
+
+---
+
+ITEM 1: ADR-017 COUNTER-PROPOSAL — JWT REVOCATION ANALYSIS (2:00–2:30 PM)
+
+[Priya Chandrasekaran — 2:01 PM]
+OK, picking up where we left off Tuesday. Mike, you had time to think through an alternative. The floor is yours.
+
+[Mike Torres — 2:02 PM]
+Thanks. So I want to start by saying Sarah's JWT analysis was thorough and the stateless model is appealing. My issue isn't with JWT in general — it's with JWT for THIS use case, where we have enterprise customers who require immediate session revocation.
+
+Let me frame the core tension. When we say we want to move off the PostgreSQL session store, what we really want is:
+1. Fast session lookups that don't compete with application queries for database connections
+2. Horizontal scalability — any API server can validate any session
+3. Reliable session lifecycle management — no more timezone bugs in cleanup
+4. Immediate revocation capability for enterprise compliance
+
+JWT nails requirements 1-3 but struggles with requirement 4. That's the tension. If we implement a token blacklist for revocation, we reintroduce server-side state, and at that point we're maintaining both a stateless token system AND a stateful revocation store. Two systems instead of one.
+
+So my question was: is there a single system that satisfies all four requirements? And the answer is yes — but it requires letting go of the "stateless" paradigm.
+
+Before I get to my proposal, let me share some data I pulled. Let me share my screen.
+
+[Mike shares screen — terminal output and Grafana dashboard]
+
+[Lena Novak — 2:05 PM]
+Can you zoom in a bit? The Grafana panel text is small on my end.
+
+[Mike Torres — 2:05 PM]
+Sure, let me bump the browser zoom. Better?
+
+[Lena Novak — 2:05 PM]
+Perfect, thanks.
+
+[Mike Torres — 2:06 PM]
+OK, so this is the session-related query performance panel. I pulled this from our production Grafana. The time range is the last 7 days, broken out by percentile.
+
+Here's the session lookup latency distribution for the last 7 days:
+- P50: 2.1ms
+- P95: 8.4ms
+- P99: 47ms
+- P99.9: 312ms
+
+The P99 and P99.9 numbers are the problem — those are the requests hitting during connection pool saturation. But look at P50 — 2.1ms for a PostgreSQL lookup with an indexed query is actually fine. The issue isn't that PostgreSQL is slow; it's that PostgreSQL is shared between session lookups and everything else.
+
+Let me switch to the connection pool dashboard. Here are the connection pool stats during peak (10am-2pm ET):
+- Pool size: 20 connections
+- Active connections: 18-20 (saturated)
+- Waiting queue: 0-12 (this is where latency spikes come from)
+- Session lookup queries: 34% of all queries during peak
+
+[Carlos Reyes — 2:08 PM]
+Quick clarification — the 34% figure, is that 34% of all queries or 34% of all connection time?
+
+[Mike Torres — 2:08 PM]
+34% of query count, not connection time. Session lookups are fast queries — they're usually under 2ms each — so they're not holding connections long. But they're frequent enough that they contribute meaningfully to pool contention. Each API request starts with a session lookup, so the session query count roughly equals total authenticated request count.
+
+[Carlos Reyes — 2:09 PM]
+Got it. So the issue is that each of those lookups needs a connection from the pool, even if it only holds it for a couple milliseconds.
+
+[Mike Torres — 2:09 PM]
+Exactly. It's connection acquisition time, not query execution time. When the pool is saturated, that lookup that takes 2ms to execute might wait 45ms for a connection. That's where the P99 spike comes from.
+
+So session lookups are consuming 34% of our database connection pool during peak hours. That's the root cause. If we move sessions to a dedicated store — any dedicated store — we free up 34% of our connection pool AND eliminate the tail latency problem.
+
+[Sarah Kim — 2:10 PM]
+That's a good analysis. But if the argument is "move sessions to a dedicated store," JWT also achieves that — the store is the token itself.
+
+[Mike Torres — 2:11 PM]
+True, but JWT also introduces the revocation problem, which we've discussed. Let me present what I'm thinking and then we can compare.
+
+The core of my concern is this: JWT's stateless model means the server has no record of active sessions. If a token is issued, the server cannot un-issue it. The token exists until it expires. This is a fundamental property of the architecture, not a bug to be worked around.
+
+The revocation blacklist that Sarah mentioned — let me walk through what that actually looks like in practice.
+
+Say we implement JWT with 15-minute access tokens and a blacklist for revocation. Here's the flow when an admin needs to revoke a user's sessions:
+
+1. Admin calls POST /api/admin/users/{id}/revoke-sessions
+2. Server generates the list of active JTIs (token IDs) for that user
+3. Wait — how does the server know which JTIs are active? It doesn't. JWT is stateless. The server didn't record them.
+4. OK, so we'd need to record JTIs at issuance. Now we have a JTI store — which is... a session store.
+5. Alternatively, we maintain a "revoked users" list. On every request, after validating the JWT signature, we also check if the user ID is in the revoked list.
+6. Now every request does: verify JWT signature + check revocation list. Two operations instead of one.
+7. The revocation list needs to be fast — sub-millisecond lookups. So we'd put it in... Redis or an in-memory cache.
+
+So the revocation path for JWT leads us to: JWT verification + Redis lookup on every request. We've added complexity (two auth systems) without eliminating the server-side lookup.
+
+[Lena Novak — 2:15 PM]
+From the frontend perspective, the dual-system thing also means we'd need to handle two different kinds of auth errors. If the JWT itself is expired, that's a 401 with a different recovery path than if the user is on the revocation list. We'd need to distinguish between "your token expired, refresh it" and "your session has been revoked, go back to login."
+
+[Mike Torres — 2:16 PM]
+That's a good point, Lena. The error semantics get muddier with two systems. With a single session store, there's one reason your session is invalid: it doesn't exist. Simple.
+
+[David Okafor — 2:17 PM]
+That's a fair characterization. When I worked at DataScale, we went down this exact path. Started with JWT, added a Redis blacklist for revocation, and eventually realized we were maintaining two auth systems that had to agree with each other. When they disagreed — and they did, during a Redis failover — we had a 20-minute window where revoked tokens were accepted because the blacklist wasn't available.
+
+[Mike Torres — 2:18 PM]
+Exactly. The failure mode of JWT-with-blacklist is that revocation silently stops working when the blacklist is unavailable. That's the opposite of what an enterprise customer wants.
+
+[Carlos Reyes — 2:18 PM]
+Just to underscore that from a compliance perspective — if we tell customers in our security questionnaire that we support immediate revocation, and our implementation has a failure mode where revocation silently degrades, that's a significant audit finding. The SOC 2 auditors would flag that. We'd need to document the failure mode and the mitigation, and "we hope Redis doesn't go down" is not a mitigation they'll accept.
+
+[Sarah Kim — 2:19 PM]
+OK, I hear you. So what's your alternative?
+
+[Mike Torres — 2:20 PM]
+I don't have a fully fleshed proposal yet — I wanted to present the JWT revocation analysis first because I think it changes the framing. If we accept that we need server-side state for sessions regardless, then the question becomes: what's the best server-side session store? Not "should we go stateless?"
+
+The problems with PostgreSQL are:
+- Shared connection pool with application queries
+- Row-based storage is overkill for key-value lookup pattern
+- Session cleanup requires a background job
+
+What we want is a dedicated, fast, key-value store with built-in TTL support so sessions auto-expire without a cleanup job.
+
+[James Holden — 2:21 PM]
+Can I ask a quick scoping question? When we say "session," what's the payload? Is it literally just a session ID mapping to a user ID, or are we storing additional session state — preferences, feature flags, cart contents, anything like that?
+
+[Mike Torres — 2:21 PM]
+Good question. Right now, the Django session stores: user ID, CSRF token, last activity timestamp, and a few feature flag overrides. Total payload is around 400-600 bytes per session. It's small. We're not storing anything heavy in the session itself — the heavy data is in the user profile and tenant tables.
+
+[James Holden — 2:22 PM]
+OK, so it's truly a key-value pattern. That narrows the technology choices a bit — we don't need document storage or query capabilities.
+
+[Sarah Kim — 2:22 PM]
+Are you talking about Redis? Because if we put sessions in Redis, we still need to handle Redis availability, replication, failover...
+
+[Mike Torres — 2:23 PM]
+I'm not proposing a specific technology yet. I want to establish the requirements first. The requirements are:
+1. Key-value lookup in sub-millisecond time
+2. Built-in TTL for automatic session expiry
+3. Not sharing resources with the application database
+4. Native deletion for immediate revocation — just delete the key
+5. Horizontal read scalability
+6. Persistence across restarts (we can't lose all sessions on a deploy)
+
+Redis fits most of these. Memcached fits some but not persistence. DynamoDB fits all but has higher latency and cost. There are tradeoffs.
+
+But here's the key insight: with a dedicated session store that has built-in TTL, requirements 1-4 are satisfied by the store itself. No blacklists, no cleanup jobs, no dual-system complexity. Revocation is just `DELETE session_key` — the simplest operation possible.
+
+[Rachel Fernandez — 2:25 PM]
+Is persistence across restarts (requirement 6) a hard requirement or a nice-to-have? If we lost all sessions on a deploy, users would just have to re-login. That's annoying but not catastrophic.
+
+[Mike Torres — 2:25 PM]
+It's soft. We could live without it. But for enterprise customers, forcing 500 users to re-login simultaneously because of a deployment is a support ticket generator. It's nice to avoid.
+
+[Priya Chandrasekaran — 2:26 PM]
+OK, so Tuesday we heard the case for JWT. Today we've heard the case against JWT and a framing for a server-side session store. I think we need a concrete counter-proposal to compare against. Mike, can you write up a specific proposal in the ADR? Technology choice, implementation plan, migration path?
+
+[Mike Torres — 2:27 PM]
+Yeah, I'll update ADR-017 with the details. I want to benchmark a couple options first — I'll have something by Monday.
+
+[Priya Chandrasekaran — 2:27 PM]
+Alright. Let's plan to make a decision next week. We can't let this drag — the support tickets keep coming in. In the meantime, Mike, can you fix the timezone bug in the cleanup job? That's the immediate fire.
+
+[Mike Torres — 2:28 PM]
+Already have a fix locally — just need to write the test. I'll get a PR up today. It's a one-line change — the cleanup query needs to cast both timestamps to UTC before comparing.
+
+[Carlos Reyes — 2:28 PM]
+Can I see the fix before it merges? The session cleanup touches auth security surface and I want to make sure the fix doesn't have any edge cases around DST transitions. We've had issues before with pytz and DST boundaries.
+
+[Mike Torres — 2:29 PM]
+Absolutely, I'll tag you as a reviewer. The fix uses `datetime.now(pytz.UTC)` which doesn't have DST issues since UTC doesn't observe DST. But I'll call that out explicitly in the PR description.
+
+[Priya Chandrasekaran — 2:29 PM]
+Great. Let's move to the other agenda items. We have 45 minutes left and I want to cover the export pipeline status and the Q3 roadmap preview.
+
+---
+
+ITEM 2: EXPORT PIPELINE DISCUSSION (2:30 PM — 3:00 PM)
+
+[Sarah Kim — 2:30 PM]
+Quick update on the export pipeline. PR #1847 is merged — thanks David for the review. The background worker scaffold is in place. I've got the S3 streaming upload working in a draft PR (#1856). Main remaining work is:
+- Retry logic for failed uploads
+- Progress tracking so the frontend can show a progress bar
+- Size limits — we need to cap export size per tenant based on their plan tier
+- Email notification when export completes
+
+I'm estimating 3 more days to get it production-ready.
+
+[Priya Chandrasekaran — 2:31 PM]
+Three days from now means Monday or Tuesday next week?
+
+[Sarah Kim — 2:31 PM]
+Tuesday, accounting for the weekend. I should have a reviewable PR by end of day Tuesday.
+
+[David Okafor — 2:32 PM]
+The schema looks clean. One thing I noticed in the review — the `export_jobs` table doesn't have a foreign key to `tenants`. Is that intentional?
+
+[Sarah Kim — 2:33 PM]
+Yeah, it's denormalized. The export worker runs in a separate process and I didn't want it to need joins back to the tenants table. The tenant_id is stored as a string field with an index. It's a tradeoff — we lose referential integrity but the worker is self-contained.
+
+[David Okafor — 2:33 PM]
+Fair enough. As long as we document that decision. If someone comes along later and wonders why there's no FK, they should understand the reasoning.
+
+[Sarah Kim — 2:34 PM]
+I'll add a comment to the migration file.
+
+[James Holden — 2:34 PM]
+How does this interact with the data retention policy I just implemented? If someone exports data and then it ages past the 90-day retention window, does the export file also get cleaned up?
+
+[Sarah Kim — 2:35 PM]
+Good question. Export files in S3 have their own lifecycle policy — 30 days. So they'll be cleaned up independently of the source data retention. I should document that though. Let me add it to the export pipeline docs.
+
+[James Holden — 2:35 PM]
+And just to clarify — the export captures a point-in-time snapshot, right? So if a user exports their data on day 85, and retention deletes the original on day 91, the export file is still available until day 115 (85 + 30)?
+
+[Sarah Kim — 2:36 PM]
+Correct. The S3 lifecycle is based on the export creation date, not the source data creation date. They're completely independent timelines.
+
+[Lena Novak — 2:36 PM]
+On the frontend side — for the progress bar, are you exposing a polling endpoint or using WebSocket push? I'm asking because we have the existing WebSocket infrastructure from the notification system, so if it's push-based I can reuse that.
+
+[Sarah Kim — 2:37 PM]
+I was planning a polling endpoint — `GET /api/exports/{id}/status` — because the export worker doesn't have WebSocket access. But if you already have the WS infra, we could have the worker publish to a Redis channel and the WS server relay it to the client. That would give real-time updates.
+
+[Lena Novak — 2:37 PM]
+Let's stick with polling for v1 and add WS later. I don't want to complicate the initial implementation.
+
+[Sarah Kim — 2:37 PM]
+Agreed.
+
+[Priya Chandrasekaran — 2:38 PM]
+What about the 4GB export that James mentioned in standup Monday? Will streaming to S3 handle that?
+
+[Sarah Kim — 2:38 PM]
+Yes. The streaming approach means we never hold the full dataset in memory. We query in pages (10K rows per page), stream each page to S3 as a multipart upload, then move to the next page. Memory usage stays flat regardless of dataset size. I tested with a 2GB synthetic dataset and peak memory was 180MB.
+
+[David Okafor — 2:38 PM]
+What format? CSV? Parquet?
+
+[Sarah Kim — 2:38 PM]
+CSV for v1. Parquet is on the backlog — it's more complex because you need to buffer rows to write column groups. But CSV streaming is straightforward.
+
+[Rachel Fernandez — 2:39 PM]
+For the email notification — should it come from the existing notification service or directly from the export worker? I ask because the notification service has rate limiting and template management already built in.
+
+[Sarah Kim — 2:40 PM]
+Let's route it through the notification service. No reason to duplicate the email-sending infrastructure. I'll have the export worker publish a completion event and the notification service can pick it up.
+
+[Rachel Fernandez — 2:40 PM]
+I'll add an export-complete event handler and template. Should be quick.
+
+[Priya Chandrasekaran — 2:41 PM]
+Great, so action items for the export pipeline:
+- Sarah: PR #1856 ready for review by EOD Tuesday
+- Rachel: notification template and event handler
+- Lena: frontend progress bar integration once the polling endpoint is available
+- David: review #1856 when it's ready
+
+Let's move on.
+
+[David Okafor — 2:42 PM]
+One more thing on exports — should we think about throttling? If multiple tenants kick off large exports simultaneously, we could saturate the database read capacity.
+
+[Sarah Kim — 2:42 PM]
+The worker pool is capped at 4 concurrent exports right now. If we need more sophisticated throttling — like per-tenant limits or priority queues — we can add it later. For now, 4 concurrent exports should be fine given our customer count.
+
+[David Okafor — 2:43 PM]
+OK, that's reasonable for now.
+
+---
+
+ITEM 3: Q3 ROADMAP PREVIEW (3:00 PM — 3:25 PM)
+
+[Priya Chandrasekaran — 3:00 PM]
+Switching gears. Product sent over the draft Q3 roadmap and I want to walk through the engineering implications. This is just a preview — we'll have the full planning session in Sprint 26.
+
+Top items:
+1. **Multi-workspace support** — a single tenant can have multiple isolated workspaces. This is the Meridian Health requirement. They want to give each hospital in their network a separate workspace with separate permissions.
+2. **Custom dashboards v2** — drag-and-drop layout, saved views, scheduled report delivery.
+3. **SSO integration** — SAML and OIDC for enterprise customers. This ties into the auth discussion — whatever session architecture we choose needs to support SSO.
+4. **Audit logging** — comprehensive audit trail for all data access. This overlaps with Carlos's SOC 2 work.
+
+[Carlos Reyes — 3:01 PM]
+On item 4 — the audit logging is actually a SOC 2 requirement, not just a product feature. The auditors specifically asked for comprehensive access logging in our last readiness assessment. So even if product deprioritizes it, we need it for compliance. I'd rather it be product-owned than a bolt-on compliance hack.
+
+[Priya Chandrasekaran — 3:02 PM]
+Agreed. I'll make sure product knows it's compliance-critical, not optional.
+
+[Mike Torres — 3:02 PM]
+Item 3 is relevant to the auth discussion. If we go with JWT, the SAML/OIDC integration layer would mint JWTs after the SSO flow. If we go with server-side sessions, the SSO flow creates a session in the store. Both paths work, but the integration points are different.
+
+[Sarah Kim — 3:03 PM]
+Actually, JWT has an advantage for SSO because the OIDC providers already issue JWTs. We'd just be wrapping their token in ours. The flow is natural.
+
+[Mike Torres — 3:04 PM]
+Fair point. Though we'd still need the session store for revocation — when IT admin deprovisions a user via their IdP, we need to immediately invalidate their sessions. SCIM provisioning webhooks would need to trigger session revocation.
+
+[Priya Chandrasekaran — 3:05 PM]
+Let's not re-litigate auth right now. Note taken — SSO integration is a consideration for the ADR.
+
+[David Okafor — 3:06 PM]
+Multi-workspace is going to be a big effort. The entire data model is currently flat — one tenant, one set of dashboards, one set of permissions. Introducing workspaces means we need to add a workspace_id to basically every table and update every query.
+
+[Lena Novak — 3:06 PM]
+From the frontend side, multi-workspace means a workspace switcher component, workspace-scoped navigation, and probably rethinking the sidebar layout. It's not trivial on the UI side either. Our current React context assumes a single workspace — we'd need to refactor the context providers to be workspace-aware.
+
+[Priya Chandrasekaran — 3:07 PM]
+Agreed. I'm going to push back on product to phase it. Phase 1 would be the data model migration and basic workspace CRUD. Phase 2 would be permissions and workspace-scoped queries. Phase 3 would be the UI. I don't think we can do all of it in Q3.
+
+[David Okafor — 3:08 PM]
+The data migration alone is going to be tricky. We'd need to create a default workspace for every existing tenant and backfill workspace_id on all existing rows. On our current data volume, that migration could take 30-40 minutes on production. We'd need to plan for that — maybe a background migration with a feature flag.
+
+[Priya Chandrasekaran — 3:08 PM]
+Good point. Let's document the migration approach during planning.
+
+[Rachel Fernandez — 3:08 PM]
+The notification service will need workspace scoping too. Right now notifications are tenant-level. If we have multiple workspaces per tenant, users should only see notifications for their workspace.
+
+[James Holden — 3:09 PM]
+Same for data retention policies. Different workspaces might have different retention requirements based on their use case.
+
+[Carlos Reyes — 3:10 PM]
+And audit logging scope — audit records need to be workspace-aware so administrators can pull audit reports per workspace. I'll factor that into my audit logging design.
+
+[Priya Chandrasekaran — 3:10 PM]
+All good points. Let's capture these as scoping concerns for the planning session. I'll create a doc.
+
+[Lena Novak — 3:11 PM]
+On custom dashboards v2 — the drag-and-drop layout is going to require a significant frontend library investment. I've been evaluating react-grid-layout and dnd-kit. react-grid-layout is more mature but has some bundle size concerns. I can present a comparison at next week's frontend sync.
+
+[Priya Chandrasekaran — 3:12 PM]
+That would be helpful. Let's slot that for Wednesday's frontend sync.
+
+[Carlos Reyes — 3:13 PM]
+I need to head out in a couple minutes. Any security-relevant items I should be aware of?
+
+[Priya Chandrasekaran — 3:13 PM]
+Just the PR #1858 review that Mike mentioned — the timezone fix. And keep an eye on ADR-017 for the auth architecture decision.
+
+[Carlos Reyes — 3:14 PM]
+Will do. I'll review the PR this afternoon. Talk to everyone later.
+
+[Carlos Reyes left the meeting at 3:14 PM]
+
+[Priya Chandrasekaran — 3:15 PM]
+OK, let's wrap up. Quick round of action items.
+
+---
+
+ITEM 4: ACTION ITEMS AND WRAP-UP (3:15 PM — 3:25 PM)
+
+[Priya Chandrasekaran — 3:15 PM]
+Let me summarize the action items from today:
+
+1. **Mike**: Update ADR-017 with concrete counter-proposal by Monday. Include technology recommendation, benchmark data, implementation plan, and migration path.
+2. **Mike**: Merge PR #1858 (timezone fix) after Carlos reviews. This is the immediate fire — prioritize it.
+3. **Sarah**: Continue export pipeline work. PR #1856 ready for review by EOD Tuesday.
+4. **Rachel**: Add export-complete notification event handler and email template.
+5. **Lena**: Prepare react-grid-layout vs dnd-kit comparison for Wednesday frontend sync.
+6. **Priya**: Create multi-workspace scoping doc for Sprint 26 planning session. Include concerns raised today (migration, notifications, retention, audit logging).
+7. **David**: Review PR #1856 when ready.
+
+Anything I missed?
+
+[Mike Torres — 3:16 PM]
+I'll also update the on-call runbook for the session cleanup fix. The current runbook tells on-call to manually run the cleanup command if sessions pile up, but the timezone bug means the manual command would have the same issue. I'll update it with the corrected command.
+
+[Priya Chandrasekaran — 3:17 PM]
+Good catch. Add that to the list.
+
+[David Okafor — 3:17 PM]
+Are we still on for the Monday architecture review? I want to make sure Mike's proposal gets a proper review slot, not just a Slack thread.
+
+[Priya Chandrasekaran — 3:18 PM]
+Yes, Monday 2 PM, same time slot. Mike will present the counter-proposal, Sarah will present any updates to her JWT proposal, and we'll make a decision. If we can't converge in the meeting, I'll make a call.
+
+[Sarah Kim — 3:18 PM]
+Sounds fair. I want to refine my refresh token traffic model before then. Mike's point about the 5-minute lifetime increasing auth traffic is valid — I need to quantify the actual impact.
+
+[Mike Torres — 3:19 PM]
+That would be helpful. The traffic modeling is the part of the JWT proposal I'm least certain about. If refresh traffic is negligible, it weakens one of my arguments against JWT.
+
+[Rachel Fernandez — 3:19 PM]
+Are the Tuesday and Thursday architecture slots going to be a recurring thing, or is this just for the auth decision?
+
+[Priya Chandrasekaran — 3:20 PM]
+Just for auth. Once we make the decision, we'll go back to the regular Thursday-only cadence.
+
+[Priya Chandrasekaran — 3:21 PM]
+Alright, that's a wrap. Thanks everyone. Good discussion today.
+
+[James Holden — 3:21 PM]
+Thanks all.
+
+[Lena Novak — 3:21 PM]
+Thanks, bye.
+
+---
+
+SLACK THREAD — #arch-discussions — 3:40 PM
+
+[Mike Torres]
+ADR-017 updated with the revocation analysis. I'll add the concrete counter-proposal over the weekend once I have benchmark numbers.
+
+[Sarah Kim]
+Thanks. I added some inline responses to your revocation concerns in the ADR. Not disagreeing — just clarifying a few points. The 5-minute token lifetime concern you raised is valid. Let me model the refresh traffic more carefully.
+
+[Mike Torres]
+Appreciated. I want to make sure we're comparing apples to apples. I'll try to frame my proposal in the same structure as yours so the ADR reads as a clean side-by-side.
+
+[David Okafor]
+This is a good discussion. Whatever we choose, it'll be the foundation for a lot of Q3 work. Worth getting right.
+
+[Rachel Fernandez]
+Is the ADR shared somewhere I can follow along? I want to understand the session architecture since it'll affect how the notification service authenticates internal API calls.
+
+[Mike Torres]
+It's in the architecture repo: `docs/adrs/017-session-management.md`. I'll add you as a watcher.
+
+[Rachel Fernandez]
+Thanks.
+
+[Priya Chandrasekaran]
++1. No rush to decide but let's converge by early next week. The timezone fix will buy us time on the immediate support tickets.
+
+[James Holden]
+Just catching up on the thread — one thing that wasn't discussed in the meeting: if we go with a dedicated session store, do we also move the CSRF tokens out of the Django session, or do those stay in PostgreSQL?
+
+[Mike Torres]
+Good question. CSRF tokens are currently embedded in the session payload, so they'd move with the sessions. If we use Redis, the CSRF token would be a field in the Redis hash for that session. Same lookup, same store.
+
+[James Holden]
+Makes sense. Just wanted to make sure we weren't splitting CSRF and session state across two stores.
+
+---
+
+GITHUB — PR #1858: Fix timezone comparison in session cleanup job
+Author: Mike Torres
+Branch: fix/session-cleanup-tz
+Status: Open, 1 approval (David Okafor), CI passing
+Labels: bug, auth, priority:high
+Linked issue: RIVULET-2847
+
+**Description:**
+The `clearsessions` management command compares `expire_date` (stored as UTC) against `timezone.now()` which returns a timezone-aware datetime in the server's local timezone (America/Los_Angeles). When the server time is UTC-7, sessions created between midnight and 7am UTC appear to be 7 hours older than they are, causing premature deletion.
+
+**Root cause analysis:**
+Django's `timezone.now()` returns the current time in the `TIME_ZONE` setting's timezone when `USE_TZ=True`. Our production servers are configured with `TIME_ZONE = 'America/Los_Angeles'`. The session `expire_date` is stored in UTC (PostgreSQL `timestamptz`). When Django compares these two timezone-aware datetimes, it correctly handles the conversion — but our custom cleanup query was constructing a raw SQL comparison without timezone conversion.
+
+The relevant code path:
+```python
+# rivulet/auth/management/commands/clearsessions.py
+class Command(BaseCommand):
+    def handle(self, **options):
+        # This was the buggy line — timezone.now() returns America/Los_Angeles
+        Session.objects.filter(expire_date__lt=timezone.now()).delete()
+```
+
+**Fix:**
+Force both sides of the comparison to UTC:
+
+```python
+# Before (buggy)
+Session.objects.filter(expire_date__lt=timezone.now()).delete()
+
+# After (correct)
+from django.utils import timezone
+import pytz
+utc_now = datetime.now(pytz.UTC)
+Session.objects.filter(expire_date__lt=utc_now).delete()
+```
+
+**Impact:**
+- Affected window: sessions expiring between 00:00–07:00 UTC (5 PM–midnight PT)
+- Symptom: users logged out unexpectedly during evening PT hours
+- Support tickets: RIVULET-2834, RIVULET-2839, RIVULET-2841, RIVULET-2847
+- Duration: since deploy of v2.14.0 (2025-05-22) which changed server timezone from UTC to America/Los_Angeles
+
+**Testing:**
+- Added unit test that creates a session with UTC expire_date 6 hours from now
+- Runs cleanup with server timezone set to America/Los_Angeles
+- Asserts session is NOT deleted (it was being deleted before the fix)
+- Added boundary test for session expiring at exactly UTC midnight
+
+**Note:** This is a temporary fix for the immediate support ticket fire. The broader session architecture is under discussion in ADR-017.
+
+REVIEW COMMENTS:
+
+[David Okafor — 4:15 PM]
+LGTM. Clean fix. One nit — can you also add a test for the boundary condition where the session expires exactly at UTC midnight? That's the most common failure case based on the support tickets.
+
+[Mike Torres — 4:22 PM]
+Good call, added in the latest push. Marking as ready for merge.
+
+[Carlos Reyes — 4:45 PM]
+Reviewed. Fix looks correct. One suggestion: consider adding a comment in the code explaining WHY we use `datetime.now(pytz.UTC)` instead of `timezone.now()`, so the next person who touches this doesn't "simplify" it back to `timezone.now()`. Something like:
+
+```python
+# IMPORTANT: Use datetime.now(pytz.UTC) instead of timezone.now() because
+# timezone.now() returns time in the server's TIME_ZONE setting, which may
+# not be UTC. Session expire_date is stored as UTC in the database.
+# See: ADR-017, PR #1858, RIVULET-2847
+```
+
+[Mike Torres — 4:52 PM]
+Great suggestion. Added the comment verbatim. Updated the PR.
+
+[Carlos Reyes — 4:55 PM]
+Approved. Ship it.
+
+---
+
+SLACK DM — Mike Torres to David Okafor — 5:10 PM
+
+[Mike Torres]
+Hey, random thought — you mentioned you dealt with JWT + Redis blacklist at DataScale. What was the final architecture you ended up with there?
+
+[David Okafor]
+We eventually ripped out JWT entirely and went with Redis-backed sessions. Similar to what you're alluding to. The JWT blacklist was a maintenance nightmare — we had a bug where the blacklist TTL didn't match the token TTL, so revoked tokens would fall out of the blacklist before they expired. 3-month security incident.
+
+[Mike Torres]
+That's exactly the kind of failure mode I'm worried about. Two systems that need to agree on TTLs. How was Redis session performance at DataScale?
+
+[David Okafor]
+Excellent. Sub-millisecond lookups. We were doing 50K requests/sec at peak and Redis wasn't even close to breaking a sweat. The real benefit was operational simplicity — revocation was just DELETE, cleanup was built-in via EXPIRE, and failover was handled by Redis Sentinel. No custom code for any of it.
+
+[Mike Torres]
+What Redis deployment topology did you use? Single primary with read replicas, or Sentinel, or Cluster?
+
+[David Okafor]
+Sentinel with one primary and two replicas. For sessions, you don't need Cluster — the data volume is tiny. Even at 100K concurrent sessions at 500 bytes each, that's only 50MB. Redis handles that on a micro instance. Sentinel gives you automatic failover, which was the main concern. Failover typically completed in 10-15 seconds, during which reads still worked from replicas. Only writes (new logins) would fail briefly.
+
+[Mike Torres]
+That lines up with what I'm thinking. Going to benchmark a Redis session store this weekend and write up the proposal.
+
+[David Okafor]
+One thing I'd recommend — benchmark not just read/write latency but also the Django integration. We used `django-redis` as the session backend and it was mostly plug-and-play. The `SESSION_ENGINE` setting just points to the Redis backend and everything else (session middleware, CSRF, etc.) works as-is. The migration was surprisingly undramatic.
+
+[Mike Torres]
+Oh that's encouraging. I was worried about the Django integration being a heavy lift. If it's just a settings change, that significantly reduces the implementation risk.
+
+[David Okafor]
+Yeah, the Django session framework abstracts the backend really well. The main work is standing up and operating Redis itself — provisioning, monitoring, alerting, backup. The application code changes are minimal.
+
+[Mike Torres]
+Good to know. I'll include the Django integration details in the ADR.
+
+[David Okafor]
+Let me know if you want to pair on it. I've got the DataScale implementation patterns still in my head.
+
+[Mike Torres]
+Will do. Thanks.
+
+---
+
+SLACK — #backend — 5:30 PM
+
+[Mike Torres]
+FYI — PR #1858 (session cleanup timezone fix) is merged and deployed to staging. If anyone is testing on staging this evening, keep an eye out for session-related weirdness. Should be an improvement, but flagging it just in case.
+
+[James Holden]
+Thanks for the heads up. I'm running retention policy tests on staging tonight so I'll let you know if I see anything odd.
+
+[Mike Torres]
+Appreciated.
+
+---
+
+END OF EPISODE

@@ -1,0 +1,704 @@
+RIVULET ENGINEERING — ARCHITECTURE REVIEW: API VERSIONING STRATEGY
+Date: 2025-06-15 (Sunday → actually Monday; Monday meeting)
+Time: 3:00–4:15 PM PT
+Location: Zoom (fully remote — office AC broken)
+Attendees: Sarah Kim, Mike Torres, David Okafor, Priya Chandrasekaran, Lin Zhang, Rachel Fernandez, James Holden, Anika Patel, Tom Nguyen, Elena Marchetti
+Absent: Carlos Rivera (on PTO through Wednesday)
+Note-taker: Tom Nguyen
+
+Pre-meeting logistics:
+
+[Priya Chandrasekaran — 2:55 PM]
+Heads up — office AC is still down. Facilities says the part won't arrive until Wednesday. We're staying fully remote today and probably tomorrow too. Please make sure your Zoom links are up to date.
+
+[James Holden — 2:57 PM]
+Works for me. Saves me the commute at least.
+
+[Elena Marchetti — 2:58 PM]
+I'll be listening but might drop briefly around 3:40 — I have a customer call that might overlap.
+
+[Tom Nguyen — 2:59 PM]
+I'm on notes today. I'll post the write-up in #engineering after the meeting.
+
+Agenda:
+1. API versioning strategy — proposal and decision (Sarah) — 40 min
+2. Multi-workspace database migration plan review (David) — 20 min
+3. Upcoming integration partner requirements (Priya) — 15 min
+
+---
+
+ITEM 1: API VERSIONING STRATEGY (3:00–3:42 PM)
+
+[Sarah Kim — 3:00 PM]
+Thanks everyone. So this has been on the backlog for a while and the multi-workspace work is going to force our hand. When we add workspace_id to API endpoints, we're making a breaking change to the API contract. We need a versioning strategy before we can ship multi-workspace to customers.
+
+Let me walk through the options and then propose a direction. I put a lot of thought into this over the weekend so bear with me — there's a lot of ground to cover.
+
+**Option 1: URL path versioning**
+```
+GET /api/v1/dashboards
+GET /api/v2/dashboards?workspace_id=ws_abc123
+```
+Pros: Explicit, easy to route, easy to document, clients know exactly which version they're hitting. Every request wears its version on its sleeve. You can see it in access logs, in curl commands, in browser dev tools. No ambiguity.
+Cons: URL proliferation, harder to share links (which version?), some REST purists consider it an anti-pattern because the version isn't part of the resource's identity.
+
+**Option 2: Header-based versioning**
+```
+GET /api/dashboards
+Accept: application/vnd.rivulet.v2+json
+```
+Pros: Clean URLs, RESTful, version is metadata not resource identity. GitHub's API actually supports this pattern as an alternative to their path versioning.
+Cons: Harder to test (need to set headers), harder to document, CDN caching complications, some clients don't easily support custom Accept headers. I tested this with Postman and it's fine, but a lot of enterprise customers are using simple curl scripts or low-code tools like Zapier that don't have easy header customization.
+
+**Option 3: Query parameter versioning**
+```
+GET /api/dashboards?api_version=2
+```
+Pros: Easy to test, explicit, works with any client.
+Cons: Pollutes the query string, easy to forget, mixed with business parameters. Also creates weird interactions with our existing pagination and filter params — you'd see `?api_version=2&page=3&sort=created_at` and it's messy.
+
+[Tom Nguyen — 3:08 PM]
+Quick question — did you look at date-based versioning? I've seen some APIs use dates like `2025-06-15` instead of v1/v2.
+
+[Sarah Kim — 3:09 PM]
+I did look at that. Stripe actually uses date-based versioning for their changelog — like `Stripe-Version: 2023-10-16`. The problem is it creates an explosion of versions. Every breaking change is a new version date, and you end up maintaining dozens of effective versions. It works for Stripe because they have a dedicated API compatibility team. We don't have that luxury. I think major version numbers are more manageable for a team our size.
+
+[Tom Nguyen — 3:10 PM]
+Fair enough. Thanks for looking into it.
+
+[Sarah Kim — 3:10 PM]
+My recommendation: **Option 1, URL path versioning.** Here's why:
+
+1. Our customers are enterprise B2B. They build integrations against our API. Explicit versioning in the URL makes it impossible to accidentally hit the wrong version. When they're debugging, the version is right there in the URL.
+
+2. We're building a customer-facing API — not an internal microservice. Discoverability matters more than REST purity.
+
+3. Stripe, GitHub, and Twilio all use URL path versioning. Our customers are used to it.
+
+4. It simplifies our routing layer. We can route `/api/v1/*` and `/api/v2/*` to different handler modules without any middleware magic.
+
+[Elena Marchetti — 3:13 PM]
+From the docs side, I strongly prefer path versioning. It makes the documentation structure much cleaner — we can have separate doc sections for v1 and v2, and customers can see exactly which version they're reading about in the URL. With header-based versioning, documenting the differences becomes really confusing.
+
+[Sarah Kim — 3:14 PM]
+Great point, Elena. That's another practical advantage I should have included.
+
+**Implementation plan:**
+
+Phase 1: Add v1 prefix to all existing endpoints. Deploy as a transparent proxy — `/api/v1/dashboards` routes to the same handler as `/api/dashboards`. The old unprefixed URLs continue to work but return a `Deprecation` header.
+
+I'm thinking the deprecation header would look like this:
+```
+Deprecation: true
+Sunset: 2026-06-15
+Link: <https://docs.rivulet.io/api/migration/v1>; rel="deprecation"
+```
+That follows RFC 8594 for the Sunset header and RFC 8288 for the Link header. Gives clients machine-readable migration info.
+
+Phase 2: Build v2 endpoints for multi-workspace. These require workspace_id and have updated response schemas. v1 endpoints continue to work for tenants that haven't adopted workspaces (they hit the "default" workspace implicitly).
+
+For Phase 2, the v2 response schema changes look like this for the dashboards endpoint:
+```json
+// v1 response
+{
+  "id": "dash_abc123",
+  "name": "Revenue Overview",
+  "widgets": [...]
+}
+
+// v2 response
+{
+  "id": "dash_abc123",
+  "name": "Revenue Overview",
+  "workspace_id": "ws_xyz789",
+  "workspace_name": "Finance Team",
+  "widgets": [...]
+}
+```
+
+Phase 3 (6 months out): Deprecation notice for v1. Give customers 6 months to migrate. Remove v1 after 12 months.
+
+**Versioning policy (proposed):**
+- New major version only for breaking changes (removed fields, changed types, new required parameters)
+- Additive changes (new optional fields, new endpoints) are added to the current version
+- We maintain at most 2 major versions simultaneously
+- Each version has a minimum 12-month support window after deprecation notice
+
+[Mike Torres — 3:15 PM]
+I'm on board with URL path versioning. Quick question on the routing — are you thinking separate Django URL configs per version, or a middleware that rewrites the path?
+
+[Sarah Kim — 3:16 PM]
+Separate URL configs. `urls_v1.py` and `urls_v2.py`, each included under their prefix in the main `urls.py`. This gives us clean separation — v1 and v2 handlers can live in different modules without any routing magic.
+
+```python
+# urls.py
+urlpatterns = [
+    path('api/v1/', include('rivulet.api.v1.urls')),
+    path('api/v2/', include('rivulet.api.v2.urls')),
+    # Legacy unprefixed routes (deprecated)
+    path('api/', include('rivulet.api.v1.urls')),
+]
+```
+
+For shared logic, the view code lives in a common module and the version-specific URL configs point to thin wrapper views that handle schema differences.
+
+[Mike Torres — 3:17 PM]
+So something like:
+
+```python
+# rivulet/api/v1/views/dashboards.py
+from rivulet.api.common.dashboards import get_dashboard_core
+
+class DashboardDetailView(APIView):
+    def get(self, request, dashboard_id):
+        dashboard = get_dashboard_core(dashboard_id, request.tenant)
+        return Response(DashboardSerializerV1(dashboard).data)
+
+# rivulet/api/v2/views/dashboards.py
+from rivulet.api.common.dashboards import get_dashboard_core
+
+class DashboardDetailView(APIView):
+    def get(self, request, dashboard_id):
+        workspace_id = request.query_params['workspace_id']
+        dashboard = get_dashboard_core(dashboard_id, request.tenant, workspace_id)
+        return Response(DashboardSerializerV2(dashboard).data)
+```
+
+[Sarah Kim — 3:18 PM]
+Exactly. The core logic is shared, the serializers are version-specific. If the core logic needs to behave differently for v2 (like filtering by workspace), we pass that context in. The view layer is thin — it's basically just routing params to the core and serializing the result.
+
+[David Okafor — 3:18 PM]
+That's clean. What about the database models — do v1 and v2 share the same models?
+
+[Sarah Kim — 3:19 PM]
+Yes. The database layer is version-agnostic. Versioning is purely at the API layer — serialization, validation, routing. The models don't know about API versions.
+
+[David Okafor — 3:19 PM]
+Makes sense. So the workspace_id column gets added to the model regardless, and v1 just ignores it in the serializer.
+
+[Sarah Kim — 3:20 PM]
+Exactly. v1 serializer doesn't include workspace_id in the response, and v1 endpoints route to the default workspace behind the scenes. The model has the column either way.
+
+[James Holden — 3:20 PM]
+How does this interact with the export pipeline? The export API creates a job and returns a job ID. If v1 creates a job, can v2 check its status?
+
+[Sarah Kim — 3:21 PM]
+Good question. Job IDs are version-agnostic. A job created via v1 can be queried via v2 and vice versa. The response schema might differ (v2 might include workspace context that v1 doesn't) but the underlying resource is the same.
+
+[James Holden — 3:21 PM]
+And the export callback URLs — if a customer sets up a callback for export completion, does the callback payload follow the version of the endpoint that created the job?
+
+[Sarah Kim — 3:22 PM]
+That's a good edge case. I'd say yes — the callback payload should match the version that created the job. We'd store the API version on the job record:
+
+```python
+class ExportJob(models.Model):
+    id = models.UUIDField(primary_key=True)
+    tenant = models.ForeignKey(Tenant)
+    api_version = models.IntegerField(default=1)  # version that created the job
+    callback_url = models.URLField(null=True)
+    # ...
+```
+
+When we fire the callback, we serialize the result using the matching version serializer. That way the customer gets a consistent schema throughout the job lifecycle.
+
+[James Holden — 3:23 PM]
+Smart. That avoids a nasty surprise where they parse the callback assuming v1 format and get v2 back.
+
+[Rachel Fernandez — 3:22 PM]
+What about WebSocket endpoints? They don't follow REST URL patterns.
+
+[Sarah Kim — 3:23 PM]
+I was thinking WebSocket versioning would be protocol-level — the client specifies the protocol version in the WS handshake:
+```
+Sec-WebSocket-Protocol: rivulet-ws-v1
+```
+The server negotiates the protocol version and sends messages in the appropriate format. This is how most WS APIs handle versioning.
+
+For reference, the connection flow would look like:
+```
+Client → ws://api.rivulet.io/ws
+Headers:
+  Sec-WebSocket-Protocol: rivulet-ws-v1
+  Authorization: Bearer <token>
+
+Server → 101 Switching Protocols
+  Sec-WebSocket-Protocol: rivulet-ws-v1
+```
+
+If the client requests a version we don't support, we reject the handshake with a 400 and an error body listing supported versions.
+
+[Rachel Fernandez — 3:24 PM]
+That works. I'll implement the protocol negotiation in the WS handler. I've got a similar pattern from the notification streaming work I did last quarter — should be pretty straightforward to adapt.
+
+[Tom Nguyen — 3:24 PM]
+Do we need to version the WebSocket message format independently, or does it always follow the REST API version? Like, if ws-v1 sends a dashboard update event, does the event payload match the v1 REST response format?
+
+[Sarah Kim — 3:25 PM]
+Good question, Tom. Yes, the WS message payloads should match their corresponding REST version. If you're connected with `rivulet-ws-v1`, you get v1-shaped event payloads. That keeps things consistent — a client built for v1 can use both REST and WS without dealing with different schemas.
+
+[Lin Zhang — 3:25 PM]
+From the frontend perspective, we'd always target the latest API version. But we need to make sure the version bump doesn't break the mobile app, which might be on an older version if users haven't updated.
+
+[Sarah Kim — 3:26 PM]
+Right. The mobile app should use explicit versioning in its API calls — `v1` or `v2`, not just `/api/`. That way, an old app version keeps working against v1 even after v2 is released. The 12-month deprecation window gives the mobile team time to push an update.
+
+[Lin Zhang — 3:26 PM]
+I'll add a note in the mobile app codebase. Right now the base URL is just `https://api.rivulet.io/api/` — I'll update it to `https://api.rivulet.io/api/v1/` so we're explicit from the start.
+
+[Sarah Kim — 3:27 PM]
+Perfect. And when we're ready to move the frontend to v2, it's a single constant change:
+```typescript
+// config.ts
+export const API_BASE_URL = 'https://api.rivulet.io/api/v1/';
+// Later:
+// export const API_BASE_URL = 'https://api.rivulet.io/api/v2/';
+```
+
+[Lin Zhang — 3:27 PM]
+Actually, I might make it an environment variable so we can test against v2 in staging while production still hits v1.
+
+```typescript
+// config.ts
+export const API_BASE_URL = process.env.REACT_APP_API_BASE_URL
+  || 'https://api.rivulet.io/api/v1/';
+```
+
+[Sarah Kim — 3:28 PM]
+Even better. That'll be useful during the migration period.
+
+[Anika Patel — 3:27 PM]
+The SDK we provide to integration partners — that'll need versioning too. Should we version the SDK independently or tie it to the API version?
+
+[Sarah Kim — 3:28 PM]
+SDK version should be independent but document which API version it targets. Like:
+- SDK v3.x → targets API v1
+- SDK v4.x → targets API v2
+The SDK version can have minor/patch releases for bug fixes without changing the target API version.
+
+[Anika Patel — 3:29 PM]
+Got it. I'll update the SDK README to include a compatibility matrix. Something like:
+
+```
+| SDK Version | API Version | Status     |
+|-------------|-------------|------------|
+| 3.x         | v1          | Current    |
+| 4.x         | v2          | Upcoming   |
+```
+
+And I'll add a deprecation warning in the SDK initialization if it detects it's targeting a deprecated API version. Something like:
+```python
+import warnings
+
+class RivuletClient:
+    def __init__(self, api_version='v1'):
+        if api_version == 'v1':
+            warnings.warn(
+                "API v1 is deprecated. Please upgrade to SDK v4.x for API v2 support. "
+                "See https://docs.rivulet.io/sdk/migration-guide",
+                DeprecationWarning
+            )
+```
+
+[Sarah Kim — 3:29 PM]
+That's a nice touch. We can add that when v1 actually enters deprecation — no need to ship it now.
+
+[Elena Marchetti — 3:30 PM]
+For the docs, should I create the migration guide skeleton now or wait until v2 is closer to shipping?
+
+[Sarah Kim — 3:30 PM]
+Wait until we have the v2 endpoint definitions finalized. Otherwise we'll be rewriting the guide three times. But maybe create a placeholder page that says "Migration guide coming with v2 release" — so the URL exists and the SDK deprecation warning can link to it.
+
+[Elena Marchetti — 3:30 PM]
+Will do.
+
+[Priya Chandrasekaran — 3:30 PM]
+Alright, I've heard the proposal and the questions. Objections? Alternative preferences?
+
+[Mike Torres — 3:31 PM]
+No objections. URL path versioning is the pragmatic choice.
+
+[David Okafor — 3:31 PM]
+Agreed. It'll make the multi-workspace migration cleaner.
+
+[James Holden — 3:31 PM]
+Fine by me.
+
+[Rachel Fernandez — 3:32 PM]
+Good.
+
+[Lin Zhang — 3:32 PM]
+Makes sense.
+
+[Anika Patel — 3:32 PM]
+Yep.
+
+[Tom Nguyen — 3:32 PM]
+No objections here either.
+
+[Elena Marchetti — 3:32 PM]
+Works for me.
+
+[Priya Chandrasekaran — 3:33 PM]
+**Decision: We're going with URL path versioning with v1/v2 prefixes.** Sarah, you're the owner. Please update ADR-018 and create tickets for Phase 1 (add v1 prefix to existing endpoints). Target: Phase 1 complete before multi-workspace goes to staging.
+
+[Sarah Kim — 3:34 PM]
+On it. I'll have Phase 1 PR up by end of week.
+
+[Tom Nguyen — 3:34 PM]
+Quick logistics — should I create the Jira epic for this or is it going under the existing multi-workspace epic?
+
+[Priya Chandrasekaran — 3:35 PM]
+Create a separate epic: "API Versioning Infrastructure." It's a distinct workstream even though it's related to multi-workspace. Cross-link them. Sarah, assign the Phase 1 tickets under the new epic.
+
+[Sarah Kim — 3:35 PM]
+Will do. I'll break Phase 1 into three tickets: (1) URL routing setup and config, (2) deprecation header middleware, (3) integration tests for both prefixed and legacy URLs.
+
+---
+
+ITEM 2: MULTI-WORKSPACE DATABASE MIGRATION PLAN (3:42–4:02 PM)
+
+[David Okafor — 3:42 PM]
+I've drafted the database migration plan for multi-workspace. Let me walk through the approach.
+
+The goal: add `workspace_id` to all tenant-scoped tables, with data isolation guarantees.
+
+**Tables affected** (in migration order):
+1. `workspaces` — new table: (id, tenant_id, name, created_at, updated_at, is_default)
+2. `dashboards` — add workspace_id FK
+3. `data_sources` — add workspace_id FK
+4. `events` — add workspace_id FK (the big one: 48M rows)
+5. `export_jobs` — add workspace_id FK
+6. `permissions` — restructure to include workspace_id scope
+7. `notifications` — add workspace_id FK
+
+[Tom Nguyen — 3:45 PM]
+Forty-eight million rows — how big is the events table on disk right now?
+
+[David Okafor — 3:45 PM]
+About 14GB. The UUID column add is metadata-only in PostgreSQL so it won't rewrite the table. The backfill writes are the expensive part, but they're batched. I'll get to the numbers in a minute.
+
+[Elena Marchetti — 3:46 PM]
+Quick question — the `permissions` table restructure, is that also an additive change or is it more involved?
+
+[David Okafor — 3:46 PM]
+More involved. Currently permissions are tenant-scoped: a user has a role within a tenant. With workspaces, we need workspace-scoped permissions: a user has a role within a workspace within a tenant. I'm adding a `workspace_id` column to the permissions table, and the application code will check workspace-level permissions. Existing tenant-level permissions become "all workspaces" permissions via a default workspace assignment. I'll cover the details in a separate design doc — today I want to focus on the events table since that's the riskiest part.
+
+**Migration strategy for the events table:**
+
+Step 1: Create the `workspaces` table and auto-create a "Default" workspace for each existing tenant.
+
+The migration for this step looks like:
+```sql
+CREATE TABLE workspaces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_default BOOLEAN NOT NULL DEFAULT false,
+    UNIQUE(tenant_id, name)
+);
+
+CREATE INDEX idx_workspaces_tenant ON workspaces(tenant_id);
+
+-- Auto-create default workspace for each existing tenant
+INSERT INTO workspaces (tenant_id, name, is_default)
+SELECT id, 'Default', true FROM tenants;
+```
+
+Step 2: Add `workspace_id` as a NULLABLE column to `events`. This is a metadata-only change in PostgreSQL — no table rewrite, instant.
+```sql
+ALTER TABLE events ADD COLUMN workspace_id UUID;
+```
+
+Step 3: Backfill `workspace_id` with the default workspace ID for each tenant. Batched UPDATE, 10K rows per batch, throttled to avoid lock contention.
+```sql
+UPDATE events SET workspace_id = (
+    SELECT id FROM workspaces WHERE tenant_id = events.tenant_id AND is_default = true
+)
+WHERE workspace_id IS NULL
+LIMIT 10000;
+```
+Estimated time: 48M rows ÷ 10K per batch × 50ms per batch = ~4 minutes. (PostgreSQL batch updates are fast when the source is indexed.)
+
+[Mike Torres — 3:50 PM]
+Are you running the backfill in a Django management command or as raw SQL?
+
+[David Okafor — 3:50 PM]
+Management command. That way we get logging, progress output, and we can pause/resume if needed. I'll add a `--batch-size` flag and a `--sleep-between-batches` flag for throttling. Something like:
+
+```python
+# management/commands/backfill_workspace_id.py
+class Command(BaseCommand):
+    def add_arguments(self, parser):
+        parser.add_argument('--batch-size', type=int, default=10000)
+        parser.add_argument('--sleep-ms', type=int, default=0)
+        parser.add_argument('--dry-run', action='store_true')
+
+    def handle(self, **options):
+        batch_size = options['batch_size']
+        total_updated = 0
+        while True:
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE events SET workspace_id = (
+                        SELECT id FROM workspaces
+                        WHERE tenant_id = events.tenant_id AND is_default = true
+                    )
+                    WHERE id IN (
+                        SELECT id FROM events
+                        WHERE workspace_id IS NULL
+                        LIMIT %s
+                    )
+                """, [batch_size])
+                updated = cursor.rowcount
+            total_updated += updated
+            self.stdout.write(f"Updated {total_updated} rows...")
+            if updated < batch_size:
+                break
+            if options['sleep_ms']:
+                time.sleep(options['sleep_ms'] / 1000.0)
+```
+
+Step 4: Add NOT NULL constraint with NOT VALID option (doesn't scan the table):
+```sql
+ALTER TABLE events ADD CONSTRAINT events_workspace_id_not_null CHECK (workspace_id IS NOT NULL) NOT VALID;
+```
+
+Step 5: Validate the constraint in the background:
+```sql
+ALTER TABLE events VALIDATE CONSTRAINT events_workspace_id_not_null;
+```
+This does a full table scan but with a weak lock (SHARE UPDATE EXCLUSIVE) that doesn't block normal operations.
+
+Step 6: Create the composite index concurrently:
+```sql
+CREATE INDEX CONCURRENTLY idx_events_workspace_type_created ON events (workspace_id, event_type, created_at);
+```
+
+[Tom Nguyen — 3:54 PM]
+How long does the concurrent index creation take on 48M rows?
+
+[David Okafor — 3:54 PM]
+Tested on a staging copy — about 8 minutes for the composite index. It runs fully in the background, doesn't block reads or writes. The only thing it blocks is other DDL on the events table, which shouldn't be a problem since we're not running other migrations simultaneously.
+
+**Zero-downtime guarantee:** Every step uses non-blocking DDL. The application continues serving requests throughout. The only behavioral change is that new events start including workspace_id after the code deploy, and the backfill handles existing data.
+
+[Mike Torres — 3:52 PM]
+What happens during the backfill if a new event is inserted without a workspace_id? The NOT NULL constraint isn't enforced yet.
+
+[David Okafor — 3:53 PM]
+Good catch. The application code needs to be updated to include workspace_id BEFORE we add the NOT NULL constraint. So the deploy order is:
+1. Deploy migration (add nullable column)
+2. Deploy application code (include workspace_id in all new events)
+3. Run backfill for historical data
+4. Add NOT NULL constraint
+5. Validate constraint
+
+Steps 2 and 3 can happen in any order since the constraint isn't enforced yet. But step 2 must happen before step 4.
+
+[James Holden — 3:54 PM]
+For the application code change in step 2 — how many places in the codebase create events? Is it a single function or scattered across modules?
+
+[David Okafor — 3:54 PM]
+There's a central `create_event()` function in `rivulet/events/service.py` that about 90% of event creation goes through. But there are a few places that create events directly via the ORM — the import pipeline, the webhook processor, and the scheduled report generator. I'll need to audit all of them. I ran a quick grep and found 7 call sites total. Should be manageable.
+
+[Sarah Kim — 3:55 PM]
+How does this interact with the caching layer? When a dashboard widget query changes to include workspace_id, the cache keys change and all existing cache entries become stale.
+
+[David Okafor — 3:56 PM]
+Right. When the multi-workspace code deploys, we flush the cache. It's a one-time event and the cache repopulates within 5 minutes (the TTL). I'll add a cache flush to the migration script.
+
+[Mike Torres — 3:56 PM]
+We should probably do a targeted flush — only the keys for the affected endpoints rather than flushing the entire cache. We can use the `cache:dashboards:*` and `cache:events:*` key patterns.
+
+[David Okafor — 3:57 PM]
+Good idea. I'll use `SCAN` with pattern matching instead of `FLUSHDB`. That way the session cache and any other cached data stays warm.
+
+[Priya Chandrasekaran — 3:57 PM]
+What's the overall timeline?
+
+[David Okafor — 3:58 PM]
+Migration script: 2 days
+Application code changes: 3-4 days (update all queries to include workspace_id)
+Testing: 2 days
+Staged rollout (staging → production): 3 days
+
+Total: about 2 weeks. I want to start this sprint so we hit the Meridian Health deadline.
+
+[Priya Chandrasekaran — 3:59 PM]
+Agreed. This is Sprint 25 priority. David, you're the owner. Let's review progress daily in standup.
+
+[David Okafor — 3:59 PM]
+I'll have the first PR (workspaces table + default workspace creation) up by tomorrow EOD.
+
+[Tom Nguyen — 4:00 PM]
+Should I create a tracking issue for the 7 event creation call sites? That way we don't lose track of which ones have been updated.
+
+[David Okafor — 4:00 PM]
+Yes please. Create a checklist issue in Jira — I'll populate the specific file paths after the meeting.
+
+---
+
+ITEM 3: INTEGRATION PARTNER REQUIREMENTS (4:02–4:12 PM)
+
+[Priya Chandrasekaran — 4:02 PM]
+Quick item. We have two new integration partners coming onboard in Q3: Meridian Health (the multi-workspace deal) and Coastal Analytics (a mid-market analytics platform that wants to embed our dashboards).
+
+Meridian Health requirements:
+- Multi-workspace (covered)
+- SSO via SAML 2.0 (Q3 roadmap item)
+- Immediate session revocation (covered by the session store work)
+- Audit logging (SOC 2 work covers this)
+- Data residency: US-only (we're already US-only but need to formalize the guarantee)
+
+[Tom Nguyen — 4:04 PM]
+On the data residency point — do we need a contractual guarantee, a technical enforcement, or both?
+
+[Priya Chandrasekaran — 4:04 PM]
+Both eventually. For Q3, the contractual side is handled by legal. On the technical side, we need to make sure our infrastructure config enforces US-only regions. Carlos should confirm when he's back — he manages the AWS account configuration. I'll add it to his backlog.
+
+Coastal Analytics requirements:
+- Embeddable dashboard widgets (iframe with signed URL)
+- API-based data import (we have this but need to scale it)
+- White-label option (custom branding, removed Rivulet logo)
+- Webhook notifications for data pipeline events
+
+[Elena Marchetti — 4:05 PM]
+The embeddable widget — is that a new endpoint or a modification of the existing dashboard view?
+
+[Priya Chandrasekaran — 4:05 PM]
+New endpoint. The idea is they'd get a signed URL like `https://embed.rivulet.io/widget/xyz?token=signed_jwt` that renders a single widget in a clean iframe. No navigation, no Rivulet chrome — just the chart or table.
+
+[Mike Torres — 4:05 PM]
+The session revocation requirement from Meridian is interesting. They specifically asked for "revoke all sessions for a user within 60 seconds." With the Redis session store, it's instantaneous — `revoke_all_user_sessions` does a SCAN + DEL. Well under 60 seconds even at scale.
+
+[Priya Chandrasekaran — 4:06 PM]
+Good. Make sure that's in the SOC 2 documentation. It's a selling point.
+
+[Mike Torres — 4:06 PM]
+I'll add a section to the security controls doc with latency benchmarks. We actually measured this during staging — revocation for a user with 47 active sessions completed in 3ms. I'll include that number.
+
+[James Holden — 4:07 PM]
+The Coastal Analytics webhook requirement — that's different from our current WebSocket notifications. Webhooks are server-to-server push. We don't have that infrastructure yet.
+
+[Anika Patel — 4:07 PM]
+For the SDK, I'll need to add webhook registration endpoints. Something like `client.webhooks.create(url='...', events=['export.complete', 'pipeline.error'])`. That's a new SDK surface area.
+
+[Rachel Fernandez — 4:08 PM]
+I can scope a webhook delivery system. It's essentially a job queue that makes HTTP POST requests with retry logic. Similar architecture to the export pipeline worker.
+
+High-level architecture:
+- Customer registers a webhook URL + event filter via the API
+- When a matching event occurs, we enqueue a delivery job
+- Worker picks up the job, makes the POST request, records the result
+- Retry with exponential backoff on failure (1min, 5min, 30min, 2hr)
+- After 5 failed attempts, mark the webhook as unhealthy and notify the customer
+
+I'll put together a design doc by next week.
+
+[Priya Chandrasekaran — 4:09 PM]
+Let's add it to the Sprint 26 backlog. For Sprint 25, the priorities are multi-workspace and session store production rollout.
+
+[Tom Nguyen — 4:10 PM]
+I'll send out the meeting notes by end of day. Action items I've captured:
+- Sarah: ADR-018 update, Phase 1 tickets under new "API Versioning Infrastructure" epic, Phase 1 PR by end of week
+- David: First migration PR (workspaces table) by tomorrow EOD
+- Tom: Jira tracking issue for event creation call sites
+- Lin: Update mobile app base URL to include `/v1/`
+- Anika: SDK compatibility matrix update
+- Elena: Placeholder migration guide page
+- Rachel: Webhook delivery system design doc (Sprint 26)
+- Priya: Data residency item for Carlos's backlog
+- Mike: Security controls doc update with session revocation benchmarks
+
+[Priya Chandrasekaran — 4:11 PM]
+Thanks Tom. That's a comprehensive list. Anything else before we wrap?
+
+[James Holden — 4:11 PM]
+Nothing from me.
+
+[Priya Chandrasekaran — 4:12 PM]
+Alright, good meeting everyone. Thanks for staying sharp on the remote call. See you at standup tomorrow.
+
+---
+
+SLACK THREAD — #engineering — 4:30 PM
+
+[Sarah Kim]
+ADR-018 drafted for API versioning. TL;DR: URL path versioning, v1/v2 prefixes, 12-month deprecation window. Decision confirmed in today's architecture review.
+
+Link: https://github.com/rivulet-io/architecture/pull/42
+
+[Tom Nguyen]
+Meeting notes posted in #engineering-meeting-notes. Let me know if I missed anything.
+
+[Mike Torres]
+Looked through the notes, all good.
+
+[David Okafor]
+Multi-workspace migration plan is in the shared doc: https://docs.rivulet.io/internal/multi-workspace-migration. Review welcome.
+
+[Elena Marchetti]
+Placeholder migration guide page is up: https://docs.rivulet.io/api/migration-guide. Just a stub for now — will flesh it out once v2 endpoints are defined.
+
+[Mike Torres]
+Session store staging update: deployed to staging this morning. Feature flag enabled for 10% of staging traffic. So far:
+- 847 sessions created in Redis
+- Average lookup latency: 0.09ms
+- Token rotation working correctly (verified via audit log)
+- Zero PostgreSQL session fallbacks
+- No errors in the session middleware logs
+
+Will bump to 100% staging traffic tomorrow if these numbers hold.
+
+[Anika Patel]
+SDK compatibility matrix PR is up: https://github.com/rivulet-io/sdk-python/pull/88. Added version table and deprecation warning scaffold (commented out until we actually deprecate v1).
+
+[Priya Chandrasekaran]
+Great progress across the board. Sprint 25 is shaping up to be a big one. Let's stay focused.
+
+[Rachel Fernandez]
+Quick note — I started a rough outline for the webhook delivery design doc. Pulling heavily from the export worker pattern. Will share the draft in #engineering by Thursday for early feedback.
+
+---
+
+SLACK DM — Anika Patel → Lin Zhang — 5:15 PM
+
+[Anika Patel]
+Hey, do you know what ever happened with the auth discussion? I missed a couple of the architecture meetings. Did they decide between JWT and Redis?
+
+[Lin Zhang]
+I think Mike just went ahead and built the Redis session thing. PR #1871, merged last week. It's on staging now.
+
+[Anika Patel]
+Oh, so they went with Redis? Was there a vote or something?
+
+[Lin Zhang]
+I don't think so? There were a couple architecture meetings about it and then Mike opened the PR. I wasn't paying super close attention — I was deep in the Firefox rendering bug. But it seems like everyone's on board. Sarah approved the PR.
+
+[Anika Patel]
+Huh, OK. I'll check the ADR. Thanks.
+
+[Lin Zhang]
+np. FYI the ADR still says "PENDING" on the decision — I think they just haven't updated it. But the code is merged and on staging so it's basically decided.
+
+[Anika Patel]
+Got it. Weird that the ADR wasn't updated. But yeah, if it's merged and on staging, that ship has sailed.
+
+[Lin Zhang]
+Yeah, pretty much. Also heads up, I'm updating the mobile base URL to include /v1/ per today's meeting. If you're touching the SDK, make sure the default base URL includes the version prefix too.
+
+[Anika Patel]
+Oh good call. I'll update the SDK default. Right now it's `https://api.rivulet.io/api/` — I'll change it to `https://api.rivulet.io/api/v1/`.
+
+[Lin Zhang]
+Perfect. Let me know if you need to coordinate the release timing.
+
+[Anika Patel]
+Will do. Thanks Lin.
+
+---
+
+END OF EPISODE

@@ -1,0 +1,556 @@
+VERDANA ANALYTICS — INTERNAL
+DOCUMENT TYPE: INFRASTRUCTURE REVIEW + ARCHITECTURE DECISION RECORD
+DATE: MAY 13, 2025
+SUBJECT: INFRASTRUCTURE ARCHITECTURE REVIEW — PRE-LAUNCH
+REF: ADR-2025-017
+
+PREPARED BY: Marcus Okafor (CTO), Kevin McNulty (DevOps Lead)
+CONTRIBUTORS: Amir Patel (Backend Lead), Jess Lindström (Platform Engineer), David Cho (Security), Priya Subramanian (Data Engineering)
+DISTRIBUTION: Engineering team, all-hands
+REVIEW STATUS: Approved — signatures collected via DocuSign (ref: DS-4488)
+
+***
+
+PREAMBLE
+
+This review was conducted as part of our pre-launch readiness checklist (PLR-v2, item 4.1). Marcus and Kevin led the review session on May 12, 2025 from 2:00 PM to 5:15 PM EDT in Conference Room B, with remote participants joining via Zoom. The written document was finalized on May 13 after incorporating comments from Amir and Jess.
+
+Attendees (May 12 review session):
+- Marcus Okafor (CTO) — in person
+- Kevin McNulty (DevOps Lead) — in person
+- Amir Patel (Backend Lead) — remote (Austin office)
+- Jess Lindström (Platform Engineer) — in person
+- David Cho (Security) — remote
+- Priya Subramanian (Data Engineering) — in person
+- Regrets: Sofia Chen (Frontend Lead), out sick
+
+***
+
+SECTION 1: INFRASTRUCTURE OVERVIEW
+
+This document provides a comprehensive review of Verdana Analytics's production infrastructure as of May 13, 2025 — two days before our production deployment. The purpose is to document the current architecture, identify known risks, and establish operational baselines. This document supersedes the draft infrastructure plan from March 2025 (ADR-2025-009) and reflects all changes made during the beta period.
+
+For context, Verdana Analytics is a data integration platform that ingests event streams from customer data sources, processes them through a real-time pipeline, and exposes analytics via REST API and WebSocket subscriptions. The architecture prioritizes low-latency event processing and horizontal scalability.
+
+ARCHITECTURE DIAGRAM (text representation):
+
+```
+Users → CloudFront CDN → ALB (Application Load Balancer)
+                              ↓
+                    ECS Fargate (API containers, 4 tasks)
+                              ↓
+                    ┌─────────┴─────────┐
+                    ↓                   ↓
+            RDS PostgreSQL 15     Redis Cluster
+            (db.r6g.xlarge)       (cache.r6g.large)
+            Primary + 1 Read      3 nodes
+            Replica
+                    ↓
+            Kafka (MSK)
+            3 brokers
+            t3.large
+```
+
+REGION: us-east-1 (primary), eu-west-1 (CDN + future expansion)
+
+Infrastructure-as-code: All resources are managed via Terraform (v1.7.2) in the `infra/terraform/` repo. State is stored in S3 with DynamoDB locking. Jess ran `terraform plan` on May 12 and confirmed zero drift between the state file and actual AWS resources.
+
+Kevin: "I want to call out that every resource shown in the diagram above is tagged with `Environment=production`, `Team=platform`, and `CostCenter=eng-infra`. We set up AWS Cost Explorer views by tag, so we can track actual vs. projected spend starting day one."
+
+Jess: "Also worth noting — the Terraform modules are pinned to specific versions. No floating refs. I updated the lockfile on May 10 and verified checksums."
+
+VPC layout:
+- VPC CIDR: 10.0.0.0/16
+- Public subnets: 10.0.1.0/24 (us-east-1a), 10.0.2.0/24 (us-east-1b)
+- Private subnets: 10.0.10.0/24 (us-east-1a), 10.0.11.0/24 (us-east-1b)
+- NAT Gateways: 2 (one per AZ, for private subnet egress)
+- Flow logs: enabled, exported to CloudWatch Logs group /vpc/verdana-production
+
+DNS: verdana-analytics.io hosted on Route 53. API endpoint: api.verdana-analytics.io. Status page: status.verdana-analytics.io (hosted on Statuspage.io, separate from our infra).
+
+***
+
+SECTION 2: COMPUTE — ECS FARGATE
+
+Configuration:
+- Service: verdana-api
+- Task count: 4 (desired), auto-scaling 2-16
+- CPU per task: 1 vCPU
+- Memory per task: 2 GB
+- Container image: verdana-api:v1.0.0-rc3
+- Health check: GET /health, 30s interval, 3 unhealthy threshold
+- Deployment strategy: rolling (minimum healthy 50%)
+- Task execution role: verdana-ecs-task-execution (allows ECR pull, CloudWatch Logs write)
+- Task role: verdana-api-task-role (allows RDS access, Redis access, MSK access, S3 read/write to verdana-assets bucket)
+
+Auto-scaling rules:
+- Scale up: CPU utilization > 60% for 3 minutes → add 2 tasks
+- Scale down: CPU utilization < 20% for 10 minutes → remove 1 task
+- Maximum: 16 tasks
+- Minimum: 2 tasks (cost savings during off-hours)
+- Cooldown period: 300 seconds between scaling actions
+
+Kevin walked through the scaling configuration in detail during the review:
+
+Kevin: "The 60% threshold for scale-up might seem aggressive, but we found during testing that our API containers exhibit a steep latency curve once CPU hits 70%. The 3-minute evaluation window filters out transient spikes — like when a customer does a bulk import and CPU jumps to 75% for 30 seconds. We don't want to scale for those."
+
+Amir: "What about memory-based scaling? Some of our aggregation queries hold intermediate results in memory."
+
+Kevin: "Good question. I looked at this. During the load test on May 11, peak memory usage per task was 1.3 GB out of 2 GB. That's 65%, and it only lasted about 90 seconds during the heaviest aggregation workload. CPU consistently correlated better with actual load. If we see memory-driven bottlenecks in production, we can add a memory-based scaling policy — it's a one-line Terraform change."
+
+Amir: "Makes sense. Let's revisit after two weeks of production data."
+
+Cost estimate: $0.04048/vCPU/hour × 4 tasks × 24h × 30d = $116.58/month baseline
+With auto-scaling headroom (est. avg 6 tasks): ~$175/month
+
+Container build pipeline:
+- Source: GitHub (verdana-analytics/api repo, main branch)
+- CI: GitHub Actions (.github/workflows/build.yml)
+- Build: Docker multi-stage build (builder + runtime)
+- Registry: AWS ECR (verdana-api repository, lifecycle policy retains last 30 images)
+- Scan: ECR image scanning enabled (no critical or high vulnerabilities in v1.0.0-rc3)
+- Deploy: `aws ecs update-service` triggered by CI on tag push (tags matching v*.*.*)
+
+David: "I ran Trivy against the rc3 image yesterday. Zero critical, zero high, two medium (both in transitive dependencies of the Node.js PDF renderer — not reachable from our code path). I'm comfortable shipping with these."
+
+Notes:
+- Kevin tested the auto-scaling by running a load test at 3AM on May 11. Tasks scaled from 2 to 8 within 4 minutes. Scale-down took 12 minutes (the 10-minute cool-down is intentional to avoid thrashing).
+
+Kevin: "The load test used Apache Bench with 500 concurrent connections hitting the /api/v1/events endpoint for 15 minutes. Peak request rate was 2,400 req/s across the 8 tasks. No 5xx errors. P99 latency peaked at 280ms during the scale-up window, then settled to 45ms once all 8 tasks were healthy."
+
+Jess: "I was monitoring the ALB target group during that test. The deregistration delay is set to 30 seconds, which means during scale-down, in-flight requests have 30 seconds to complete before the task is killed. We saw zero dropped connections during scale-down."
+
+- Container startup time is 14 seconds (measured from task launch to first health check pass). This is acceptable for scaling events but too slow for cold start scenarios. We should investigate prewarming in Q3.
+
+Priya: "14 seconds seems long. Is that the JVM startup or something?"
+
+Kevin: "No, we're Python — it's the combination of pulling the container layer cache (about 4 seconds), starting the uvicorn workers (about 3 seconds), and waiting for the first health check interval (the first check fires at about 7 seconds after task launch, but you need 1 successful check). I've opened a ticket to look at reducing the health check initial delay. But honestly, for scaling events — where we're adding capacity to an already-running service — 14 seconds is fine."
+
+- Logging: all container logs go to CloudWatch Logs group /ecs/verdana-api. Retention: 30 days. Costs: ~$8/month at current log volume.
+- Log format: structured JSON (timestamp, level, request_id, account_id, message, duration_ms)
+- Correlation: every inbound request gets a UUID request_id propagated through all downstream calls (Redis, Postgres, Kafka)
+
+***
+
+SECTION 3: DATABASE — RDS POSTGRESQL 15
+
+Configuration:
+- Instance class: db.r6g.xlarge (4 vCPU, 32 GB RAM)
+- Storage: 200 GB gp3 (3,000 IOPS, 125 MB/s throughput)
+- Multi-AZ: Yes (standby in us-east-1b)
+- Read replica: 1 (db.r6g.large, 2 vCPU, 16 GB RAM)
+- Backup: Daily automated, 7-day retention
+- Backup window: 03:00-04:00 UTC (off-peak for US customers)
+- Maintenance window: Sun 06:00-07:00 UTC
+- Encryption: AES-256 (AWS KMS, key alias: alias/verdana-rds)
+- Parameter group: Custom (shared_buffers=8GB, work_mem=256MB, max_connections=200)
+- PostgreSQL extensions enabled: pg_stat_statements (query performance), pgcrypto (field-level encryption), uuid-ossp
+
+Priya: "I want to flag that we're using the custom parameter group with shared_buffers at 8 GB. That's 25% of the 32 GB instance memory, which is the PostgreSQL recommendation. But if we ever downsize the instance, we need to adjust this proportionally or we'll get OOM kills."
+
+Marcus: "Good callout. Let's add that to the runbook as a caveat for any instance resize."
+
+Kevin: "Already noted in the Terraform variable description, but I'll add it to the runbook too."
+
+Connection management:
+- pgBouncer deployed as a sidecar container in each ECS task
+- Pool mode: transaction (connections returned to pool after each transaction)
+- Pool size per sidecar: 25 connections
+- Total pool capacity: 25 × 4 tasks = 100 connections (at baseline task count)
+- Reserve connections for admin: 5 (separate from pool, for migrations and manual queries)
+- Connection string uses IAM authentication (no stored passwords)
+
+Performance baseline (from load testing, May 11):
+- Query latency (simple SELECT by primary key): 2-5ms
+- Query latency (aggregation with GROUP BY on indexed columns): 15-40ms
+- Query latency (complex JOIN + aggregation across 2-3 tables): 50-120ms
+- Query latency (full-text search on payload_jsonb): 80-200ms depending on document size
+- Connection pool: 100 connections (via pgBouncer sidecar)
+- Maximum observed concurrent queries: 45
+- Peak QPS during load test: 1,200 queries/second
+- Replication lag to read replica: <50ms under load (measured via pg_stat_replication)
+
+Amir: "The 50-120ms range for complex JOINs is acceptable for our analytics endpoints. Those are the dashboard queries that populate charts — users expect sub-second, and with the Redis cache in front, most of those will be served from cache anyway."
+
+Cost estimate:
+- Primary: $0.464/hour × 730h = $338.72/month
+- Read replica: $0.232/hour × 730h = $169.36/month
+- Storage: $0.08/GB × 200GB = $16/month
+- IOPS: included in gp3 base (3,000 free)
+- Backup: ~$5/month
+- Data transfer (cross-AZ replication): ~$3/month estimated
+- Total database: ~$529/month
+
+Schema overview:
+- accounts (id, name, created_at, plan, billing_status) — 200 rows expected year 1
+- users (id, account_id, email, role, created_at) — ~2,400 rows expected (12 users/account avg)
+- connectors (id, account_id, source_type, config_encrypted, status, last_sync) — ~600 rows (3 connectors/account avg)
+- events (id, account_id, connector_id, event_type, payload_jsonb, created_at) — PARTITIONED by month, expected 50M rows/month at scale
+- queries (id, account_id, query_json, created_at, execution_time_ms) — audit trail, ~10K rows/month initially
+- webhooks (id, account_id, url, filter_json, status) — ~500 rows expected
+
+Priya provided additional context on the events table design:
+
+Priya: "The events table is by far our largest table. The payload_jsonb column stores the raw event data from customer connectors — it can be anywhere from 200 bytes to 15 KB per event depending on the source type. Salesforce events tend to be large (5-15 KB), while Stripe webhook events are typically under 1 KB. We benchmarked both extremes during load testing."
+
+Partitioning strategy:
+- events table is partitioned by month using PostgreSQL declarative partitioning
+- Each partition is a separate table (events_2025_05, events_2025_06, etc.)
+- Partition pruning ensures queries only scan relevant months
+- Old partitions can be archived to S3 via pg_dump after 6 months
+- Partition creation is automated via a cron job (runs on the 25th of each month to create the next month's partition)
+- Amir wrote a migration script (db/migrations/003_create_partition.sql) that handles partition creation idempotently
+
+Kevin: "I tested the partition archival process last week. Dumping a partition with 50M rows to S3 takes about 12 minutes using pg_dump with compression. Restoring from S3 takes about 25 minutes. Both operations can run without locking the active partitions."
+
+Indexing:
+- events: B-tree on (account_id, created_at), GIN on payload_jsonb
+- connectors: B-tree on (account_id, source_type)
+- queries: B-tree on (account_id, created_at)
+- users: B-tree on (account_id), unique on (email)
+- webhooks: B-tree on (account_id, status)
+
+Known concern: The GIN index on payload_jsonb will grow large as event volume increases. At 50M rows/month, the index could reach 10-15 GB per partition. We should monitor index size and consider partial indexes on frequently queried JSON paths.
+
+Amir: "I've already identified the three most common JSON path queries from our beta users: `$.event_type`, `$.source.id`, and `$.metadata.tags`. If the GIN index becomes a problem, we can create partial B-tree indexes on these paths. I'll file a ticket to revisit this at the 30-day mark."
+
+Migration management:
+- Tool: Alembic (Python)
+- All migrations in db/migrations/ directory
+- Pre-launch migrations applied as of May 12: 14 total (001 through 014)
+- Migration 014 added the per-account connection limit check (implemented May 13 — see Section 8, Risk #2)
+- Rollback tested for all migrations through 010. Migrations 011-014 have forward-only changes (adding columns, creating partitions) that are safe without rollback.
+
+***
+
+SECTION 4: CACHING — REDIS CLUSTER
+
+Configuration:
+- Cluster mode: enabled (3 shards, 1 replica per shard)
+- Node type: cache.r6g.large (2 vCPU, 13 GB RAM)
+- Total memory: 39 GB across cluster (6 nodes × 6.5 GB usable per node)
+- Encryption in transit: TLS enabled
+- Encryption at rest: enabled (AWS KMS)
+- Eviction policy: allkeys-lru
+- Snapshot: daily, 1-day retention
+- Maintenance window: Mon 05:00-06:00 UTC
+- Parameter group: maxmemory-policy=allkeys-lru, timeout=300, tcp-keepalive=60
+
+Usage patterns:
+1. API response caching — TTL 60s for frequently accessed queries (key format: `cache:v1:{account_id}:{query_hash}`)
+2. Rate limiting — sliding window counters per API key (key format: `ratelimit:{api_key}:{window}`)
+3. Real-time streaming state — WebSocket subscription metadata (key format: `ws:sub:{subscription_id}`)
+4. Session storage — user authentication tokens (key format: `session:{session_id}`, TTL 24h)
+
+Amir: "I want to walk through the cache invalidation strategy. When an event is ingested for account X, we invalidate all cache keys matching `cache:v1:{X}:*`. This is a coarse invalidation — it clears all cached queries for that account. It's simple and correct, but it means high-write accounts will see lower cache hit rates. For our beta users, the average hit rate was 72%. I expect it'll be in the 60-75% range at launch."
+
+Jess: "Are we using Redis Cluster's hash tags for the invalidation scan?"
+
+Amir: "Yes, the account_id is wrapped in curly braces in the key — `cache:v1:{account_id}:{hash}` — so all keys for an account land on the same shard. The SCAN + DEL for invalidation only hits one shard."
+
+Current utilization: ~2% (pre-launch, minimal data)
+Expected utilization at 200 accounts: 15-25%
+Memory per account (estimated): 50 MB average (mostly cached query results)
+
+Cost estimate: $0.252/hour × 6 nodes × 730h = $1,103.76/month
+
+Kevin's note: Redis Cluster is overkill for our current scale. A single cache.r6g.large node ($184/month) would suffice for the first 6 months. But the cluster setup avoids a migration later, and the incremental cost ($920/month) is worth avoiding downtime from a mid-growth migration. I recommend keeping the cluster.
+
+Marcus's response: Agree. Keep the cluster. The cost is acceptable relative to the operational risk of migrating under load.
+
+Jess: "For what it's worth, I tested the failover behavior last week. When I killed the primary node on shard 1, the replica promoted in 8 seconds. The API saw about 200ms of elevated latency during the failover but zero errors — the Redis client library (redis-py with retry on timeout) handled it cleanly."
+
+Kevin: "Good to know. I'll document that in the runbook."
+
+***
+
+SECTION 5: STREAMING — AMAZON MSK (MANAGED KAFKA)
+
+Configuration:
+- Cluster name: verdana-streaming
+- Kafka version: 3.5.1
+- Brokers: 3 (t3.large instances, 2 vCPU, 8 GB RAM each)
+- Storage: 100 GB per broker (gp3)
+- Replication factor: 3
+- Min in-sync replicas: 2
+- Log retention: 7 days (168 hours)
+- Compression: lz4 (producer-side)
+- Authentication: IAM (no SASL/SCRAM)
+
+Topics:
+- verdana.events.ingest — raw events from connectors (partitioned by account_id, 12 partitions)
+- verdana.events.processed — transformed events ready for storage (12 partitions)
+- verdana.streaming.subscriptions — WebSocket subscription management (3 partitions)
+- verdana.webhooks.delivery — outbound webhook events (6 partitions)
+
+Priya: "The partition counts were chosen based on our expected consumer parallelism. For the events topics, 12 partitions lets us run up to 12 consumer instances. At our launch scale we'll have 4 consumers, so there's room to scale 3x without repartitioning."
+
+Amir: "Why 6 partitions for webhooks?"
+
+Priya: "Webhook delivery is I/O-bound — each delivery involves an outbound HTTP call that can take 1-5 seconds. More partitions let us parallelize the HTTP calls across more consumer threads. Six felt right for launch. If webhook volume grows, we can bump to 12 without impacting the other topics."
+
+Consumer group configuration:
+- verdana-event-processor (consumes from verdana.events.ingest, produces to verdana.events.processed)
+  - Instance count: 4 (one per ECS task)
+  - Auto-commit: disabled (manual offset commit after successful processing)
+  - Max poll records: 500
+  - Session timeout: 30s
+  - Heartbeat interval: 10s
+
+- verdana-storage-writer (consumes from verdana.events.processed, writes to PostgreSQL)
+  - Instance count: 2
+  - Batch size: 100 events per INSERT (using PostgreSQL COPY for bulk inserts)
+  - Flush interval: 5 seconds (whichever comes first — batch size or interval)
+
+- verdana-webhook-dispatcher (consumes from verdana.webhooks.delivery, makes outbound HTTP calls)
+  - Instance count: 2
+  - Retry policy: 3 attempts with exponential backoff (1s, 5s, 25s)
+  - Dead letter topic: verdana.webhooks.dlq (failed after 3 retries)
+
+Throughput baseline:
+- Producer throughput: 10,000 events/second sustained (tested over 30-minute window)
+- Consumer throughput: 15,000 events/second sustained
+- End-to-end latency (produce → consume → store): 45ms p95
+- Consumer lag: <100 messages under normal load
+- Peak throughput tested: 25,000 events/second (consumers kept up, no lag accumulation)
+
+Priya: "The 10K sustained number is our target for year-1 peak. The 25K number was a burst test. At 25K/s, we started seeing some GC pauses on the t3.large brokers — nothing critical, but if we need sustained throughput above 15K/s, we should upgrade the brokers to m5.xlarge."
+
+Kevin: "Noted. I'll add a scaling trigger — if we sustain >12K/s for a week, we upgrade brokers."
+
+Cost estimate:
+- Broker instances: $0.0456/hour × 3 × 730h = $99.86/month
+- Storage: $0.10/GB × 300GB total = $30/month
+- Data transfer: ~$20/month estimated
+- Total Kafka: ~$150/month
+
+Monitoring:
+- Consumer lag alerts: >1,000 messages for 5 minutes → PagerDuty
+- Broker disk usage: >80% → PagerDuty
+- Under-replicated partitions: >0 for 5 minutes → PagerDuty
+- Producer error rate: >1% for 3 minutes → Slack #ops-alerts
+- Consumer group rebalance events → Slack #ops-alerts (informational)
+
+Priya: "One more thing on Kafka — I set up a compacted topic `verdana.connectors.state` that stores the last-known state of each connector. This is used by the API to show connector status without hitting the database. It's a small optimization but it eliminates a common query pattern."
+
+***
+
+SECTION 6: NETWORKING AND SECURITY
+
+David presented this section during the review.
+
+David: "I want to cover the security posture of the production environment. This is a summary — the full security review is in a separate document (SEC-2025-003) that I'll share with the team after launch."
+
+TLS/SSL:
+- All external endpoints use TLS 1.2+ (TLS 1.3 preferred)
+- Certificates managed via AWS Certificate Manager (auto-renewal)
+- Certificate for *.verdana-analytics.io issued April 28, 2025, expires April 28, 2026
+- HSTS header enabled (max-age=31536000, includeSubDomains)
+
+WAF rules (AWS WAF on ALB):
+- Rate limiting: 1,000 requests per IP per 5 minutes (blanket)
+- Per-API-key rate limiting: handled at application layer (Redis-based, see Section 4)
+- SQL injection rule set: AWS Managed Rules — SQLi
+- XSS rule set: AWS Managed Rules — XSS
+- Geographic blocking: none (we serve globally)
+- Bot control: not enabled (costs $10/month, revisit after launch based on bot traffic patterns)
+
+David: "The WAF rules are intentionally minimal. We're relying more on application-layer security — input validation, parameterized queries, RBAC — than on WAF. The WAF is a safety net, not the primary defense."
+
+Secrets management:
+- All secrets stored in AWS Secrets Manager
+- Secrets are injected into ECS tasks via task definition environment variables (referencing Secrets Manager ARNs)
+- Secrets list: database connection string, Redis auth token, Datadog API key, Stripe API key, SendGrid API key
+- Rotation: database credentials rotate every 90 days (automated via Lambda function)
+- No secrets in environment variables, no secrets in code, no secrets in Terraform state (state is encrypted but still)
+
+IAM:
+- Principle of least privilege applied to all roles
+- ECS task role can only access: specific RDS instance, specific ElastiCache cluster, specific MSK cluster, specific S3 bucket
+- No wildcard permissions
+- IAM Access Analyzer enabled — last finding was March 2 (resolved)
+
+David: "I ran an IAM Access Analyzer report this morning. Zero external access findings. The only cross-account access is the Datadog integration role, which is scoped to CloudWatch read-only."
+
+***
+
+SECTION 7: MONITORING AND OBSERVABILITY
+
+Stack:
+- Metrics: Datadog (APM + Infrastructure + Custom)
+- Logs: CloudWatch Logs → Datadog Log Management (via Datadog Forwarder Lambda)
+- Alerting: Datadog Monitors → PagerDuty → on-call engineer
+- Uptime: Datadog Synthetic Monitoring (5 locations, 1-minute checks)
+- Tracing: Datadog APM with dd-trace-py (auto-instrumented for Django, psycopg2, redis-py, confluent-kafka)
+
+Jess: "I want to emphasize that we have end-to-end tracing. A single request to the API generates a trace that shows the ALB hop, the application handler, every database query, every Redis call, and any Kafka produce calls. The trace ID is the same as the request_id in our structured logs, so you can search either system by the same ID."
+
+Key dashboards:
+1. "API Health" — request rate, error rate (4xx and 5xx separated), latency percentiles (p50, p95, p99), requests by endpoint
+2. "Database Performance" — query latency by query type, connection count, replication lag, table sizes, cache hit ratio
+3. "Streaming Pipeline" — Kafka throughput (produce/consume), consumer lag by topic and consumer group, event processing rate, end-to-end latency
+4. "Business Metrics" — signups, API calls per account, active accounts, connector sync status (updated hourly via a scheduled query)
+5. "Infrastructure Overview" — CPU/memory/network for all services, disk usage, container count, scaling events
+
+Kevin: "All dashboards are in the 'Verdana Production' folder in Datadog. I've set them up with template variables so you can filter by account_id, region, or service."
+
+Alert thresholds:
+| Alert | Condition | Severity | Notification |
+|:---|:---|:---|:---|
+| API error rate (5xx) | >5% for 5 min | P1 | PagerDuty (call) |
+| API latency P95 | >500ms for 5 min | P2 | PagerDuty (SMS) |
+| Database connections | >80% pool for 3 min | P2 | PagerDuty (SMS) |
+| Replication lag | >5s for 3 min | P2 | PagerDuty (SMS) |
+| Kafka consumer lag | >1,000 msgs for 5 min | P2 | PagerDuty (SMS) |
+| Disk usage | >80% any volume | P3 | Slack #ops-alerts |
+| Certificate expiry | <14 days | P3 | Slack #ops-alerts |
+| Container restart | Any task restart | P4 | Slack #ops-alerts |
+| Health check failure | 2 consecutive failures | P3 | Slack #ops-alerts |
+
+Marcus: "I want to make sure we don't have alert fatigue on day one. Kevin, are you confident these thresholds are tuned correctly?"
+
+Kevin: "Reasonably confident. The API error rate and latency thresholds are based on our load test data — we never exceeded 2% error rate or 300ms P95 during testing, so 5% and 500ms give us margin. The Kafka and database thresholds are industry-standard. If we get too many false positives in the first week, I'll adjust."
+
+Jess: "I added a muted alert for the first 2 hours after deployment — just the latency one. There's always a warmup period where caches are cold and latency is elevated."
+
+On-call rotation:
+- Week 1 (May 14-20): Marcus
+- Week 2 (May 21-27): Amir
+- Week 3 (May 28-Jun 3): Jess
+- Week 4 (Jun 4-10): Kevin
+- Rotation starts May 14 (day before launch)
+- Handoff: Monday at 9 AM EDT, via Slack message in #on-call channel
+- Escalation: if on-call doesn't respond within 15 minutes, PagerDuty escalates to Marcus
+
+Marcus: "I'm taking the first week intentionally. If something goes wrong at launch, I want to be the one debugging it live. I know the full stack."
+
+Kevin: "Appreciated. I'll be secondary for week 1 regardless."
+
+Runbook: Notion page "Verdana On-Call Runbook" — includes diagnostic steps for each alert type, escalation procedures, and rollback instructions.
+
+Runbook sections:
+1. API error rate spike — check Datadog APM for error traces, check recent deployments, check database connectivity
+2. Database connection exhaustion — check pgBouncer stats, identify long-running queries via pg_stat_activity, kill if necessary
+3. Kafka consumer lag — check consumer health, restart consumer group if needed, check for poison messages
+4. Rollback procedure — revert ECS service to previous task definition revision (one CLI command)
+5. Database failover — automatic via RDS Multi-AZ, manual promotion of read replica if needed
+6. Full outage — incident response template, communication plan, status page update procedure
+
+***
+
+SECTION 8: MONTHLY COST SUMMARY
+
+Kevin presented the cost breakdown. All figures are based on on-demand pricing in us-east-1 as of May 2025.
+
+| Service | Monthly Cost | Notes |
+|:---|:---|:---|
+| ECS Fargate (compute) | $175 | Avg 6 tasks |
+| RDS PostgreSQL (primary + replica) | $529 | db.r6g.xlarge + large |
+| Redis Cluster | $1,104 | 3 shards, 1 replica each |
+| Amazon MSK (Kafka) | $150 | 3 brokers t3.large |
+| CloudFront CDN | $25 | Minimal traffic initially |
+| ALB | $22 | Fixed + per-connection |
+| NAT Gateway | $67 | 2 gateways, minimal data |
+| S3 (backups, static assets) | $15 | Minimal storage |
+| Datadog | $450 | APM + Infra + Logs (startup plan) |
+| Route 53 (DNS) | $5 | 2 hosted zones |
+| AWS WAF | $15 | Basic rules |
+| CloudWatch Logs | $8 | 30-day retention |
+| Secrets Manager | $10 | 6 secrets × ~$0.40 + API calls |
+| Miscellaneous | $50 | KMS, Secrets Manager, etc. |
+| **TOTAL** | **$2,548** | |
+
+NOTE: This is infrastructure cost only. Does not include personnel, software licenses (GitHub, Notion, etc.), or office costs.
+
+Marcus: "The biggest single line item is Redis at $1,104. Kevin, you already explained the rationale for the cluster setup. I'm good with it. But let's flag it for review at the 6-month mark — if utilization is still under 10%, we should consider downsizing."
+
+Kevin: "Agreed. I'll set a calendar reminder for November."
+
+Priya: "What about data transfer costs? Those can sneak up on you with cross-AZ traffic."
+
+Kevin: "Good catch. Cross-AZ data transfer between the ECS tasks and RDS/Redis/Kafka is about $0.01/GB. At our expected traffic, that's maybe $20-30/month. I lumped it into the miscellaneous line. If it grows significantly, I'll break it out."
+
+Projected cost at 200 accounts: ~$4,200/month (main increases in compute scaling and Kafka throughput)
+
+Breakdown of projected increase:
+- Compute: $175 → $400 (avg 12 tasks)
+- Database: $529 → $700 (possible primary instance upgrade)
+- Redis: $1,104 → $1,104 (unchanged — cluster handles the load)
+- Kafka: $150 → $300 (broker upgrade to m5.xlarge)
+- Datadog: $450 → $750 (more hosts, more log volume)
+- Other: roughly proportional increase
+
+Amir: "So we're looking at about $21/month per account at 200 accounts. That's well within our unit economics if we're charging $99/month for the starter plan."
+
+Marcus: "Correct. Gross margin on infrastructure is strong. The cost pressure at scale will be on the data engineering pipeline — Kafka throughput and database storage. But those scale linearly, not exponentially."
+
+***
+
+SECTION 9: KNOWN RISKS AND MITIGATIONS
+
+Marcus led the risk discussion. Each risk was discussed and assigned an owner.
+
+1. Single-region deployment — if us-east-1 has an outage, we're down
+   Mitigation: eu-west-1 is prepared for failover but not actively serving traffic. Manual failover procedure exists (documented in runbook section 6). Target for automated multi-region: Q4.
+   Owner: Kevin
+   Probability: Low (AWS SLA 99.99%)
+   Impact: High (full outage)
+
+   Kevin: "The eu-west-1 setup includes a VPC, subnets, and an ALB — but no running resources. If us-east-1 goes down, we'd need to spin up ECS tasks, promote a cross-region read replica (which we don't have yet), and update DNS. Realistically, that's a 30-60 minute manual process. Automated multi-region requires cross-region replication for both RDS and Redis, which is a Q4 project."
+
+   Jess: "Should we at least set up the cross-region RDS replica now? It's about $170/month for a db.r6g.large in eu-west-1."
+
+   Marcus: "Not for launch. Let's revisit after we have paying customers and revenue to justify the cost. Add it to the Q3 planning doc."
+
+2. Connection pool exhaustion under concurrent heavy queries
+   Mitigation: per-account connection limits (implemented May 13), query timeout of 60s, read replica for batch operations.
+   Owner: Amir
+   Probability: Medium
+   Impact: Medium (degraded service for one account, not all)
+
+   Amir: "The per-account limit is 10 connections. If one account runs 10 concurrent heavy queries, they'll hit the limit and get a 429 response. Other accounts are unaffected because the connections are isolated via pgBouncer pool partitioning. I tested this by running 15 concurrent queries for one account — queries 11-15 got 429s, other accounts continued normally."
+
+3. Kafka consumer restart cold-start
+   Mitigation: consumers checkpoint offsets every 5 seconds. Restart from last checkpoint. Maximum data loss: 5 seconds of events.
+   Owner: Priya
+   Probability: Medium (container restarts happen)
+   Impact: Low (events are replayed from Kafka, at-least-once delivery)
+
+   Priya: "To be precise — this isn't data loss, it's delayed processing. When a consumer restarts, it resumes from the last committed offset. Any events produced in the last 5 seconds before the crash will be re-consumed. Our event processing is idempotent (we use the event UUID as the database primary key), so duplicate processing just results in a no-op INSERT ON CONFLICT."
+
+4. No disaster recovery testing
+   Mitigation: Scheduled DR test for June 15. Will simulate primary DB failure and test failover to read replica.
+   Owner: Kevin
+   Probability: N/A (this is a process gap, not a failure mode)
+   Impact: Unknown until tested
+
+   Marcus: "This is the one that keeps me up at night. We've never tested a full failover. Kevin, make sure the June 15 test includes: RDS failover, Redis failover, Kafka broker replacement, and ECS task failure recovery. I want the full matrix."
+
+   Kevin: "Will do. I'll write up a test plan by May 30 and share it for review."
+
+***
+
+SECTION 10: ACTION ITEMS
+
+| # | Item | Owner | Due Date | Status |
+|:---|:---|:---|:---|:---|
+| 1 | Investigate container prewarming for cold starts | Kevin | Q3 2025 | Open |
+| 2 | Monitor GIN index size on events table at 30 days | Amir | Jun 15 | Open |
+| 3 | Conduct DR test (full failover simulation) | Kevin | Jun 15 | Open |
+| 4 | Write DR test plan | Kevin | May 30 | Open |
+| 5 | Review Redis cluster sizing at 6-month mark | Kevin | Nov 2025 | Open |
+| 6 | Add memory-based scaling policy if needed | Kevin | May 30 | Pending review |
+| 7 | Add instance resize caveat to on-call runbook | Kevin | May 14 | Open |
+| 8 | Evaluate cross-region RDS replica for Q3 planning | Jess | Jun 2025 | Open |
+| 9 | Add Kafka broker upgrade trigger (>12K/s sustained) | Kevin | May 14 | Open |
+| 10 | Review bot control WAF rule after launch data | David | Jun 2025 | Open |
+
+***
+
+DOCUMENT STATUS: FINAL — PRE-LAUNCH REVIEW
+APPROVED BY: Marcus Okafor (CTO)
+PREPARED BY: Marcus Okafor, Kevin McNulty
+CONTRIBUTORS: Amir Patel, Jess Lindström, David Cho, Priya Subramanian
+DATE: May 13, 2025
+NEXT REVIEW: June 13, 2025 (monthly)
+DOCUMENT LOCATION: Notion > Engineering > Architecture Decision Records > ADR-2025-017

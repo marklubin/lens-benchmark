@@ -1,0 +1,720 @@
+================================================================================
+FOLDLY ENGINEERING — SLACK EXPORT
+================================================================================
+Workspace     : foldly-eng
+Channel       : #engineering
+Channel ID    : C04XKQR7N2P
+Export Date   : 2025-04-07
+Messages      : 256
+Participants  : Priya Kaur, Marcus Webb, Jess Nakamura, Danny Okafor, Lina Torres
+Channel Desc  : Main engineering channel — builds, deploys, feature chat
+================================================================================
+
+[2025-04-07 08:47:11] lina.torres
+heads up — the staging box ran out of disk at 3am. `/var/log/foldly` was 38GB. the app logs are not rotating. i cleared enough space to get it back up but we need to fix the log config before it happens on prod
+
+[2025-04-07 08:47:39] marcus.webb
+38GB?? what is even generating that much log data
+
+[2025-04-07 08:48:02] lina.torres
+the document processing pipeline. every time a doc gets parsed it logs the full text extraction output at DEBUG level. multiply that by the 1,200 docs nara uploaded last week and you get 38GB of logs in four days
+
+[2025-04-07 08:48:28] marcus.webb
+oh. yeah that was me. i left the debug logging on after the batch import bug last week. forgot to turn it off
+
+[2025-04-07 08:48:51] lina.torres
+i changed it to INFO in the config. also set up logrotate — daily rotation, 7 days retention, gzip compression. should keep us under 2GB going forward
+
+[2025-04-07 08:49:14] marcus.webb
+thanks lina. sorry about that
+
+[2025-04-07 08:49:33] lina.torres
+no worries, just please remember to clean up debug flags before you merge to main
+
+[2025-04-07 08:49:55] marcus.webb
+:thumbsup:
+
+---
+
+[2025-04-07 09:15:03] priya.kaur
+morning team. let's set the week. big picture: belmont demo is wednesday. crestview wants a follow-up call friday. we need SSO and the admin console polished by wednesday. what's everyone's plan?
+
+[2025-04-07 09:15:31] jess.nakamura
+i'm finishing the admin console frontend. the customer list and subscription views are working, need to add the usage graphs and the audit log viewer. should be done by tomorrow afternoon
+
+[2025-04-07 09:15:58] marcus.webb
+i'm on the SSO integration. SAML flow is mostly working but i'm hitting an issue with the assertion consumer service URL. belmont's Azure AD keeps rejecting my callback URL as "not registered." been fighting with it since last night
+
+[2025-04-07 09:16:24] priya.kaur
+what's blocking it?
+
+[2025-04-07 09:16:48] marcus.webb
+i think it's a URL encoding issue. the redirect URL has a query param and Azure might be comparing the URL literally instead of normalized. i need to set up the app registration on their side to match exactly what we send. going to jump on a call with their IT team at 10
+
+[2025-04-07 09:17:12] priya.kaur
+ok. keep me posted. danny?
+
+[2025-04-07 09:17:35] danny.okafor
+i'm working on the notification system. email alerts when a document gets shared, when someone comments, when a subscription is about to expire. i have the email templates done and the trigger logic about half written
+
+[2025-04-07 09:17:58] priya.kaur
+how long to finish?
+
+[2025-04-07 09:18:21] danny.okafor
+the trigger logic is pretty straightforward but i keep running into this thing in routes.py where i can't tell which function handles which endpoint. the file is really long and there's no clear organization. half my time is just reading the file to figure out where to hook in
+
+[2025-04-07 09:18:45] jess.nakamura
+yeah routes.py is getting pretty unwieldy. last time i counted it was over 2,000 lines
+
+[2025-04-07 09:19:08] marcus.webb
+2,247 after i added the SSO endpoints last week
+
+[2025-04-07 09:19:31] danny.okafor
+we should probably split it into separate files at some point. like auth_routes.py, billing_routes.py, document_routes.py...
+
+[2025-04-07 09:19:54] priya.kaur
+agree in principle. but not this week. let's get through the demos first and then clean up. danny, can you finish notifications by wednesday?
+
+[2025-04-07 09:20:17] danny.okafor
+yeah. i'll have the core triggers done by tomorrow and the email templates wired up by wednesday morning
+
+[2025-04-07 09:20:40] priya.kaur
+good. lina?
+
+[2025-04-07 09:20:58] lina.torres
+i'm setting up the staging environment to mirror prod more closely. right now staging has half the RAM and a quarter of the disk. if we're going to demo to enterprise clients, staging needs to be realistic. also working on the CI pipeline — right now deploys are still `git pull && systemctl restart foldly` on the server
+
+[2025-04-07 09:21:24] priya.kaur
+the deploy process has been fine so far
+
+[2025-04-07 09:21:47] lina.torres
+it works when one person deploys at a time. last thursday jess and marcus both deployed within 10 minutes of each other and the second deploy overwrote the first one's config changes. i had to SSH in and manually fix it
+
+[2025-04-07 09:22:10] jess.nakamura
+oh is THAT what happened? i was wondering why my search filters disappeared for an hour
+
+[2025-04-07 09:22:33] lina.torres
+yes. there's no deploy lock, no atomic rollout, no health check. if the app doesn't start after `systemctl restart`, it just stays down until someone notices
+
+[2025-04-07 09:22:56] priya.kaur
+ok that's fair. can you put together a proper deploy script? doesn't need to be fancy, just something that prevents two people from deploying at the same time and checks that the app actually started
+
+[2025-04-07 09:23:19] lina.torres
+i'll have something by end of week. basic shell script with a lock file, a health check curl, and automatic rollback if the health check fails
+
+[2025-04-07 09:23:42] priya.kaur
+perfect. ok team — big week. let's make it happen
+
+[2025-04-07 09:24:01] marcus.webb
+:muscle:
+
+---
+
+[2025-04-07 10:33:08] danny.okafor
+hey @marcus.webb quick question. i'm writing the notification triggers and i need to hook into the document sharing flow. which function in routes.py handles the share endpoint?
+
+[2025-04-07 10:33:35] marcus.webb
+`share_document()`, starts around line 1,480ish. but honestly just search for `@app.route('/api/docs/share')`
+
+[2025-04-07 10:33:58] danny.okafor
+found it. line 1,493. thanks
+
+[2025-04-07 10:34:22] danny.okafor
+wait this function is 87 lines long? it does the sharing, sends a webhook to integrations, updates the activity feed, AND logs the audit event all inline?
+
+[2025-04-07 10:34:45] marcus.webb
+yeah. i kept meaning to refactor it but every time i touch it i'm afraid of breaking the webhook integration. there are no tests so i can't verify that a refactor didn't change behavior
+
+[2025-04-07 10:35:08] danny.okafor
+right. about that — i wanted to bring something up. i've been here three weeks now and i've noticed we have literally zero tests in the repo. no unit tests, no integration tests, nothing. is that intentional?
+
+[2025-04-07 10:35:32] marcus.webb
+"intentional" is a strong word lol. we just never got around to writing them. the codebase started as a weekend prototype and we've been shipping too fast to stop and add tests
+
+[2025-04-07 10:35:55] danny.okafor
+i mean, i get that. but now we're demoing to enterprise clients. if someone pushes a bad change and we don't have tests to catch it, that could blow up a demo
+
+[2025-04-07 10:36:18] jess.nakamura
+danny's not wrong. i broke the search endpoint two weeks ago because i changed the response format and didn't realize the frontend was depending on the old format. if there had been even a basic integration test it would have caught that
+
+    :+1: (3) priya.kaur, danny.okafor, lina.torres
+
+[2025-04-07 10:36:42] marcus.webb
+sure, but writing tests takes time and we have two demos this week. you want me to stop working on SSO to write tests?
+
+[2025-04-07 10:37:05] danny.okafor
+no, i'm not saying right now. but can we at least plan for it? like, i could start writing tests for the modules i'm working on. it wouldn't take that much extra time if i do it alongside the feature work
+
+[2025-04-07 10:37:28] priya.kaur
+danny, i hear you. testing is important and we should have tests. but this week is not the week. we have belmont on wednesday and crestview on friday. let's focus on shipping for now and we'll add tests when we have time
+
+[2025-04-07 10:37:51] danny.okafor
+ok. when do you think that would be?
+
+[2025-04-07 10:38:14] priya.kaur
+realistically? after we close these enterprise deals. probably after launch — let's say early may. we can do a dedicated testing sprint. a whole week focused on writing tests, setting up CI, cleaning up the codebase
+
+[2025-04-07 10:38:37] danny.okafor
+a testing sprint sounds great. can we at least put it on the calendar? i'm worried "after launch" will keep sliding
+
+[2025-04-07 10:38:58] marcus.webb
+yeah a testing sprint makes sense. batch it all together instead of trying to sneak tests in alongside feature work. we'll write better tests that way too
+
+[2025-04-07 10:39:22] jess.nakamura
+agreed. i'd rather spend a focused week on it than try to write tests in the cracks between demos
+
+[2025-04-07 10:39:45] priya.kaur
+ok. danny, put "testing sprint — first week of may" on the shared calendar. we'll block off the whole week. no feature work, just tests and cleanup
+
+[2025-04-07 10:40:08] danny.okafor
+done. may 5-9 blocked as "Testing & Code Quality Sprint"
+
+    :tada: (2) jess.nakamura, lina.torres
+
+[2025-04-07 10:40:31] danny.okafor
+in the meantime i'll keep a running list of things that should have tests. that way when the sprint comes we'll know exactly what to prioritize
+
+[2025-04-07 10:40:54] priya.kaur
+good thinking. ok, back to shipping. we have demos to win :rocket:
+
+---
+
+[2025-04-07 11:08:22] marcus.webb
+update on the SSO issue. got on a call with belmont's IT team. turns out the problem was on their side — they had our callback URL registered with a trailing slash and we were sending it without one. they fixed it and the SAML flow works now
+
+[2025-04-07 11:08:49] marcus.webb
+one issue though. the way i implemented the SAML assertion parsing, i'm extracting the user's email, name, and role from the SAML response and creating a local user account if one doesn't exist. but i'm doing it all in the route handler — no separate service layer. so `routes.py` just got another 120 lines longer
+
+[2025-04-07 11:09:15] jess.nakamura
+routes.py is now what, 2,400 lines?
+
+[2025-04-07 11:09:38] marcus.webb
+2,367. but who's counting
+
+[2025-04-07 11:09:55] danny.okafor
+i am, apparently
+
+[2025-04-07 11:10:18] lina.torres
+for reference, our entire infrastructure config is about 200 lines total. routes.py is 12x our infra
+
+[2025-04-07 11:10:41] marcus.webb
+look, i know it's big. but splitting it up right now would mean touching every import, every test— well, if we had tests. it would mean touching every import and every other file that references routes. it's a refactor that takes a full day minimum and we don't have that day this week
+
+[2025-04-07 11:11:04] priya.kaur
+agreed. routes.py refactor goes on the testing sprint backlog. for now it works
+
+[2025-04-07 11:11:27] danny.okafor
+added to the list :clipboard:
+
+---
+
+[2025-04-07 11:45:33] danny.okafor
+ok weird bug. i'm trying to send a test notification email and the email isn't arriving. no errors in the logs either. the sendgrid API call returns 202 (accepted) but the email never shows up in my inbox
+
+[2025-04-07 11:45:58] jess.nakamura
+check your spam folder?
+
+[2025-04-07 11:46:21] danny.okafor
+first thing i checked. not there
+
+[2025-04-07 11:46:44] marcus.webb
+are you using the prod sendgrid key or the sandbox one?
+
+[2025-04-07 11:47:07] danny.okafor
+...where do i find which one i'm using?
+
+[2025-04-07 11:47:30] marcus.webb
+check your .env file. if `SENDGRID_API_KEY` starts with `SG.test_` it's the sandbox key, which accepts the API call but doesn't actually send the email
+
+[2025-04-07 11:47:53] danny.okafor
+oh. yep. it's the sandbox key. where's the real key?
+
+[2025-04-07 11:48:16] marcus.webb
+i'll DM it to you. don't commit it to the repo
+
+[2025-04-07 11:48:39] danny.okafor
+:thumbsup: thanks
+
+[2025-04-07 11:49:02] lina.torres
+we should really have a shared secrets manager for this stuff. right now API keys are in .env files on individual laptops and on the prod server. if marcus gets hit by a bus, half our integration keys are gone
+
+[2025-04-07 11:49:25] marcus.webb
+they're not ALL on my laptop. some are in a google doc
+
+[2025-04-07 11:49:48] lina.torres
+a google doc. our API keys are in a google doc
+
+[2025-04-07 11:50:11] marcus.webb
+it's a private doc! shared with the team. it's fine
+
+[2025-04-07 11:50:34] lina.torres
+it's really not fine. we should use vault or doppler or at bare minimum 1password for teams. i can set up doppler in an afternoon
+
+[2025-04-07 11:50:57] priya.kaur
+after the demos. put it on the list, lina
+
+[2025-04-07 11:51:15] lina.torres
+:salute: on the list it goes
+
+---
+
+[2025-04-07 12:22:18] jess.nakamura
+admin console update. the customer list is done, subscription management is done, i'm working on the usage graphs now. using chart.js for the visualizations. here's what the usage dashboard will show:
+
+- **Documents uploaded** (daily, weekly, monthly)
+- **Storage used** (per org, with breakdown by file type)
+- **API calls** (per endpoint, per org)
+- **Active users** (daily active, monthly active)
+
+all pulling from the audit_events table that we added last week. the audit logging is actually perfect for this — every API call is already tracked with timestamp, user, org, and endpoint
+
+[2025-04-07 12:22:45] priya.kaur
+love it. this is going to look great in the belmont demo
+
+[2025-04-07 12:23:08] danny.okafor
+wait, you're querying the audit_events table directly for the dashboard? that table is going to get huge. every single API request generates an audit event. if belmont sends 50 users doing 100 API calls a day, that's 5,000 new rows per day per customer
+
+[2025-04-07 12:23:31] jess.nakamura
+yeah it'll grow. but postgres can handle millions of rows no problem. i added an index on (org_id, timestamp) which covers the main query pattern
+
+[2025-04-07 12:23:54] danny.okafor
+sure, but the dashboard queries will get slower over time as the table grows. shouldn't we pre-aggregate the stats into a summary table? like a daily_usage_stats table that gets updated by a cron job?
+
+[2025-04-07 12:24:17] jess.nakamura
+that's a good idea for the future but right now the audit table has like 50,000 rows total. the dashboard queries take 12ms. we'll optimize when it becomes a problem
+
+[2025-04-07 12:24:40] marcus.webb
+the classic startup approach: make it work, make it right, make it fast. we're solidly in "make it work" territory
+
+[2025-04-07 12:24:58] danny.okafor
+and we'll do "make it right" during the testing sprint in may?
+
+[2025-04-07 12:25:21] marcus.webb
+exactly :point_up:
+
+    :joy: (2) jess.nakamura, lina.torres
+
+---
+
+[2025-04-07 13:15:44] marcus.webb
+heads up, i just added a cron job to the prod server. it runs the seat count reporter for the metered billing customers. every night at 3am UTC it counts active users per org and sends the numbers to stripe
+
+[2025-04-07 13:16:08] lina.torres
+marcus. i literally asked you last week to tell me BEFORE you add things to the production server
+
+[2025-04-07 13:16:31] marcus.webb
+i know, i know. i'm sorry. i was in the zone and wanted to get it deployed before the demo. here's the crontab entry:
+
+```
+0 3 * * * /usr/bin/python3 /opt/foldly/scripts/report_seat_usage.py >> /var/log/foldly/seat_usage.log 2>&1
+```
+
+it takes about 15 seconds to run. queries the users table, groups by org, hits the stripe API for each metered customer
+
+[2025-04-07 13:16:58] lina.torres
+ok. so now we have on the prod server:
+1. the app itself (gunicorn, 4 workers)
+2. thumbnail cleanup cron (daily, 4am UTC)
+3. analytics email cron (weekly, monday 6am UTC)
+4. log rotation cron (daily, midnight UTC)
+5. seat usage reporter (daily, 3am UTC)
+6. db backup (daily, 2am UTC)
+
+that's six things running on a single server with no monitoring, no alerting, and no documentation besides my notion page that nobody reads
+
+[2025-04-07 13:17:24] marcus.webb
+when you list it out like that it sounds bad
+
+[2025-04-07 13:17:47] lina.torres
+it IS bad. if that server goes down, everything goes down. there's no failover, no redundancy. and nobody will know it's down until a customer reports it or one of us happens to check
+
+[2025-04-07 13:18:10] priya.kaur
+lina, you're right. monitoring and alerting should be a priority. can you set up basic uptime monitoring this week? even just a ping check that notifies the slack channel if the server is unreachable
+
+[2025-04-07 13:18:33] lina.torres
+i can set up uptime robot in 15 minutes. it'll check the health endpoint every 5 minutes and ping #engineering if it goes down. i'll do it right now
+
+[2025-04-07 13:18:56] priya.kaur
+do it. and marcus — please, please tell lina before you add things to prod
+
+[2025-04-07 13:19:19] marcus.webb
+i promise. lina i owe you a coffee
+
+[2025-04-07 13:19:38] lina.torres
+you owe me several coffees at this point
+
+    :joy: (3) priya.kaur, jess.nakamura, danny.okafor
+
+---
+
+[2025-04-07 13:55:22] danny.okafor
+notification triggers are mostly working. i have email alerts firing for:
+- document shared with you
+- new comment on your document
+- subscription expiring in 7 days
+
+but i ran into an issue with the comment notifications. the `add_comment` function in routes.py doesn't return the document owner's user ID, so i have to do a separate DB query to look it up. i added the query inline in the route handler
+
+[2025-04-07 13:55:48] jess.nakamura
+you added more code to routes.py?
+
+[2025-04-07 13:56:11] danny.okafor
+i know, i know. just 15 lines. but yeah. routes.py is now 2,382 lines
+
+[2025-04-07 13:56:34] marcus.webb
+we should start a pool for when it hits 3,000
+
+[2025-04-07 13:56:57] jess.nakamura
+i give it two weeks
+
+[2025-04-07 13:57:15] lina.torres
+i give it by next friday if we keep going at this pace
+
+    :chart_with_upwards_trend: (2) danny.okafor, marcus.webb
+
+[2025-04-07 13:57:38] danny.okafor
+seriously though. when we do the testing sprint, can we also allocate time for splitting routes.py? it's getting to the point where it's genuinely hard to work in. i spent 20 minutes today just finding the right function to modify
+
+[2025-04-07 13:58:01] priya.kaur
+yes. testing sprint in may includes routes.py refactor. danny, add it to the sprint backlog you're maintaining
+
+[2025-04-07 13:58:24] danny.okafor
+already there. it's item #2 after "write unit tests for billing.py"
+
+---
+
+[2025-04-07 14:05:44] danny.okafor
+random question. does anyone else find it weird that we have no linting or formatting configured? i opened billing.py this morning and there are three different indentation styles. some functions use 4 spaces, some use tabs, and one section near the bottom uses 2 spaces
+
+[2025-04-07 14:06:08] marcus.webb
+that would be the section i wrote at 3am on a laptop with a broken tab key. my apologies
+
+[2025-04-07 14:06:31] danny.okafor
+i'm not blaming anyone, i just think we should pick a style and enforce it. i set up ruff on my local machine and it flagged 247 issues across the codebase. most are minor — unused imports, inconsistent whitespace, missing f-string prefixes — but some are actual bugs. there are two variables that shadow built-in names that could cause really confusing behavior
+
+[2025-04-07 14:06:54] jess.nakamura
+which built-ins?
+
+[2025-04-07 14:07:17] danny.okafor
+there's a `type` variable in the document handler (shadows the `type()` built-in) and a `list` variable in the search results formatter (shadows `list()`). neither is causing bugs right now but if someone tries to use `type()` or `list()` in those functions they'll get a very confusing error
+
+[2025-04-07 14:07:40] marcus.webb
+huh. yeah that's not great. but also... it's been working fine for months. if it's not broken...
+
+[2025-04-07 14:08:03] danny.okafor
+i could set up ruff as a pre-commit hook. it would take like 20 minutes. then it would catch this stuff automatically before anyone pushes
+
+[2025-04-07 14:08:26] priya.kaur
+not this week danny. i don't want a pre-commit hook blocking anyone from pushing code during demo prep. if marcus's deploy gets blocked by a lint error at 11pm the night before the demo, that's worse than having inconsistent indentation
+
+[2025-04-07 14:08:49] danny.okafor
+that's fair. testing sprint?
+
+[2025-04-07 14:09:07] priya.kaur
+testing sprint
+
+[2025-04-07 14:09:30] danny.okafor
+added to the backlog. item #6: "set up ruff linter and pre-commit hooks"
+
+[2025-04-07 14:09:53] marcus.webb
+the testing sprint backlog is going to be longer than routes.py at this rate
+
+[2025-04-07 14:10:12] lina.torres
+maybe we need a testing sprint for the testing sprint
+
+    :joy: (3) jess.nakamura, danny.okafor, marcus.webb
+
+---
+
+[2025-04-07 14:30:08] jess.nakamura
+admin console usage graphs are done. here's what it looks like:
+
+```
+Nara Logistics — Usage Dashboard (Last 30 days)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Documents Uploaded:  1,247  (+18% vs prev month)
+Storage Used:        4.8 GB
+API Calls/Day:       ~3,200 (avg)
+Active Users:        34 of 50 seats (68%)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+charts for daily docs uploaded, storage growth over time, API calls by endpoint, and active user trends. all filterable by date range and customer
+
+[2025-04-07 14:30:35] priya.kaur
+that's slick. nice work jess
+
+[2025-04-07 14:30:58] danny.okafor
+looks great. one question — the "active users" metric, how are you defining active? any API call counts?
+
+[2025-04-07 14:31:21] jess.nakamura
+any authenticated API call. so if a user logs in and does literally anything — views a doc, uploads, searches — they're counted as active for that day. login alone doesn't count since that's the auth endpoint
+
+[2025-04-07 14:31:44] danny.okafor
+makes sense. what about automated API calls from integrations? like if someone has a script that uploads docs via the API
+
+[2025-04-07 14:32:07] jess.nakamura
+right now it counts those too. we should probably filter out API key auth vs session auth at some point to distinguish human users from automated ones. but for the demo, total active is fine
+
+[2025-04-07 14:32:30] marcus.webb
+that matters for metered billing actually. if automated API calls count as "active users" and we bill per seat, customers might complain that their scripts are inflating their bill
+
+[2025-04-07 14:32:53] jess.nakamura
+good point. we should figure out how to handle that before we actually bill anyone on the metered plan
+
+[2025-04-07 14:33:16] priya.kaur
+add it to the list. for the demo it's fine as-is. we can refine the definition before we flip anyone to metered billing
+
+[2025-04-07 14:33:39] danny.okafor
+the list :scroll:
+
+---
+
+[2025-04-07 15:02:17] marcus.webb
+SSO is fully working now. here's what the flow looks like:
+
+1. User clicks "Sign in with SSO" on our login page
+2. We redirect to their identity provider (Azure AD, Okta, whatever)
+3. User authenticates with their corporate credentials
+4. IdP sends a SAML assertion back to our callback URL
+5. We parse the assertion, extract email + name + role
+6. If user exists, log them in. If not, create account and log them in
+7. Set session cookie, redirect to dashboard
+
+tested with belmont's Azure AD instance. login works, user creation works, session management works. the SAML parsing is handled by the python3-saml library which does all the signature verification and assertion decoding
+
+[2025-04-07 15:02:44] priya.kaur
+does it handle logout? some enterprise clients need single logout (SLO) — when you log out of the IdP, you're logged out of all connected apps
+
+[2025-04-07 15:03:07] marcus.webb
+not yet. right now logging out of foldly destroys the local session but doesn't notify the IdP. SLO is more complex — requires us to implement the SAML logout endpoint and handle the IdP's logout requests. i'd say that's a v2 thing
+
+[2025-04-07 15:03:30] priya.kaur
+fine. for the demo, login is what matters. belmont won't test logout during a 30-minute demo
+
+[2025-04-07 15:03:53] danny.okafor
+famous last words
+
+[2025-04-07 15:04:10] marcus.webb
+:grimacing:
+
+[2025-04-07 15:04:33] jess.nakamura
+did you write any tests for the SSO flow? the SAML parsing especially seems like the kind of thing that could break in subtle ways
+
+[2025-04-07 15:04:56] marcus.webb
+i tested it manually. went through the whole flow three times with belmont's staging IdP. parsed the assertion, checked the signature, verified the claims. it works
+
+[2025-04-07 15:05:19] jess.nakamura
+manual testing is fine for now but SAML assertions have like 20 different edge cases. expired assertions, audience restriction mismatches, replay attacks... the python3-saml library handles most of it but our integration code around it should really have test coverage
+
+[2025-04-07 15:05:42] marcus.webb
+yep. testing sprint material
+
+[2025-04-07 15:06:01] danny.okafor
+added to the sprint backlog: "SSO/SAML integration tests — assertion parsing edge cases"
+
+[2025-04-07 15:06:24] marcus.webb
+you're going to have the most organized testing sprint backlog in startup history
+
+[2025-04-07 15:06:47] danny.okafor
+someone has to. i started a google sheet. 23 items so far
+
+[2025-04-07 15:07:04] lina.torres
+oh good another google doc nobody will read :joy:
+
+[2025-04-07 15:07:27] danny.okafor
+i will read it. during the testing sprint. which IS happening. may 5th. it's on the calendar. priya promised
+
+[2025-04-07 15:07:50] priya.kaur
+i did promise. and we'll do it. but first — demos. let's finish strong this week
+
+---
+
+[2025-04-07 15:45:11] lina.torres
+uptime monitoring is live. uptime robot checks `https://app.foldly.io/health` every 5 minutes. if it fails 3 consecutive checks (15 minutes of downtime), it sends an alert to #alerts and pages me on pagerduty
+
+[2025-04-07 15:45:38] priya.kaur
+nice. what does the health endpoint check?
+
+[2025-04-07 15:46:01] lina.torres
+right now it just checks that the web server is responding. returns 200 if gunicorn is up. it doesn't check database connectivity, redis, or any downstream services. a deeper health check would be smart but this is the minimum viable version
+
+[2025-04-07 15:46:24] danny.okafor
+so if the database goes down but the web server is still running, the health check would pass even though the app is broken?
+
+[2025-04-07 15:46:47] lina.torres
+correct. the health endpoint should really do a `SELECT 1` against the database and check that the response time is under some threshold. i'll add that when i have time
+
+[2025-04-07 15:47:10] priya.kaur
+good enough for now. at least we'll know if the whole server falls over
+
+[2025-04-07 15:47:28] lina.torres
+baby steps
+
+---
+
+[2025-04-07 16:12:33] danny.okafor
+notification system is done. three email triggers working:
+
+1. **Document shared** — fires when `share_document()` completes successfully. sends to the recipient with doc name, who shared it, and a direct link
+2. **New comment** — fires when `add_comment()` completes. sends to doc owner and all previous commenters. includes the comment text and a link to the doc
+3. **Subscription expiring** — background job checks daily for subscriptions expiring within 7 days. sends to the org admin
+
+all using sendgrid. HTML templates with the foldly branding. i put the email rendering logic inside routes.py alongside the handlers that trigger the notifications
+
+[2025-04-07 16:13:00] jess.nakamura
+more code in routes.py?
+
+[2025-04-07 16:13:23] danny.okafor
+i didn't want to create a new file and deal with import cycles. the notification code needs access to the DB session, the sendgrid client, and the user model, which are all already imported in routes.py. putting it in a separate file would mean either duplicating the imports or refactoring the dependency chain
+
+[2025-04-07 16:13:46] marcus.webb
+welcome to the routes.py black hole. everything goes in, nothing comes out
+
+[2025-04-07 16:14:09] lina.torres
+what's the line count now?
+
+[2025-04-07 16:14:28] danny.okafor
+2,451
+
+[2025-04-07 16:14:51] jess.nakamura
+it's growing faster than our user base
+
+    :skull: (4) marcus.webb, lina.torres, danny.okafor, priya.kaur
+
+[2025-04-07 16:15:14] priya.kaur
+ok ok. we all agree routes.py is too big. may 5th. it will be dealt with. for now — danny, does the notification system work?
+
+[2025-04-07 16:15:37] danny.okafor
+tested all three triggers manually. emails arrive within 30 seconds. templates look good on both gmail and outlook
+
+[2025-04-07 16:15:55] priya.kaur
+ship it
+
+[2025-04-07 16:16:18] danny.okafor
+already deployed :rocket:
+
+---
+
+[2025-04-07 16:30:55] danny.okafor
+hey random question for the group. when i was hooking up the comment notification trigger, i noticed the `add_comment` handler doesn't validate the comment body at all. no length check, no sanitization, no rate limiting. you could POST a 50MB string as a comment and it would just write it straight to the database
+
+[2025-04-07 16:31:18] marcus.webb
+yeah the input validation across the API is pretty minimal. most endpoints just trust that the client is sending reasonable data. the frontend does client-side validation but the API itself doesn't enforce anything
+
+[2025-04-07 16:31:41] danny.okafor
+that's... concerning from a security perspective. if anyone hits the API directly (which enterprise customers will, via integrations) they could send malformed data, overflow fields, or worse
+
+[2025-04-07 16:32:04] jess.nakamura
+or inject HTML into comment bodies that gets rendered unescaped in the UI. i'm pretty sure the comment display component doesn't sanitize output either
+
+[2025-04-07 16:32:27] danny.okafor
+so we have no input validation AND no output sanitization?
+
+[2025-04-07 16:32:50] marcus.webb
+we've been building for speed, not security hardening. the plan has always been to go back and add that stuff
+
+[2025-04-07 16:33:13] danny.okafor
+let me guess — testing sprint?
+
+[2025-04-07 16:33:31] priya.kaur
+testing sprint. danny, add input validation and XSS sanitization to the backlog
+
+[2025-04-07 16:33:54] danny.okafor
+items #24 and #25. the backlog is now longer than most of our source files
+
+[2025-04-07 16:34:12] lina.torres
+except routes.py
+
+    :point_up: (2) danny.okafor, jess.nakamura
+
+---
+
+[2025-04-07 16:48:02] marcus.webb
+quick deployment note — i pushed the SSO code to prod. restarted the app, took about 4 seconds of downtime. no issues
+
+[2025-04-07 16:48:25] lina.torres
+did you use the deploy script i started writing or did you just git pull on the server?
+
+[2025-04-07 16:48:48] marcus.webb
+git pull. your script isn't done yet right?
+
+[2025-04-07 16:49:11] lina.torres
+it's half done. it has the lock file but not the health check. but the lock file alone would have prevented the collision issue from last week
+
+[2025-04-07 16:49:34] marcus.webb
+fair. i'll use the script next time. sorry lina
+
+[2025-04-07 16:49:52] lina.torres
+it's fine. i'll finish the script tonight
+
+---
+
+[2025-04-07 17:05:18] priya.kaur
+EOD status. incredible output today:
+
+- SSO: SAML flow fully working, tested with belmont's Azure AD :white_check_mark:
+- Admin console: customer list, subscriptions, usage graphs all done :white_check_mark:
+- Notifications: three email triggers deployed :white_check_mark:
+- Metered billing: seat usage cron deployed :white_check_mark:
+- Uptime monitoring: live and alerting :white_check_mark:
+- Log rotation: fixed, won't fill disk again :white_check_mark:
+
+we are in great shape for the belmont demo wednesday. jess — any remaining admin console work?
+
+[2025-04-07 17:05:45] jess.nakamura
+just the audit log viewer and the CSV export. couple hours of work tomorrow morning
+
+[2025-04-07 17:06:08] priya.kaur
+ok. let's all be on standby wednesday for the demo. marcus will drive the SSO portion, jess handles the admin console and audit log, danny shows the notification system. lina — make sure staging is stable
+
+[2025-04-07 17:06:31] lina.torres
+staging will be ready. i'm going to mirror the prod config tonight. one thing — are we demoing on staging or prod?
+
+[2025-04-07 17:06:54] priya.kaur
+staging. we don't want to risk anything weird happening on prod during a live demo
+
+[2025-04-07 17:07:17] lina.torres
+agreed. i'll make sure staging has the latest code and a copy of the demo data
+
+[2025-04-07 17:07:40] danny.okafor
+should we do a practice run tomorrow? walk through the whole demo once to make sure nothing breaks?
+
+[2025-04-07 17:08:03] priya.kaur
+yes, good idea. let's do a dry run tomorrow at 3pm. everyone present, we go through the demo script start to finish
+
+[2025-04-07 17:08:22] marcus.webb
+sounds good. i'll prep the SSO demo flow tonight. need to make sure the test IdP account still works
+
+[2025-04-07 17:08:45] jess.nakamura
+i'll have the audit log viewer and CSV export done by then
+
+[2025-04-07 17:09:08] danny.okafor
+i'll prep some test scenarios for the notification triggers. share a doc, add a comment, watch the emails come in
+
+[2025-04-07 17:09:31] lina.torres
+i'll have the deploy script finished and staging mirrored
+
+[2025-04-07 17:09:54] priya.kaur
+this team :muscle: ok, signing off. get some rest tonight, big week ahead
+
+[2025-04-07 17:10:17] marcus.webb
+rest? what's that? i'm going to go stare at SAML assertions for two more hours
+
+[2025-04-07 17:10:40] jess.nakamura
+spoken like a true backend dev
+
+[2025-04-07 17:10:58] danny.okafor
+goodnight team. may our deploys be clean and our routes.py finite
+
+    :joy: (4) priya.kaur, marcus.webb, jess.nakamura, lina.torres
+
+[2025-04-07 17:11:21] lina.torres
+finite? that's an aspirational word for that file
+
+[2025-04-07 17:11:44] marcus.webb
+routes.py will outlive us all
+
+================================================================================
+END EXPORT — 256 messages, 2025-04-07
+================================================================================

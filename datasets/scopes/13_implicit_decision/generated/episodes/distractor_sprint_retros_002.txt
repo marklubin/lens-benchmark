@@ -1,0 +1,587 @@
+CRESCENDO LABS — SPRINT 15 RETROSPECTIVE
+Date: 2025-06-18 (Wednesday)
+Time: 3:00–4:20 PM CT
+Location: Zoom (Meeting ID: 845-2391-0076)
+Facilitator: Kai Nakamura (Scrum Master)
+Team: Horizon Squad (backend services team)
+Attendees: Kai Nakamura, Derek Lane (Tech Lead), Priti Sharma, Angela Fong, Marcus Webb, Yuto Hayashi, Simone Osei
+Absent: None
+Sprint: Sprint 15 ("Tidewater")
+Sprint Duration: 2 weeks (2025-06-05 — 2025-06-18)
+Velocity: 24 story points completed / 24 committed (100%)
+Carry-over from Sprint 14: 0 story points
+
+---
+
+PRE-RETRO NOTES
+
+[Kai Nakamura shared screen with Jira sprint board at 3:00 PM. All 8 tickets in the "Done" column. Zero in "In Progress" or "In Review."]
+
+[Kai Nakamura — 3:01 PM]
+Before we jump in — just want to note for the recording that everyone's here, no absences. I've pulled up the sprint board so we can all see the same picture. Everything's in the Done column, which we'll talk about. Let me share the summary slide.
+
+---
+
+SPRINT SUMMARY
+
+**Sprint Goal:** Complete payment reconciliation retry logic and launch partner onboarding API.
+
+**What shipped:**
+- Payment reconciliation retry logic (state machine, idempotency, dead-letter queue) — 13 pts
+  - JIRA: HOR-421, HOR-422, HOR-423
+  - Owner: Marcus Webb, with review from Derek Lane
+  - PR #1187 (state machine core), PR #1192 (idempotency layer), PR #1198 (dead-letter queue integration)
+- Partner onboarding API (registration, key provisioning, sandbox environment) — 8 pts
+  - JIRA: HOR-430, HOR-431
+  - Owner: Angela Fong, Simone Osei
+  - PR #1189 (registration endpoint), PR #1194 (key provisioning + sandbox)
+- PgBouncer monitoring dashboard (Grafana) — 3 pts
+  - JIRA: HOR-435
+  - Owner: Yuto Hayashi, paired with Derek Lane
+  - PR #1201 (Grafana JSON model + Terraform)
+
+**Unplanned work accepted:**
+- None (first sprint with the new scope change policy!)
+
+**Incidents during sprint:**
+- None
+
+**Design reviews conducted (new policy):**
+- Payment reconciliation retry logic: 45-minute design review with Derek and Marcus. Identified 3 edge cases that would have caused bugs. Estimated savings: ~2 days of debugging.
+- Partner onboarding API: 30-minute design review with Angela and Simone. Simplified the key provisioning flow from 5 steps to 3.
+
+**CI/CD stats:**
+- 18 pipeline runs, 16 green on first pass (88.9% first-pass rate)
+- 2 flaky failures: both from the known `test_notification_delivery_timeout` issue (HOR-298, scheduled for tech debt)
+- Average pipeline duration: 8m 42s (down from 9m 15s last sprint — Yuto's parallel test stage change landed)
+
+---
+
+RETRO FORMAT: START / STOP / CONTINUE
+
+[Kai Nakamura — 3:05 PM]
+100% velocity! First time this quarter. Let's dig into what worked and what we want to keep improving. Same format — 5 minutes to write, then we discuss. Remember, the Miro board is open — drop your stickies in the right column. Green for Start, red for Stop, blue for Continue.
+
+[Priti Sharma — 3:05 PM]
+Are we doing dot-voting after, or just discussion?
+
+[Kai Nakamura — 3:06 PM]
+Let's skip dot-voting this time since we only have 7 people. We'll just discuss each item. If something is contentious we can vote, but I don't expect much disagreement given how well the sprint went.
+
+[5-minute silent writing period]
+
+[Kai Nakamura — 3:12 PM]
+The board looks positive. I count... 3 Start items, 2 Stop items, 4 Continue items. Let's walk through it. Starting with the green stickies.
+
+---
+
+SECTION: START
+
+**Item: Start time-boxing investigation/research spikes**
+Written by: Angela Fong
+
+[Angela Fong — 3:14 PM]
+This sprint went well but I want to flag something for the future. The partner onboarding API required me to evaluate three different API key generation libraries. I spent a full day comparing them before choosing one. In hindsight, the differences were marginal and any of them would have worked. I should have time-boxed the research to 2 hours and just picked one.
+
+[Simone Osei — 3:14 PM]
+Which three were you looking at? I'm curious because I've done similar evaluations before and run into the same thing.
+
+[Angela Fong — 3:15 PM]
+`python-jose`, `PyJWT`, and `authlib`. They all support JWK generation, they're all maintained, they all have decent documentation. I went deep on benchmarking their key generation throughput, which was completely irrelevant — we generate maybe 50 keys a day. I was optimizing for a scale we'll never hit.
+
+[Derek Lane — 3:15 PM]
+This is a common trap in engineering — analysis paralysis on library/tool selection. I've seen teams spend a week evaluating message queues when any of the top 3 options would have been fine.
+
+[Marcus Webb — 3:16 PM]
+I've done the same thing. When we were picking the state machine library for the reconciliation work, I spent half a day comparing `transitions` vs `python-statemachine` vs rolling our own. Derek pulled me out of it — said "just pick transitions, it has the most GitHub stars and the docs are fine."
+
+[Priti Sharma — 3:16 PM]
+What about consequential choices? Some library decisions ARE important — like choosing between a maintained and an abandoned library.
+
+[Angela Fong — 3:17 PM]
+Agreed. I'm specifically talking about choices between equivalent options. When the top candidates are all well-maintained, popular, and fit the use case, stop comparing and pick one.
+
+[Priti Sharma — 3:17 PM]
+That distinction matters. We should be clear about it in whatever guidance we write. "Equivalent options" is the key phrase. If one library hasn't had a commit in two years, that's not an equivalent option.
+
+[Yuto Hayashi — 3:18 PM]
+I ran into this last month with the Grafana provisioning approach — Terraform vs Helm chart vs raw JSON. Spent four hours going back and forth. Derek eventually said "we already use Terraform for everything else, just use Terraform." Five-second decision if I'd just asked.
+
+[Kai Nakamura — 3:18 PM]
+Proposal: investigation/research spikes get a time-box in the ticket description. Default: 2 hours for library/tool selection, 4 hours for architectural research, 1 day for proof-of-concept spikes. If you hit the time-box without a conclusion, bring it to the team.
+
+[Yuto Hayashi — 3:19 PM]
+That's practical. The "bring it to the team" escape valve is important — sometimes research genuinely needs more time.
+
+[Derek Lane — 3:19 PM]
+And when you do bring it to the team, come with your top 2 options and the specific dimension you can't decide on. Don't come with "I don't know what to pick." Come with "I'm stuck between A and B, and the deciding factor is X. What do you all think about X?"
+
+[Simone Osei — 3:20 PM]
+Can we add the time-box defaults to the Jira ticket template so people see them when they create a ticket?
+
+[Kai Nakamura — 3:20 PM]
+Yes, I'll add it to the investigation/spike template. Good call.
+
+[Kai Nakamura — 3:20 PM]
+**Decision: We decided to time-box all investigation/research spikes.** Default time-boxes: 2 hours for library/tool selection, 4 hours for architectural research, 1 day for POC spikes. Exceeding the time-box requires team discussion.
+
+---
+
+**Item: Start writing runbooks for new services before they ship**
+Written by: Marcus Webb
+
+[Marcus Webb — 3:22 PM]
+The payment reconciliation service shipped but we don't have a runbook for it yet. If it goes down at 3am, the on-call engineer (who might not be the person who built it) has to figure out how to debug it from scratch. That's not fair to the on-call person and it increases MTTR.
+
+[Yuto Hayashi — 3:22 PM]
+Seconding this. I was on-call two sprints ago when the notification service had that connectivity issue. I'd never touched that service. I spent 45 minutes just figuring out which logs to look at and what the expected behavior was. A runbook would have cut that to 5 minutes.
+
+[Simone Osei — 3:23 PM]
+Same for the partner onboarding API. I built it but if I'm on vacation and it breaks, someone else needs to know how to diagnose issues, restart the service, check the key provisioning state, etc.
+
+[Angela Fong — 3:24 PM]
+And the key provisioning has a specific recovery procedure — if a key generation gets stuck in the PENDING state, you need to manually transition it to FAILED in the database and then re-trigger the provisioning job. That's not obvious from the code.
+
+[Derek Lane — 3:24 PM]
+This is a "definition of done" issue. A service isn't done until it has a runbook. What should the runbook cover?
+
+[Marcus Webb — 3:25 PM]
+At minimum:
+1. Service overview (what it does, who uses it)
+2. System diagram (dependencies, data flows)
+3. How to check service health
+4. Common failure modes and remediation steps
+5. How to restart/rollback
+6. Relevant log locations and search queries
+7. Escalation contacts
+
+[Priti Sharma — 3:26 PM]
+I'd add an 8th: "Known sharp edges" — things that are counterintuitive or easy to get wrong. Like the key provisioning PENDING state thing Angela just mentioned.
+
+[Marcus Webb — 3:26 PM]
+Good addition. The sharp edges section is where the tribal knowledge lives, and it's exactly what the on-call person needs at 3am.
+
+[Angela Fong — 3:27 PM]
+That's a lot of documentation. Are we going to maintain it?
+
+[Marcus Webb — 3:28 PM]
+It doesn't have to be perfect. A half-page doc with the 5 most common failure modes is 10x better than nothing. We can iterate on it as we learn more about the service in production.
+
+[Derek Lane — 3:28 PM]
+I'd say the minimum viable runbook is: (1) what is this service, (2) how do I know it's healthy, (3) what breaks and how do I fix it. You can write that in 30 minutes. Everything else is nice-to-have.
+
+[Simone Osei — 3:29 PM]
+Where do these live? Confluence? GitHub wiki? In the repo?
+
+[Derek Lane — 3:29 PM]
+In the repo. `docs/runbook.md` in each service repo. That way the runbook is versioned with the code and you can update it in the same PR that changes the behavior.
+
+[Kai Nakamura — 3:29 PM]
+**Decision: We decided to add runbook creation to our definition of done for new services.** Minimum runbook must include: service overview, health check, top 5 failure modes with remediation, and escalation contacts. Must be completed before the service ships to production.
+
+[Kai Nakamura — 3:30 PM]
+And the runbooks will live in `docs/runbook.md` in each service repo, as Derek suggested. Marcus, you'll backfill the payment reconciliation runbook, and Simone, you'll do the partner onboarding API?
+
+[Marcus Webb — 3:30 PM]
+On it.
+
+[Simone Osei — 3:30 PM]
+Yep, I'll have it done by end of Sprint 16 Day 5.
+
+---
+
+**Item: Start doing monthly tech debt reviews**
+Written by: Derek Lane
+
+[Derek Lane — 3:31 PM]
+We've been good about shipping features but tech debt is accumulating silently. The PgBouncer work this sprint was tech debt — we had to tune it because the original configuration wasn't sized for current load. There's more like this lurking:
+
+- The event processing pipeline has a hardcoded batch size of 100 that was set when we had 1/10th the current volume
+- The notification service uses polling instead of an event-driven design
+- Three of our database migrations are missing down-migration scripts
+- The partner API test suite has 14 tests marked `@pytest.mark.skip("flaky")`
+
+None of these are urgent but they'll all become urgent if we ignore them long enough.
+
+[Marcus Webb — 3:32 PM]
+The flaky tests one bugs me. Every time I see a skip annotation I think "that's a test we're not running, which means it's a behavior we're not verifying." Fourteen of them is a lot.
+
+[Yuto Hayashi — 3:33 PM]
+Some of those are mine. They're flaky because they depend on timing — they're integration tests that assert on response times, and they fail when the CI runner is under load. I couldn't figure out how to make them reliable without making them useless.
+
+[Derek Lane — 3:33 PM]
+That's exactly the kind of thing the tech debt review would surface. We'd look at those 14 tests, categorize them — some might need to be rewritten as proper integration tests with retries, some might need to be deleted because they're testing the wrong thing, some might just need a larger timeout.
+
+[Priti Sharma — 3:33 PM]
+Monthly feels right. Quarterly is too infrequent — by the time we review, the debt has compounded.
+
+[Angela Fong — 3:34 PM]
+How long would the review meeting be?
+
+[Derek Lane — 3:34 PM]
+I'm thinking 45 minutes. First 15 minutes: walk through new items added to the register since last month. Next 15: discuss priorities. Final 15: assign what we'll tackle next sprint.
+
+[Yuto Hayashi — 3:34 PM]
+Can we allocate specific sprint capacity for tech debt? Like 10% of story points per sprint reserved for debt reduction?
+
+[Derek Lane — 3:35 PM]
+That's the ideal but product will push back on reducing feature capacity. I'd start with the monthly review to make the debt visible, then use the data to justify dedicated capacity.
+
+[Priti Sharma — 3:35 PM]
+Data is key. If we can show "we have 47 tech debt items, 8 are high severity, and 3 of them contributed to incidents in the last quarter" — that's a compelling argument for dedicated capacity.
+
+[Simone Osei — 3:36 PM]
+Can we use a severity scale? Like S1 = will cause an incident if not fixed, S2 = degrading developer experience, S3 = cosmetic/nice-to-have?
+
+[Derek Lane — 3:36 PM]
+Yes, that's what the register would capture. Item, severity, estimated effort, risk if ignored. Simple spreadsheet to start. We can move it to Jira later if it grows.
+
+[Kai Nakamura — 3:36 PM]
+**Decision: We decided to hold a monthly tech debt review on the first Wednesday of each month.** Derek will maintain a tech debt register (simple spreadsheet: item, severity, estimated effort, risk if ignored). We'll use the register to prioritize tech debt tickets for sprint planning. We chose to start with visibility before committing to dedicated capacity.
+
+[Kai Nakamura — 3:37 PM]
+First review will be July 2nd. Derek, can you have the initial register seeded with the items you listed by then?
+
+[Derek Lane — 3:37 PM]
+Absolutely. I'll also do a quick pass through our repos for other obvious items — TODO comments, disabled tests, deprecated library usage, that kind of thing.
+
+---
+
+SECTION: STOP
+
+**Item: Stop writing test descriptions in comments — use descriptive test names instead**
+Written by: Yuto Hayashi
+
+[Yuto Hayashi — 3:38 PM]
+I was reviewing Marcus's reconciliation tests and found a lot of this pattern:
+
+```python
+def test_retry_case_1(self):
+    """Test that a failed reconciliation with a transient error is retried
+    up to 3 times with exponential backoff."""
+    ...
+
+def test_retry_case_2(self):
+    """Test that a failed reconciliation with a permanent error is
+    not retried and goes directly to the dead-letter queue."""
+    ...
+```
+
+When the test fails in CI, you see `FAILED test_retry_case_1` — which tells you nothing. If the test was named `test_transient_error_retries_three_times_with_exponential_backoff`, the failure message is self-documenting.
+
+[Marcus Webb — 3:39 PM]
+Fair point. I was being lazy. The comment has the information but the test name doesn't.
+
+[Angela Fong — 3:40 PM]
+I had the same issue last sprint when a test failed in the partner API suite while I was on-call. The test was called `test_edge_case_3`. I had to open the file and read the docstring to understand what it was even testing. At 2am that's not fun.
+
+[Derek Lane — 3:40 PM]
+This is a code review issue. We should be catching this in reviews. But it's also a convention issue — if the convention is clear, people will follow it.
+
+[Priti Sharma — 3:41 PM]
+There's also the issue of test output readability. When you run pytest with verbose mode, you get a list of test names. If those names are descriptive, the test output reads like a specification of the system's behavior. `test_case_1, test_case_2, test_case_3` reads like nothing.
+
+[Simone Osei — 3:41 PM]
+Can we add a linting rule for minimum test name length? Something like "test function names must have at least 5 words separated by underscores."
+
+[Angela Fong — 3:42 PM]
+Five words is arbitrary. I'd rather focus on the principle: test names should describe the behavior being tested, not just "case 1, case 2."
+
+[Yuto Hayashi — 3:42 PM]
+The principle is what matters. But having a concrete example helps people follow it. Something like: instead of `test_validate_input`, write `test_validate_input_rejects_negative_amounts`. Instead of `test_retry_logic`, write `test_retry_exhausted_sends_to_dead_letter_queue`.
+
+[Marcus Webb — 3:43 PM]
+I'll go back and rename the reconciliation tests this sprint. Should only take an hour or so and it'll make the test suite much more readable.
+
+[Derek Lane — 3:43 PM]
+You don't need to do that as a separate task — just rename them when you're next touching those files. Boy Scout rule.
+
+[Kai Nakamura — 3:43 PM]
+**Decision: We decided to adopt a convention of descriptive test names that describe the tested behavior.** Format: `test_<condition>_<expected_behavior>`. Reviewers should flag generic test names (e.g., `test_case_1`) in code reviews. No automated linting for now — we'll revisit if compliance is low.
+
+[Kai Nakamura — 3:44 PM]
+Yuto, can you write up a short guide with before/after examples? Just a page in Confluence. Something people can reference during code reviews.
+
+[Yuto Hayashi — 3:44 PM]
+Sure. I'll have it done by end of next week.
+
+---
+
+**Item: Stop skipping unit tests when "it's just a small change"**
+Written by: Priti Sharma
+
+[Priti Sharma — 3:45 PM]
+The invoice rounding bug from last sprint was a "small change" — a one-line modification to the currency conversion function. No new test was written because "it's just a rounding fix, the existing tests cover it." Except the existing tests only covered USD→EUR, not EUR→USD. The asymmetric rounding was the whole bug.
+
+[Marcus Webb — 3:46 PM]
+Guilty. I made that change and skipped the test because I was in a hurry. Won't do it again.
+
+[Simone Osei — 3:46 PM]
+To be fair, the PR had 4 approvals and none of us caught it either. It's not just a Marcus problem — it's a team problem. We all looked at a one-line change and thought "that's trivial, it's fine."
+
+[Derek Lane — 3:47 PM]
+This should be a code review gate. No PR merged without tests for the changed behavior. Period.
+
+[Yuto Hayashi — 3:47 PM]
+What counts as "tests for the changed behavior" though? If I refactor a function and the existing tests still pass, do I need new tests?
+
+[Derek Lane — 3:48 PM]
+If the existing tests cover the behavior that changed, no. But the reviewer should verify that. The question isn't "are there tests" — it's "do the tests cover the thing that changed." In the rounding bug case, the answer was no. The existing tests covered one direction but not the other.
+
+[Kai Nakamura — 3:48 PM]
+We already have a coverage requirement (80% on changed files) but that's a blunt instrument — you can hit 80% coverage without testing the important behavior.
+
+[Priti Sharma — 3:49 PM]
+Exactly. Coverage is necessary but not sufficient. You can have 100% line coverage and still miss the rounding bug if your test only checks `assert result > 0` instead of `assert result == 142.37`.
+
+[Angela Fong — 3:49 PM]
+What about requiring that every PR description include a "Test Plan" section that describes what was tested and why? The reviewer checks the test plan against the code changes and flags gaps.
+
+[Marcus Webb — 3:50 PM]
+I like that. It forces the author to think about testing before they submit the PR, not after. And it gives the reviewer a checklist to verify against.
+
+[Simone Osei — 3:50 PM]
+Can we make it a required field in the PR template? So you literally can't submit a PR without filling it in?
+
+[Kai Nakamura — 3:50 PM]
+GitHub doesn't enforce it at that level — you can leave template sections empty. But we can make it a code review norm. If the Test Plan section is empty, the reviewer sends it back.
+
+[Kai Nakamura — 3:50 PM]
+**Decision: We decided to add a mandatory "Test Plan" section to our PR template.** Every PR must describe what was tested and how. Reviewers must verify the test plan covers the changed behavior. This is a code review gate — PRs without a test plan are not reviewed.
+
+---
+
+SECTION: CONTINUE
+
+**Item: Continue design reviews for 5+ point tickets**
+Written by: Derek Lane, Angela Fong, Simone Osei
+
+[Derek Lane — 3:52 PM]
+The design review policy from last sprint's retro was the single biggest improvement this sprint. The payment reconciliation design review caught 3 edge cases:
+1. What happens when a retry succeeds but the original request also eventually succeeds? (duplicate processing)
+2. What happens when the dead-letter queue is full? (backpressure)
+3. What happens when the state machine receives an event for a state it's already transitioned out of? (stale event)
+
+Each of these would have been a production bug. Instead, we handled them in the design phase and the implementation was clean.
+
+[Marcus Webb — 3:53 PM]
+From the implementer side, the design review also gave me confidence that I wasn't missing something. When Derek and I white-boarded the state transitions, I could see all the paths clearly. Without that, I would have discovered the stale event issue during testing, probably after already building the wrong thing.
+
+[Priti Sharma — 3:54 PM]
+How long did the three edge case fixes take to implement once they were identified in the design review?
+
+[Marcus Webb — 3:54 PM]
+The duplicate processing guard was about 2 hours — it was an idempotency check using the reconciliation ID. The backpressure handling was maybe 3 hours — we added a circuit breaker on the dead-letter queue producer. The stale event handling was the simplest — just an event sequence number check, maybe an hour. So about 6 hours total for all three, versus probably 2 days of debugging if we'd found them in production.
+
+[Angela Fong — 3:54 PM]
+The partner onboarding design review simplified the key provisioning flow. We went from a 5-step async flow to a 3-step sync flow that's easier to understand, test, and debug. The 30-minute review saved probably a week of implementation time.
+
+[Simone Osei — 3:55 PM]
+The original 5-step flow had this unnecessary async handoff between key generation and key storage — we were publishing to a queue and then consuming from it in the same service. In the design review, Derek asked "why is this async?" and the honest answer was "because I copied the pattern from the notification service." The notification service has a good reason to be async (external email provider). The key provisioning doesn't.
+
+[Derek Lane — 3:55 PM]
+That's a great example of how design reviews prevent accidental complexity. It's not that the 5-step flow was wrong — it would have worked. But the 3-step flow is simpler, has fewer failure modes, and is easier to reason about.
+
+[Simone Osei — 3:55 PM]
+From the reviewer side, it's also a great knowledge-sharing mechanism. I now understand the payment reconciliation system well enough to debug it on-call, even though I didn't build it. That was a free bonus of the design review.
+
+[Yuto Hayashi — 3:56 PM]
+Same here. I attended the partner onboarding review as an observer. Even though I didn't contribute much, I now know how the key provisioning works, what the database schema looks like, and where the logs go. That's on-call readiness without explicit training.
+
+[Kai Nakamura — 3:56 PM]
+Great feedback. **Continuing design reviews for 5+ point tickets. No changes needed — the policy is working well.**
+
+---
+
+**Item: Continue the scope change policy**
+Written by: Priti Sharma, Kai Nakamura
+
+[Priti Sharma — 3:57 PM]
+This is the first sprint where we had zero unplanned scope changes. That's directly because of the policy we adopted last retro. When Yuto wanted to start on the Grafana dashboard mid-sprint, we had the trade-off discussion — we agreed it was small enough to absorb without dropping anything, and we were right. But the discussion happened, which is the point.
+
+[Yuto Hayashi — 3:57 PM]
+And the discussion took 5 minutes. It wasn't bureaucratic. I said "I have bandwidth because the PgBouncer config changes went faster than estimated, can I pick up the Grafana dashboard?" The team said yes. Done.
+
+[Angela Fong — 3:58 PM]
+The previous model was: someone sees something to do, starts working on it, and tells the team later. That led to the mid-sprint scope creep we kept seeing in Sprints 12 and 13. The new model is: same thing, but you tell the team first. It's a tiny process change with a big outcome.
+
+[Kai Nakamura — 3:58 PM]
+The 100% velocity is not a coincidence. When the team commits to a scope and nothing changes mid-sprint, execution is predictable. **Continuing the scope change policy. No modifications.**
+
+[Derek Lane — 3:59 PM]
+One nuance: this only works because our sprint planning is good. If we were consistently over-committing, the scope change policy would just mean we fail predictably instead of chaotically. The policy works because the commitments are realistic.
+
+[Kai Nakamura — 3:59 PM]
+Good point. Accurate estimation + disciplined scope = predictable delivery. Both halves matter.
+
+---
+
+**Item: Continue mandatory pairing on infrastructure tickets**
+Written by: Yuto Hayashi
+
+[Yuto Hayashi — 4:00 PM]
+Derek and I paired on the PgBouncer monitoring dashboard. What would have taken me 2 days solo took 1 day paired. Derek knew exactly which metrics to track and how to set up the Grafana templates. The pairing was more efficient, not less.
+
+[Priti Sharma — 4:01 PM]
+That's counterintuitive to people who haven't tried pairing. Two engineers, one keyboard, half the throughput — right? But in practice, the person navigating catches mistakes in real time, knows the shortcuts, and prevents dead ends. You skip the "build it wrong, tear it down, rebuild it" cycle.
+
+[Yuto Hayashi — 4:01 PM]
+Exactly. Derek steered me away from at least two wrong turns. I was going to use the old-style Grafana dashboard JSON format — he pointed me to the newer dashboard-as-code approach that integrates with our Terraform pipeline. That alone saved half a day.
+
+[Derek Lane — 4:01 PM]
+Agreed. The knowledge transfer during pairing is also valuable for team resilience. If I get hit by a bus, Yuto can now maintain the PgBouncer setup.
+
+[Simone Osei — 4:02 PM]
+Angela and I also paired on the key provisioning implementation. Not infrastructure, but it had the same benefit — she caught a race condition in my sandbox environment setup that I would have shipped to production. Two eyes are better than one, especially on stateful operations.
+
+[Marcus Webb — 4:02 PM]
+Should we extend mandatory pairing beyond just infrastructure? Maybe any ticket that touches shared infrastructure, database schemas, or deployment pipelines?
+
+[Kai Nakamura — 4:02 PM]
+Let's not over-extend it. The policy works because it's targeted. If we mandate pairing on everything, it becomes burdensome and people will find ways around it. Infrastructure is the right scope for now — we can expand if we see the need.
+
+[Kai Nakamura — 4:02 PM]
+**Continuing mandatory pairing on infrastructure tickets. Working well.**
+
+---
+
+**Item: Continue async standups and Wednesday syncs**
+Written by: Simone Osei
+
+[Simone Osei — 4:03 PM]
+Just want to explicitly call this out. The move to async standups in Slack with one synchronous Wednesday midpoint check-in has been great. I save 20 minutes a day by not sitting in a standup meeting where 5 of the 7 updates aren't relevant to me. And the Wednesday sync gives us a chance to catch blockers before they fester.
+
+[Priti Sharma — 4:03 PM]
+The Slack standup threads also create a searchable record. Last week I needed to know when Marcus started on the dead-letter queue work — I just searched the standup channel and found it in 10 seconds.
+
+[Kai Nakamura — 4:04 PM]
+Continuing. No changes.
+
+---
+
+METRICS REVIEW
+
+[Kai Nakamura — 4:04 PM]
+Quick metrics review before we wrap. I pulled these from Jira and our CI dashboard this morning.
+
+**Sprint 15 vs Sprint 14:**
+| Metric | Sprint 14 | Sprint 15 | Change |
+|--------|-----------|-----------|--------|
+| Velocity (% of commitment) | 81% | 100% | +19% |
+| Unplanned scope additions | 2 | 0 | -2 |
+| Incidents | 2 | 0 | -2 |
+| Avg PR review time | 22 hours | 16 hours | -6 hrs |
+| Tests added | 34 | 52 | +18 |
+| Pairing sessions | 1 | 4 | +3 |
+
+The correlation between our new policies and the metric improvements is clear. Design reviews → fewer bugs → fewer incidents. Scope change policy → predictable execution → 100% velocity. Pairing → faster knowledge transfer → faster PR reviews.
+
+[Angela Fong — 4:06 PM]
+The PR review time drop is interesting. Is that because of pairing or because people are more available?
+
+[Kai Nakamura — 4:06 PM]
+I think it's a combination. Pairing means the pair partner has already reviewed the code informally, so the formal review is faster. Plus we have the 24-hour review SLA from two retros ago, and people are actually following it now.
+
+[Derek Lane — 4:07 PM]
+The test count jump from 34 to 52 is also notable. Design reviews front-load the understanding of edge cases, which makes it easier to write tests. When you know the 3 edge cases from the design review, you write 3 additional tests. Without the review, you write fewer tests because you don't know what you're missing.
+
+[Marcus Webb — 4:07 PM]
+One sprint is not a trend. Let's see if this holds over 3-4 sprints before we declare victory.
+
+[Kai Nakamura — 4:08 PM]
+Absolutely. But it's a promising start.
+
+[Priti Sharma — 4:08 PM]
+Can we track these metrics over time? Maybe a simple line chart on the team wiki showing velocity %, incidents, and review time across sprints? It would be nice to see the trendline.
+
+[Kai Nakamura — 4:09 PM]
+I'll set that up. Good idea. I've been tracking them in a spreadsheet already — I just need to make it visible to the team.
+
+---
+
+SHOUT-OUTS
+
+[Kai Nakamura — 4:10 PM]
+Before we get to action items, any shout-outs?
+
+[Derek Lane — 4:10 PM]
+Marcus — the state machine implementation for payment reconciliation was excellent. Clean code, thorough tests, well-documented transitions. One of the best PRs I've reviewed this quarter.
+
+[Marcus Webb — 4:10 PM]
+Thanks. The design review helped a lot. I knew exactly what I was building before I started typing.
+
+[Angela Fong — 4:11 PM]
+Simone — the sandbox environment provisioning for the partner onboarding API is really slick. Partners get a fully isolated test environment in under 30 seconds. That's going to be a huge selling point.
+
+[Simone Osei — 4:11 PM]
+Appreciate it. I borrowed heavily from how Stripe does their sandbox environments. No need to reinvent the wheel.
+
+[Yuto Hayashi — 4:11 PM]
+Kai — the facilitation this sprint was noticeably better. The scope change policy, the design review scheduling, the sprint planning. Everything felt organized and intentional. Just wanted to name that.
+
+[Kai Nakamura — 4:12 PM]
+Thanks, Yuto. I've been trying to be more structured. It helps when the team is engaged with the process.
+
+---
+
+ACTION ITEMS
+
+[Kai Nakamura — 4:13 PM]
+Alright, let me compile the action items from today's decisions. I'll put these in Jira as well.
+
+| Action | Owner | Deadline |
+|--------|-------|----------|
+| Add time-box guidance to investigation ticket template | Kai | Sprint 16 Day 1 |
+| Update definition of done with runbook requirement | Kai | Sprint 16 Day 1 |
+| Create tech debt register spreadsheet | Derek | Sprint 16 Day 3 |
+| Schedule first monthly tech debt review (July 2) | Kai | Sprint 16 Day 1 |
+| Update PR template with Test Plan section | Kai | Sprint 16 Day 1 |
+| Write test naming convention guide | Yuto | Sprint 16 Day 5 |
+| Write payment reconciliation service runbook | Marcus | Sprint 16 Day 5 |
+| Write partner onboarding API runbook | Simone | Sprint 16 Day 5 |
+
+[Derek Lane — 4:14 PM]
+Can you also add "Seed tech debt register with initial items" to my action items? I mentioned I'd do a repo scan.
+
+[Kai Nakamura — 4:14 PM]
+Added. That's also by Sprint 16 Day 3, same as the spreadsheet creation.
+
+[Priti Sharma — 4:14 PM]
+And can you add "Create sprint metrics trend chart on team wiki" for yourself?
+
+[Kai Nakamura — 4:14 PM]
+Done. I'll get that up by Day 3 as well.
+
+---
+
+DECISIONS LOG — SPRINT 15 RETRO
+
+1. **We decided to time-box investigation/research spikes.** 2hr for library selection, 4hr for architectural research, 1 day for POC. Team discussion if exceeded.
+
+2. **We decided to add runbook creation to the definition of done** for new services. Minimum: overview, health check, top 5 failure modes, escalation contacts.
+
+3. **We decided to hold monthly tech debt reviews** on the first Wednesday of each month. Maintain a tech debt register for prioritization.
+
+4. **We decided on descriptive test naming convention.** Format: `test_<condition>_<expected_behavior>`. Reviewers flag generic names.
+
+5. **We decided to add mandatory "Test Plan" section to PR template.** Reviewers verify test plan covers changed behavior.
+
+6. **Continuing:** design reviews (5+ pts), scope change policy, mandatory infra pairing, async standups + Wednesday sync, 24hr review SLA, sprint demos.
+
+---
+
+[Kai Nakamura — 4:15 PM]
+Great retro. Proud of this sprint — our best yet. Let's keep the momentum going. Sprint 16 planning is Thursday at 10am.
+
+[Derek Lane — 4:16 PM]
+Nice work everyone. Enjoy the evening.
+
+[Marcus Webb — 4:16 PM]
+Good meeting. See you Thursday.
+
+[Angela Fong — 4:16 PM]
+Thanks all.
+
+---
+
+END OF EPISODE

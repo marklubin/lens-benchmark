@@ -1,0 +1,582 @@
+RIVULET ENGINEERING — DEPLOYMENT REVIEW + SPRINT 25 MID-SPRINT CHECK
+Date: 2025-06-17 (Wednesday)
+Time: 10:00–11:15 AM PT
+Location: Conference Room B + Zoom (hybrid)
+Facilitator: Priya Chandrasekaran
+Note-taker: Lin Zhang
+Attendees (in-room): Sarah Kim, Mike Torres, David Okafor, Priya Chandrasekaran, Lin Zhang, Rachel Fernandez, James Holden
+Attendees (remote): Anika Patel, Carlos Rivera
+Agenda:
+1. Production deployment review — what shipped last week (30 min)
+2. Sprint 25 mid-sprint health check (20 min)
+3. Incident review: staging Redis connectivity blip (15 min)
+
+Pre-meeting note from Priya (posted in #engineering at 9:45 AM):
+> Reminder — deployment review + sprint check in 15 minutes. Please have your deployment status ready. If you shipped something to production or staging since last Wednesday, be prepared to share metrics. Conf Room B + Zoom link in the calendar invite.
+
+---
+
+ITEM 1: PRODUCTION DEPLOYMENT REVIEW (10:00–10:32 AM)
+
+[Priya Chandrasekaran — 10:00 AM]
+Alright, looks like we've got everyone. Carlos, Anika — can you hear us OK on Zoom?
+
+[Carlos Rivera — 10:00 AM]
+Yep, audio and video are good.
+
+[Anika Patel — 10:00 AM]
+Same here. Good to go.
+
+[Priya Chandrasekaran — 10:01 AM]
+Great. Let's do a deployment review. We shipped a lot in Sprint 24 and the first few days of Sprint 25. I want to make sure everything is healthy in production. Going around the room — what's deployed and what's the status? Mike, you want to start with the session work?
+
+[Mike Torres — 10:01 AM]
+Sure. Session infrastructure. The Redis session store went to production yesterday at 2pm. Deployment was smooth — here's the rollout:
+
+Monday: 100% staging traffic on Redis sessions. Zero issues over 48 hours. 12,400 sessions created, 94,000 lookups, 0 errors. I ran the load test suite against staging as well — `k6 run scripts/load-test-sessions.js` with 500 concurrent virtual users for 30 minutes. No errors, no connection pool exhaustion.
+
+Tuesday: Production deployment behind feature flag. The flag is `USE_REDIS_SESSIONS` in LaunchDarkly, targeting by percentage rollout. Enabled for 10% of production traffic at 2pm. Monitored for 2 hours with the team — watched the Grafana session dashboard live.
+
+Tuesday evening: Bumped to 50% of production traffic. No issues overnight. I set up a PagerDuty alert on the `redis.session.error_rate` metric with a threshold of >0.1% — it never triggered.
+
+Wednesday (this morning): Bumped to 100%. All new logins now create Redis sessions. Existing PostgreSQL sessions still work via the fallback path — they'll expire naturally over the next 14 days. The feature flag is now set to 100% ON for all environments.
+
+Production metrics as of this morning:
+- Redis sessions created: 3,847
+- PostgreSQL session fallbacks: 11,200 (existing sessions from before the deploy)
+- Redis lookup latency: P50 0.07ms, P95 0.18ms, P99 0.29ms
+- PostgreSQL fallback latency: P50 2.3ms, P95 12ms, P99 41ms
+- Token rotation events: 89,400 (working correctly)
+- Errors: 0
+
+The contrast in latency tells the whole story — Redis is 30x faster at P50 and 140x faster at P99. Once the PostgreSQL sessions expire over the next two weeks, all session lookups will be sub-millisecond.
+
+[Lin Zhang — 10:04 AM]
+Quick question — how are you tracking whether a session is Redis-backed vs PostgreSQL-backed in the metrics? Is it a label on the Datadog metric?
+
+[Mike Torres — 10:04 AM]
+We emit a `session.lookup.backend` tag on the latency histogram — values are `redis` or `postgres_fallback`. So in Grafana you can split by backend and see the two distributions side by side. It's in the dashboard Carlos set up: `grafana.rivulet.io/d/redis-sessions`.
+
+[Priya Chandrasekaran — 10:05 AM]
+Those are great numbers. Any customer-visible impact?
+
+[Mike Torres — 10:05 AM]
+Nothing negative. The login flow is indistinguishable from before — same cookie, same behavior. The only difference is what's behind the curtain. We did get one support ticket (SUP-4445) from a customer whose session expired during the deploy window, but that was a PostgreSQL session that hit the cleanup job — unrelated to the new system. I responded to the ticket and closed it out. After the PostgreSQL sessions age out, that class of bug is gone permanently.
+
+[Rachel Fernandez — 10:06 AM]
+Did the session cookie format change at all? I want to make sure the WebSocket handshake still validates sessions the same way.
+
+[Mike Torres — 10:06 AM]
+No change to the cookie. The session ID format is identical — it's a UUID. The middleware resolves it by first checking Redis, then falling back to PostgreSQL. From the WebSocket handler's perspective, it calls `get_session(session_id)` the same way it always did. The interface didn't change, only the backing store.
+
+[Rachel Fernandez — 10:07 AM]
+Perfect, that's what I assumed but wanted to confirm.
+
+[Carlos Rivera — 10:07 AM]
+From the infrastructure side, the session Redis cluster is running cool. Memory usage: 12MB out of 13GB available. CPU: 0.3%. We're massively over-provisioned for current load, which is fine — gives us headroom. I'll evaluate downsizing in a month once we have steady-state data.
+
+The cluster configuration for reference:
+- Engine: Redis 7.2
+- Node type: cache.r7g.large (3 nodes, Multi-AZ)
+- Encryption: at-rest (AWS KMS) and in-transit (TLS)
+- Backup: daily snapshot at 3 AM UTC, 7-day retention
+- Parameter group: custom (maxmemory-policy = volatile-lru, timeout = 0)
+
+The monitoring dashboards are live: `grafana.rivulet.io/d/redis-sessions`. Alerting is configured for connection count > 80%, memory > 70%, and latency P99 > 5ms. I also added an alert for replication lag > 500ms on the read replicas, though we haven't seen any lag so far.
+
+[James Holden — 10:09 AM]
+Carlos, is the backup snapshot tested? Have we done a restore drill?
+
+[Carlos Rivera — 10:09 AM]
+Good question. I restored from the snapshot in the dev environment last week as part of the deployment validation. Took about 90 seconds for the 12MB dataset. For production, if we ever needed to restore, the time would scale with data size but at current volumes it's trivial. I have the restore runbook documented in Confluence under "Redis Operations."
+
+[Sarah Kim — 10:09 AM]
+Export pipeline v2 went to production Monday behind a feature flag. Currently enabled for internal tenants and our 5 beta customers. Status:
+
+- 23 exports completed successfully
+- Largest export: 1.8GB (Meridian Health test tenant)
+- Average export time: 45 seconds per GB
+- Memory peak: 195MB (consistent with staging tests)
+- Zero failures
+
+The export worker config is straightforward — it pulls from the SQS queue and streams to S3:
+
+```yaml
+export_worker:
+  queue: rivulet-export-jobs
+  s3_bucket: rivulet-exports-prod
+  max_concurrent: 5
+  chunk_size_mb: 50
+  presigned_url_expiry: 72h
+```
+
+One issue found: the email notification uses HTML formatting and some customers' email clients strip the HTML, so the download link appears as raw text. I'm adding a plain-text fallback with a multipart MIME message. Not blocking — the export works, just the notification formatting is ugly in some clients. The fix is in PR #1883, should merge today.
+
+Planning to open to all Pro/Enterprise tenants on Friday. I'll coordinate with the customer success team to send a changelog notification.
+
+[Lin Zhang — 10:11 AM]
+Is there a file size limit on exports? Or can a customer export their entire dataset in one go?
+
+[Sarah Kim — 10:11 AM]
+There's no hard limit, but exports above 5GB automatically switch to a multi-part ZIP format so the download is more manageable. We haven't hit that threshold in beta yet. The largest real customer dataset is about 3.2GB, and even the 1.8GB Meridian Health test export was a synthetic stress test.
+
+[David Okafor — 10:12 AM]
+Dashboard widget performance improvements are in production since last Thursday. Measured impact:
+
+- Dashboard load time (8 widgets): 8.2 seconds → 1.4 seconds (5.8x improvement)
+- This is WITHOUT the caching layer, just the index and query pushdown
+- The caching layer PR (#1880) is up for review — once that's in, repeat loads will be sub-100ms
+
+The key changes were:
+1. Added a composite index on `events(workspace_id, event_type, created_at)` — this eliminated full table scans for the widget queries
+2. Pushed aggregation into the SQL query instead of fetching raw rows and aggregating in Python
+3. Reduced the default time window from 90 days to 30 days for the summary widgets, with a "load more" button
+
+Before the index, the query plan for the activity summary widget showed a sequential scan on 48M rows. After the index, it's an index-only scan returning pre-aggregated counts. The EXPLAIN ANALYZE output went from 6200ms to 180ms.
+
+Customer feedback has been positive. Three customers sent unsolicited positive messages through the feedback widget about dashboard speed. That almost never happens. One of them was the VP of Engineering at Cascade Logistics — Priya, might be worth having the sales team follow up on that.
+
+[Priya Chandrasekaran — 10:14 AM]
+Good call. I'll flag it for the account team.
+
+[Lin Zhang — 10:14 AM]
+The analytics query builder frontend (FALCON-07) shipped to staging. The Firefox rendering bug is fixed — it was a CSS grid issue where `fr` units weren't being respected inside a flex container. Added an explicit `min-width: 0` on the grid container and it resolved across all Firefox versions we test against.
+
+Waiting on the filter panel design — Megan finalized it last Thursday and I'm implementing it now. The design uses a collapsible sidebar with typeahead search on filter values, which requires a new debounced API endpoint. David has that endpoint stubbed out already in the query service. Target: production by end of Sprint 25.
+
+[Rachel Fernandez — 10:15 AM]
+WebSocket migration: the dashboard real-time update consumer is working in staging. Clients that support WS get live dashboard updates without polling. Fallback to polling for older clients. The connection handshake flow is:
+
+1. Client opens WS to `wss://app.rivulet.io/ws/dashboard`
+2. Server validates the session cookie (same auth path as HTTP)
+3. Client subscribes to `dashboard:{dashboard_id}` channel
+4. Server pushes `widget_update` events when underlying data changes
+
+The export progress indicator that uses WS is in production (part of Sarah's export pipeline). That was actually the first WS feature to go live, which was a nice proof of concept.
+
+Still need to migrate: notification inbox (waiting on notification service rewrite) and collaborative editing presence (Sprint 26). The notification migration is blocked because the current notification service polls the database every 5 seconds — we need the event-driven rewrite before WS makes sense there.
+
+[Anika Patel — 10:17 AM]
+Tenant onboarding rewrite (FALCON-11) is in progress. I've integrated the new Stripe API for billing setup. We migrated from the legacy Stripe Charges API to Stripe Checkout Sessions, which gives us a hosted payment page with PCI compliance built in. The 3-step flow is working:
+1. Create account (email, company name)
+2. Select plan (integrates with Stripe Checkout)
+3. Workspace setup (auto-creates default workspace — this ties into the multi-workspace work)
+
+The Stripe integration uses their `checkout.session.completed` webhook to confirm payment before provisioning the tenant. The webhook handler is at `src/billing/webhooks.py` and it's idempotent — duplicate webhook deliveries won't create duplicate tenants.
+
+Step 3 is where it gets interesting. David and I aligned on the workspace creation flow — when a new tenant signs up, we create a "Default" workspace. The UI shows a workspace name field (pre-filled with the company name) and lets them customize it. Behind the scenes it's calling the new `workspaces` API that David is building.
+
+[David Okafor — 10:18 AM]
+Yeah, the workspace API endpoint is ready on my branch. The contract is:
+
+```json
+POST /api/v1/workspaces
+{
+  "name": "Acme Corp",
+  "tenant_id": "tenant_abc123"
+}
+```
+
+Returns the workspace object with `workspace_id`. Anika's onboarding flow calls this after the Stripe checkout completes. We tested the end-to-end flow on my local environment yesterday and it works.
+
+[Anika Patel — 10:19 AM]
+Yep, the integration test passes. I'm writing a few more edge case tests — what happens if the workspace creation fails after payment, what if the user refreshes mid-flow, etc. Those should be done by tomorrow.
+
+[James Holden — 10:19 AM]
+Data retention and archival system is running in production. First batch of archived data: 2.3 million events older than 90 days, moved to S3 Glacier. The Glacier transition completed successfully — verified by restoring a sample batch of 10,000 records and comparing checksums. All checksums matched.
+
+The archival job runs nightly at 1 AM UTC. It's a Step Functions workflow:
+1. Query events older than retention period
+2. Export to Parquet files on S3 Standard
+3. Verify export integrity (row counts + checksums)
+4. Delete from PostgreSQL
+5. Transition S3 objects to Glacier after 24-hour confirmation window
+
+The 24-hour confirmation window is important — if something goes wrong, we have a day to catch it before the data moves to Glacier and becomes expensive to retrieve.
+
+SOC 2 audit prep: I've drafted the incident response runbook with Carlos. It covers P1-P4 severity levels, escalation paths, communication templates, and post-incident review process. The severity matrix is:
+
+- P1: Full outage, all customers affected, 15-minute response SLA
+- P2: Partial outage, subset of features affected, 30-minute response SLA
+- P3: Degraded performance, 2-hour response SLA
+- P4: Minor issue, non-customer-facing, next business day
+
+Shared with the auditor last Friday — awaiting feedback. The auditor also asked for documentation on our access control policies, which I'm putting together this week.
+
+[Carlos Rivera — 10:21 AM]
+CI/CD improvements are all merged. Build times:
+- Before: 14 minutes average
+- After: 4 minutes 50 seconds average
+
+Breakdown: Docker layer caching saved 4.5 minutes, test parallelization saved 3 minutes, dependency caching saved 1.7 minutes. We actually beat my estimate by 10 seconds. The team has noticed — I've gotten DMs from Sarah and David saying builds feel much faster.
+
+Specific changes for the record:
+- Docker: switched to multi-stage build with `--mount=type=cache` for pip packages. The base image layer only rebuilds when `requirements.txt` changes.
+- Tests: moved from sequential pytest to `pytest-xdist` with `-n auto` (4 workers on our CI runners). Had to fix 3 tests that had implicit ordering dependencies.
+- Dependencies: added a GitHub Actions cache step for the `uv` cache directory. Cache hit rate is ~95% on non-dependency-change commits.
+
+The flaky test rate also dropped from 2.1% to 0.3% because the parallelization forced us to fix the tests that were sharing state through module-level globals.
+
+[Mike Torres — 10:23 AM]
+The build time improvement is really noticeable when you're iterating on a PR. Going from 14 minutes to under 5 means you can actually wait for CI instead of context-switching.
+
+[Priya Chandrasekaran — 10:23 AM]
+Excellent work across the board. To summarize what's in production as of today:
+- Redis session store (100% traffic)
+- Export pipeline v2 (beta customers)
+- Dashboard widget performance improvements (all customers)
+- CI/CD optimization (engineering-internal)
+- Data archival to Glacier (operational)
+
+And in staging/in-progress:
+- API response caching (PR up)
+- Analytics query builder (staging)
+- WebSocket dashboard updates (staging)
+- Tenant onboarding rewrite (in progress)
+- Multi-workspace database migration (in progress)
+
+This is a productive stretch. Let's keep the momentum. Good transition point — let's move to the sprint health check.
+
+---
+
+ITEM 2: SPRINT 25 MID-SPRINT CHECK (10:32–10:52 AM)
+
+[Priya Chandrasekaran — 10:32 AM]
+Sprint 25 health check. We committed 16 story points. Lin, can you pull up the board? Thanks. Status:
+
+Completed (6 points):
+- Session store production rollout (Mike) — 3 pts, done today
+- CI/CD optimizations (Carlos) — 2 pts, merged
+- SOC 2 incident runbook draft (James/Carlos) — 1 pt, sent to auditor
+
+In Progress (10 points):
+- Multi-workspace database migration (David) — 5 pts, migration script done, backfill starting
+- API versioning Phase 1 (Sarah) — 2 pts, PR #1878 up for review
+- Tenant onboarding rewrite (Anika) — 2 pts, on track
+- WebSocket notification migration (Rachel) — 1 pt, blocked on notification service
+
+At Risk:
+- None currently, but David's 48M row backfill is the biggest risk. If it takes longer than estimated, it pushes the multi-workspace timeline.
+
+[Sarah Kim — 10:34 AM]
+Quick note on the API versioning PR — it's 412 lines but most of it is mechanical URL config changes and test updates. The actual routing logic change is about 40 lines in the URL router. Should be a fast review.
+
+[Priya Chandrasekaran — 10:34 AM]
+Good to know. Mike, David — you both said you'd review #1878 today?
+
+[Mike Torres — 10:35 AM]
+Yeah, I'll look at it after lunch.
+
+[David Okafor — 10:35 AM]
+Same. My main concern is making sure the v2 namespace is clean for the workspace endpoints I'm adding.
+
+[Priya Chandrasekaran — 10:35 AM]
+OK. David, let's talk about the backfill.
+
+[David Okafor — 10:36 AM]
+The backfill is running now on staging. 48M rows, 10K per batch. Staging took 3 minutes 40 seconds for the full backfill. Production has the same row count so it should be similar. I'm planning to run it during the low-traffic window (2-4am PT) this Friday.
+
+The migration script is `scripts/migrations/add_workspace_id.py`. It does three things:
+1. `ALTER TABLE events ADD COLUMN workspace_id UUID` — already done in production (non-blocking DDL)
+2. Backfill: `UPDATE events SET workspace_id = tenants.default_workspace_id FROM tenants WHERE events.tenant_id = tenants.id AND events.workspace_id IS NULL LIMIT 10000` — this is the 48M row operation
+3. After backfill: `ALTER TABLE events ALTER COLUMN workspace_id SET NOT NULL` + add the foreign key constraint
+
+Step 1 is already deployed. Step 2 is what's running Friday. Step 3 happens after we verify the backfill completed cleanly.
+
+[Mike Torres — 10:37 AM]
+What's the lock contention during the backfill? We have nightly batch jobs that also hit the events table.
+
+[David Okafor — 10:38 AM]
+Minimal. The UPDATE uses row-level locks, and I'm throttling at 10K rows per batch with a 100ms pause between batches. On staging, the batch jobs ran concurrently with the backfill without any deadlocks or notable latency increase. I profiled it — the lock wait time per batch averaged 2ms, and the nightly aggregation job's runtime increased by 0.4 seconds total (within normal variance). I'll monitor closely in production.
+
+[Carlos Rivera — 10:38 AM]
+I checked the PostgreSQL connection pool during the staging backfill — peak utilization was 45 connections out of 100. In production we'll have even more headroom now that session lookups moved to Redis. We went from 95% peak to 72% peak, so there's plenty of capacity for the backfill UPDATE queries alongside normal traffic.
+
+[Priya Chandrasekaran — 10:39 AM]
+Good. Let's make sure the on-call person (James, you're on this week?) is aware of the Friday night backfill.
+
+[James Holden — 10:40 AM]
+Noted. I'll keep an eye on the database dashboards during the window. David, can you ping me when you kick it off so I know to watch?
+
+[David Okafor — 10:40 AM]
+Will do. I'll send a message in #ops when I start and when it finishes.
+
+[Rachel Fernandez — 10:41 AM]
+Priya, one thing on my item — the WebSocket notification migration. It's listed as 1 point but it's blocked on the notification service rewrite, which isn't scheduled until Sprint 26. Should I pull it from this sprint and replace it with something else? I could pick up the collaborative editing presence work instead, or help David with the multi-workspace frontend integration.
+
+[Priya Chandrasekaran — 10:42 AM]
+Good call. Let's pull the notification WS migration out of Sprint 25. Rachel, pick up whatever makes the most sense — if David needs frontend help on multi-workspace, that's probably highest value.
+
+[David Okafor — 10:42 AM]
+Actually, yeah — I could use help with the workspace switcher component. I have the API endpoints ready but the frontend dropdown and workspace context provider need building. Rachel, want to pair on that Thursday?
+
+[Rachel Fernandez — 10:43 AM]
+Sure, that works. I'll look at your API contracts tomorrow so I'm prepped.
+
+[Priya Chandrasekaran — 10:43 AM]
+Great. Lin, update the board — move the WS notification item to Sprint 26 backlog and add a placeholder for the workspace switcher frontend. Alright, let's move to the incident review.
+
+---
+
+ITEM 3: INCIDENT REVIEW — STAGING REDIS CONNECTIVITY (10:52–11:10 AM)
+
+[Carlos Rivera — 10:52 AM]
+Minor incident to review. Yesterday at 4:17 PM, the staging session Redis became unreachable for 47 seconds. Here's what happened:
+
+Root cause: ElastiCache performed an automatic failover test in the staging environment. This is a feature I enabled for staging to verify our failover behavior. The configuration is `--automatic-failover-enabled` with `test-failover` triggered via a scheduled CloudWatch event every Tuesday at 4 PM. During the failover, the primary node was replaced and the DNS endpoint updated. Our application's Redis connection pool had stale connections pointing to the old primary.
+
+Timeline:
+- 16:17:00 — ElastiCache initiates failover
+- 16:17:02 — Primary node begins shutdown
+- 16:17:15 — New primary promoted from replica
+- 16:17:22 — DNS endpoint updated to new primary IP
+- 16:17:47 — Application establishes new connections, service restored
+
+Impact: During the 47-second window, session lookups in staging returned errors. The session middleware correctly fell back to the PostgreSQL backend for those requests — no user-visible impact. We saw 234 fallback events in the staging logs during that window.
+
+The production Redis cluster has the same failover configuration but we haven't triggered it yet. Based on this staging test, I need to add connection health checking to our Redis pool — on connection error, discard the connection and establish a new one. The Python `redis-py` library supports this with the `health_check_interval` parameter, but we're using a custom connection pool wrapper that doesn't pass it through. I need to update the wrapper.
+
+[Mike Torres — 10:56 AM]
+The session middleware handled it correctly — it fell back to PostgreSQL. But once we remove the PostgreSQL fallback (Phase 2), a Redis outage would mean session lookups fail and users get 401s. How do we handle that?
+
+[Carlos Rivera — 10:57 AM]
+Two things. First, the connection health check I mentioned — after failover, new connections automatically point to the new primary via DNS. So the outage window is just the time it takes to establish new connections, not the full failover time. With health checking, that's sub-second. The `health_check_interval` parameter sends a PING before each command if the connection has been idle for more than N seconds. If the PING fails, it drops the connection and creates a new one.
+
+Second, the ElastiCache Multi-AZ failover in production typically completes in 10-15 seconds. During that window, reads can go to the replica (I'll configure read replicas for session lookups). Writes (new session creation, token rotation) would fail briefly, but that only affects new logins and active rotations — existing sessions would get a stale token (old one still valid) and rotate on the next request.
+
+[Sarah Kim — 10:58 AM]
+Does the export worker also use the session Redis, or is it only the API service?
+
+[Carlos Rivera — 10:58 AM]
+Only the API service and the WebSocket service use the session Redis. The export worker authenticates via a service account token that's validated against the database directly — it doesn't go through the session middleware. So a session Redis outage wouldn't affect exports at all.
+
+[Mike Torres — 10:59 AM]
+That's acceptable. The worst case is a 15-second window where new logins fail and active users get a brief delay on token rotation. No data loss, no session invalidation.
+
+[David Okafor — 11:00 AM]
+For the cache Redis (the separate cluster for API caching), failure is even more benign — cache miss, database query, user sees normal latency instead of cached latency. No auth implications. And the cache Redis is a single-node setup without Multi-AZ, so its failure mode is just "node dies, we provision a new one, cache is cold." The application handles that gracefully because every cache read has a database fallback.
+
+[Carlos Rivera — 11:01 AM]
+Exactly. I want to stress again that these are separate clusters with separate failure domains. A session Redis failure does NOT affect cache Redis and vice versa. They're in different ElastiCache replication groups, different subnet groups, and the application uses different connection pool instances for each. There's no shared state between them.
+
+[James Holden — 11:02 AM]
+Should we document this failure mode in the incident runbook? It seems like a scenario the on-call person should know about.
+
+[Carlos Rivera — 11:02 AM]
+Good idea. I'll add a section on Redis failover handling — expected duration, what the user impact looks like, and what the on-call response should be (which is mostly "wait for automatic recovery and verify connections re-establish").
+
+[Priya Chandrasekaran — 11:02 AM]
+Good. Carlos, file a ticket for the connection health checking fix and get it in before we remove the PostgreSQL fallback.
+
+[Carlos Rivera — 11:03 AM]
+Already filed. SPRINT25-INFRA-004. I'll have a PR up by Friday. The fix itself is small — it's a one-line change to pass `health_check_interval=10` to the connection pool constructor, plus updating the wrapper class to accept the parameter. The bigger piece is writing a test that simulates a failover — I'm going to use `toxiproxy` to simulate the connection drop in our integration test suite.
+
+[Priya Chandrasekaran — 11:04 AM]
+Great. That wraps up the incident review. Quick reminder — standup is async in Slack this week since we're doing this mid-sprint check instead. Post your updates in #standup by 10 AM as usual. Meeting adjourned.
+
+---
+
+SLACK THREAD — #engineering — 11:30 AM
+
+[Sarah Kim]
+API versioning Phase 1 PR is up: #1878. Adds `/api/v1/` prefix to all existing endpoints. Unprefixed routes still work but return a `Sunset` header with a deprecation date of 2025-09-17 (90 days). 412 lines changed, mostly URL config. Review welcome.
+
+The key files to look at:
+- `src/api/urls.py` — new v1 URL namespace
+- `src/api/middleware/versioning.py` — Sunset header middleware
+- `tests/api/test_versioning.py` — test coverage for both prefixed and unprefixed routes
+
+[Mike Torres]
+I'll review this afternoon. Does the Sunset header follow RFC 8594?
+
+[Sarah Kim]
+Yes, it uses the HTTP date format from the RFC: `Sunset: Wed, 17 Sep 2025 00:00:00 GMT`. I also added a `Deprecation` header with the current date per the draft deprecation RFC.
+
+[David Okafor]
+I'll review too. Want to make sure the multi-workspace v2 endpoints will slot in cleanly. Specifically, I need `POST /api/v2/workspaces` and `GET /api/v2/workspaces/:id/events` to coexist with the v1 endpoints.
+
+[Sarah Kim]
+That should be clean. The v1 and v2 namespaces are separate URL includes, so your v2 endpoints won't conflict. I left a TODO comment in `urls.py` where the v2 include will go.
+
+[David Okafor]
+:+1:
+
+---
+
+SLACK THREAD — #engineering — 1:45 PM
+
+[Lin Zhang]
+Question for the group — the filter panel typeahead for the analytics query builder needs a debounced search endpoint. David, you mentioned you had a stub for this. What's the endpoint signature?
+
+[David Okafor]
+`GET /api/v1/analytics/filter-values?field=event_type&q=click&limit=20`
+
+Returns `{ "values": ["click_button", "click_link", "click_nav"], "total": 3 }`. The `q` parameter does a prefix match. I have it backed by a dedicated index on the unique values table. Response time is under 10ms for our current dataset.
+
+[Lin Zhang]
+Perfect. I'll wire it up with a 300ms debounce on the frontend. Should have the filter panel done by Thursday.
+
+---
+
+SLACK THREAD — #engineering — 2:15 PM
+
+[Priya Chandrasekaran]
+Heads up: the Meridian Health team wants a technical deep-dive next Wednesday on our security architecture. Topics: authentication, session management, data isolation, audit logging. This is a big deal — they're evaluating us for their enterprise rollout which would be our largest customer by seat count.
+
+@mtorres — can you present the session store architecture? They specifically asked about immediate session revocation capability.
+
+@dokafor — multi-workspace data isolation. How do we prevent cross-workspace data leakage?
+
+@jholden — audit logging and data retention.
+
+I'll handle the intro and the Q&A facilitation. Meeting is 60 minutes with 15 minutes for Q&A at the end.
+
+[Mike Torres]
+Happy to present. I'll prepare a brief overview of the session infrastructure — Redis-backed sessions with token rotation, immediate revocation via key deletion, session binding for enterprise mode. Should I walk through the ADR?
+
+[Priya Chandrasekaran]
+Yes, but focus on the security properties rather than the implementation details. They'll care about: can you revoke sessions immediately (yes), can you see all active sessions for a user (yes), is there an audit trail (Phase 3, coming soon), how do you handle token theft (duplicate detection + auto-revocation). Keep it to 10 minutes max — we want time for their questions.
+
+[Mike Torres]
+Got it. I'll prepare slides. Should be 8-10 slides covering the architecture diagram, the token lifecycle, and the revocation flow.
+
+[David Okafor]
+I'll prepare the data isolation piece. The workspace_id-based isolation is straightforward but I'll also cover row-level security policies and the permission model. I can show the PostgreSQL RLS policies we're implementing:
+
+```sql
+CREATE POLICY workspace_isolation ON events
+  USING (workspace_id = current_setting('app.current_workspace_id')::uuid);
+```
+
+That plus the application-level middleware gives us defense in depth.
+
+[James Holden]
+I'll have the audit logging overview ready. Between the session audit trail, export logging, and the SOC 2 work, we have a good story. I'll also mention the data retention policies and the Glacier archival — enterprise customers like knowing their data lifecycle is well-defined.
+
+[Sarah Kim]
+Should I prepare anything on API security? Authentication headers, rate limiting, API key management?
+
+[Priya Chandrasekaran]
+Good point. Yes, prepare a one-pager on our API auth model — API keys, OAuth 2.0 flows, rate limits. You can present it if they ask, otherwise we'll have it as backup material.
+
+[Sarah Kim]
+Will do.
+
+[Priya Chandrasekaran]
+Perfect. Let's do a dry run Monday afternoon. I'll book a room — 3pm work for everyone?
+
+[Mike Torres]
+Works for me.
+
+[David Okafor]
+Same.
+
+[James Holden]
+I'm on call but I can do 3pm unless something's on fire.
+
+[Priya Chandrasekaran]
+Monday 3pm it is. I'll send the invite.
+
+---
+
+SLACK THREAD — #ops — 3:45 PM
+
+[Carlos Rivera]
+Weekly infrastructure update:
+
+**Redis clusters:**
+- Session Redis (Multi-AZ, 3 nodes): 12MB memory, 0.3% CPU, 3,847 active sessions. Healthy. Connection count: 45 (from 3 API tasks + 2 WS tasks, ~9 connections per task).
+- Cache Redis (single node): provisioned yesterday, 0 MB memory (David's caching PR isn't deployed yet). Standing by. Node type: cache.r7g.medium — we can always upgrade if needed.
+
+**Database:**
+- PostgreSQL primary: connection pool utilization down from 95% peak to 72% peak (session lookups moved to Redis). This gives us headroom for the multi-workspace migration queries. Average query latency: 4.2ms (down from 5.8ms last week).
+- Read replica: 18ms replication lag average. Used by the analytics query builder and the export worker.
+- Storage: 180GB used, 320GB provisioned. Glacier archival freed 14GB last week. At current growth rate (~2GB/week), we have about 70 weeks of headroom.
+
+**ECS:**
+- API service: 3 tasks, healthy. CPU averaging 45%, memory averaging 62%.
+- Export worker: 1 task, auto-scales to 5 based on SQS queue depth. Currently idle.
+- WebSocket service: 2 tasks, healthy. 340 active connections. Peak today was 412 during the 10am hour.
+
+**CI/CD:**
+- Build times: 4:50 average (down from 14:00). Flaky test rate: 0.3% (down from 2.1% after xdist fixes). Deployments this week: 4 (all successful).
+
+**Cost note:**
+- Redis clusters added ~$280/month to our AWS bill ($180 for session cluster, $100 for cache). This is offset by the reduced PostgreSQL IOPS charges from moving session lookups — I estimate net savings of ~$50/month once the PG sessions fully expire.
+
+**Upcoming:**
+- Multi-workspace events table backfill: Friday 2-4am PT
+- Cache Redis deployment: pending David's caching PR merge
+- Session Redis PostgreSQL fallback removal: targeting Sprint 26 (after 14-day session expiry)
+- Connection health check fix: PR by Friday (SPRINT25-INFRA-004)
+
+[Priya Chandrasekaran]
+Thanks Carlos. The connection pool headroom from the session migration is a nice side benefit — exactly what we predicted.
+
+[Mike Torres]
+Yeah, that 95% → 72% drop is significant. Should make the multi-workspace migration smoother since we have more pool capacity for the backfill queries.
+
+[David Okafor]
+Definitely. The backfill UPDATE queries would have competed for connections under the old setup. Now there's plenty of room. I ran some napkin math — the backfill at peak will use about 5 additional connections, so we'd be at ~77% which is well within safe operating range.
+
+[James Holden]
+Carlos, can you add the Friday backfill window to the ops calendar? I want to make sure it shows up in my on-call dashboard.
+
+[Carlos Rivera]
+Done. Added "Multi-workspace backfill — David Okafor" to the ops calendar for Friday 2-4am PT. Also added a PagerDuty maintenance window so the database alerts don't fire during the expected load increase.
+
+---
+
+SLACK THREAD — #random — 4:30 PM
+
+[Rachel Fernandez]
+Team trivia night at Barrelhouse this Thursday. 7pm. Who's in?
+
+[Lin Zhang]
+I'm in! Are we doing the engineering team or cross-company?
+
+[Rachel Fernandez]
+Engineering + product this time. Megan and the product PMs are joining. I think we'll have 8-9 people total.
+
+[Sarah Kim]
+Count me in. Are we going to lose to the sales team again?
+
+[James Holden]
+Not if I bring my A-game on the geography round. Last time they only beat us by 2 points.
+
+[Mike Torres]
+I'll be there. Someone needs to handle the tech questions.
+
+[David Okafor]
+In. But no one is allowed to look up answers on their phone this time. I'm looking at you, Lin.
+
+[Lin Zhang]
+That was ONE time and I was checking the weather!
+
+[Anika Patel]
+I'll come! What's the team name?
+
+[Rachel Fernandez]
+Suggestions? Last time we were "SELECT * FROM winners" which was... aspirational.
+
+[Carlos Rivera]
+How about "Cache Miss" — works on multiple levels.
+
+[Mike Torres]
+:laughing: That's actually perfect given the week we've had.
+
+[James Holden]
+I'll accept it as long as we don't live up to the name.
+
+[Rachel Fernandez]
+Cache Miss it is. See everyone Thursday. I'll put us down for a table — they fill up fast on trivia nights.
+
+[Priya Chandrasekaran]
+I might swing by after my 7:30 wraps up. Save me a seat!
+
+[Rachel Fernandez]
+Will do!
+
+---
+
+END OF EPISODE

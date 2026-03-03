@@ -1,0 +1,618 @@
+================================================================================
+FOLDLY ENGINEERING — POST-MORTEM MEETING NOTES
+================================================================================
+Meeting ID    : MTG-2025-0414-001
+Type          : Post-Mortem — INC-2025-0413-001 (Duplicate Billing)
+Date          : 2025-04-14, 10:00-12:15 UTC
+Location      : Zoom (recorded), #incident-20250413 for async follow-up
+Facilitator   : Priya Kaur
+Notetaker     : Jess Tanaka
+Attendees     : Priya Kaur (facilitator), Marcus Webb, Jess Tanaka, Danny Reeves, Lina Okafor, Ravi Mehta
+Status        : Final
+Recording     : https://foldly.zoom.us/rec/share/MTG-2025-0414-001 (internal only, 90-day retention)
+================================================================================
+
+## Pre-Meeting Context
+
+This post-mortem covers INC-2025-0413-001, a duplicate billing incident discovered
+on April 13, 2025 affecting multiple customer accounts. The incident report was
+circulated to all attendees on the evening of April 13 and reviewed asynchronously
+in the #incident-20250413 Slack channel prior to this meeting.
+
+Priya opened the meeting at 10:02 UTC and confirmed that all attendees had reviewed
+the incident report. She set the ground rules: blameless discussion, focus on
+systemic causes, and concrete action items with owners and deadlines.
+
+**Priya**: "Before we start, I want to set the tone. This is a blameless post-mortem.
+We're here to understand what happened, why it happened, and how we prevent it from
+happening again. Nobody is in trouble. We're looking at systems, not people. That said,
+I do want us to be honest with ourselves about the decisions we've been making as a team.
+Let's get into it."
+
+---
+
+## Meeting Agenda
+
+1. Timeline review
+2. Root cause analysis (5 Whys)
+3. Systemic issues discussion
+4. Action items
+
+---
+
+## 1. Timeline Review
+
+Priya shared her screen and walked through the incident timeline from the report,
+starting from the first customer notification through resolution. She went through
+each timestamp methodically, pausing for discussion at key decision points.
+
+**Priya**: "Let's start with the timeline. I'm pulling up the incident report now.
+Everyone should have this in the #incident-20250413 channel from last night. Marcus,
+you wrote most of this — want to walk us through the technical sequence?"
+
+**Marcus**: "Sure. So the short version is that DB contention from the analytics
+cron job caused webhook processing to slow down. Stripe's webhook delivery has a
+retry mechanism — if we don't respond within their timeout window, they resend the
+event. When our handler processed the retried events, it treated them as new events
+because of the idempotency bug. The idempotency bug was straightforward — I used the
+event ID instead of the invoice ID. Stripe's docs actually warn about this but I
+missed it. I was moving fast and didn't read the retry behavior section carefully."
+
+**Danny**: "Can you clarify the event ID vs. invoice ID thing? I want to make sure I
+understand the mechanics."
+
+**Marcus**: "Yeah. So when Stripe sends a webhook, each delivery attempt has a unique
+event ID — evt_xxxxx. But if the same event gets retried, Stripe generates a new
+event ID for the retry. So if you're using the event ID as your idempotency key,
+the retry looks like a completely new event. What you're supposed to use is the
+invoice ID — inv_xxxxx — which stays the same across retries. I used evt_ instead
+of inv_, so every retry got treated as a fresh charge."
+
+**Lina**: "And for context, the DB contention is worth understanding but it's not
+the root cause. The analytics cron job was running its nightly aggregation query,
+which takes a full table lock on the transactions table. That caused the webhook
+handler's DB writes to block, which meant we were slow to respond to Stripe, which
+triggered the retries. But — and this is important — the DB contention was a
+contributing factor but not the root cause. Even without the contention, any network
+hiccup or server restart would have triggered retries and hit the same bug."
+
+**Priya**: "So the contention was the trigger, but the idempotency bug was the
+vulnerability."
+
+**Lina**: "Exactly. The contention exposed the bug, but the bug would have been
+triggered eventually by anything that caused a retry."
+
+**Marcus**: "Right. And I should say — the cron job contention is its own issue.
+That analytics query shouldn't be taking a full table lock. But Lina's right,
+even if we fix the contention, the idempotency bug would still be sitting there
+waiting for the next trigger."
+
+**Jess**: "The real question isn't why the bug existed — bugs happen. The question
+is why nothing caught it before it hit production and affected customers."
+
+**Danny**: "That's what I keep coming back to. This is a pretty standard webhook
+integration pattern. Any test that simulated a retry would have caught it immediately."
+
+**Priya**: "Agreed. That's what we need to dig into."
+
+**Lina**: "Before we move on from the timeline — I want to note that the detection
+was also slow. The first customer email came in at 22:47 UTC on the 13th, but we
+didn't start investigating until Marcus saw it the next morning. There's no alerting,
+no anomaly detection on billing events, nothing."
+
+**Priya**: "Good point. Let's capture that as a systemic issue. Ravi, do you have
+the customer impact numbers finalized?"
+
+**Ravi**: "Yes. Three accounts were affected. Nara Design Studio was double-charged
+$4,200. Belmont Partners was double-charged $5,800. And Crestview Analytics was
+double-charged $2,000. Total duplicate charges: $12,000. All refunds have been
+processed as of this morning."
+
+**Priya**: "OK. Let's move to the 5 Whys."
+
+---
+
+## 2. Root Cause Analysis — 5 Whys
+
+Priya facilitated the 5 Whys exercise on a shared whiteboard. Each "why" was
+discussed and agreed upon by the group before moving to the next level.
+
+**Why did customers get double-charged?**
+Because the webhook handler processed duplicate events.
+
+**Priya**: "This one is straightforward. Marcus, anything to add?"
+
+**Marcus**: "No. The handler saw what it thought were two separate events and
+processed both. Two charges per invoice."
+
+---
+
+**Why did the handler process duplicate events?**
+Because the idempotency check used the event ID, which Stripe regenerates on retries.
+
+**Danny**: "Is there any logging that shows the duplicate processing? Like, can we
+see the two event IDs that mapped to the same invoice?"
+
+**Marcus**: "Yeah, I pulled the logs last night. For the Nara charge, we processed
+evt_3kN9xR2eZvKY at 22:31 and evt_7mP4hT8nWqBX at 22:34. Both mapped to
+inv_Q4n8vK2mXp. The second event was Stripe's retry after we timed out on the first."
+
+**Lina**: "Three-minute gap between events. That lines up with the DB contention
+window from the cron job."
+
+---
+
+**Why wasn't this caught during development?**
+Because there are no automated tests for the billing module. Manual testing only
+covered the happy path — a single webhook delivery without retries.
+
+**Jess**: "I want to dig into this one. Marcus, when you were building the billing
+integration, did you test webhook retries at all?"
+
+**Marcus**: "Honestly, no. I tested a single webhook delivery end-to-end — Stripe
+sends event, we process it, charge goes through. That worked. I didn't test the
+retry scenario because I didn't think about it. And there was no test suite that
+would have forced me to think about it."
+
+**Priya**: "Was there any documentation or checklist for what to test when building
+a billing integration?"
+
+**Marcus**: "No. There's no documentation at all, really. I was working from Stripe's
+docs and my own judgment."
+
+**Danny**: "Which is fine for a prototype, but this went straight to production
+handling real money."
+
+---
+
+**Why are there no automated tests?**
+Because the team has prioritized shipping speed over testing. Testing has been
+repeatedly deferred — most recently when Danny proposed writing tests and was told
+to skip them and focus on shipping.
+
+**Priya**: "Danny, can you walk us through what happened with the testing proposal?"
+
+**Danny**: "Sure. About two weeks ago — I think it was March 31 or April 1 — I
+asked in #engineering whether we should write tests for the billing code before
+we onboarded enterprise customers. The response was basically 'not now, ship the
+feature first, we'll add tests when we have time.' I think Marcus said something
+similar. And Priya, you said to keep focused on the sprint goals."
+
+**Priya**: "I did. I remember that conversation."
+
+**Marcus**: "Yeah, I think I said something like 'tests would be nice but let's
+get the integration done first.' Which in retrospect was exactly wrong."
+
+**Danny**: "And that wasn't the first time. Before that, Lina raised concerns about
+not having a staging environment, and the answer was the same — later, not now,
+after the next milestone."
+
+---
+
+**Why has testing been repeatedly deferred?**
+Because the team culture explicitly values speed over process. The phrase "we'll
+add tests when we have time" has become a running joke, and the "testing sprint"
+has been pushed to "late April" and then "mid-May" without ever materializing.
+
+**Jess**: "I want to put a fine point on this. It's not that anyone made one bad
+decision. It's that we've made the same decision — defer process, ship faster —
+over and over for weeks. Each individual deferral seemed reasonable. In aggregate,
+they created this situation."
+
+**Lina**: "The 'testing sprint' thing really bothers me. It was first mentioned in
+early March. Then it was 'late March.' Then 'mid-April.' Now it's 'late April.'
+It keeps sliding because there's always something more urgent. But at some point,
+the lack of testing becomes the urgent thing. That's where we are now."
+
+**Priya**: "You're both right. And I want to own my role in that pattern. But first,
+let's talk about the systemic issues."
+
+---
+
+## 3. Systemic Issues Discussion
+
+This section captured an extended discussion about the team's engineering practices,
+culture, and process gaps. Priya explicitly asked everyone to speak freely.
+
+**Priya**: "OK, I want to open this up. Before we get to action items, I think we
+need to be really honest about where we are as an engineering team. I'm going to
+start, and then I want to hear from everyone."
+
+**Priya**: "I want to be honest here. This isn't Marcus's fault. I built this culture.
+I'm the one who said 'just ship it' every time someone raised concerns about testing
+or code review. Lina flagged staging. Danny asked about tests. I overruled all of it
+because I prioritized speed."
+
+**Priya**: "And I want to be specific. When Lina brought up staging two weeks ago, I
+said 'we don't have time to set that up right now.' When Danny asked about tests, I
+said 'let's get the feature out first.' When Marcus pushed billing.py in a single
+commit, there was no review process to catch anything because I never set one up.
+Every one of those was my call, and every one of them contributed to this incident."
+
+**Marcus**: "I appreciate that, Priya, but I also need to own my part. I own the
+code. I wrote billing.py in 3 days in a single file and didn't test the edge cases.
+That's on me regardless of the culture. I could have written tests on my own initiative.
+I could have read the Stripe docs more carefully. I could have asked Jess or Lina
+to look at the code before I shipped it. I didn't do any of that."
+
+**Jess**: "It's both. Marcus wrote the bug, but the system — our system — didn't
+have any guardrails to catch it. No tests, no review, no staging. If any one of
+those existed, this probably doesn't happen."
+
+**Jess**: "Think about it. If we had code review, someone would have looked at the
+idempotency logic and maybe caught the event ID vs. invoice ID issue. If we had
+tests, a retry test case would have caught it. If we had staging, we would have
+run the billing flow in a safe environment before pointing real customers at it.
+Any single one of those guardrails would have been enough."
+
+**Danny**: "I'm not going to say I told you so, but... I literally asked about
+writing tests two weeks ago and was told to skip it."
+
+**Danny**: "And I want to be clear — I'm not trying to score points here. I brought
+it up because I was worried about exactly this kind of thing. Not specifically a
+billing bug, but the general pattern of shipping code that handles important stuff
+— money, customer data, authentication — without any safety net. It felt like a
+matter of time."
+
+**Priya**: "You're right. And I'm sorry. That was a mistake."
+
+**Lina**: "So what are we actually going to change? Because I've been raising these
+issues for a month and the answer has always been 'after the next milestone.' There's
+always a next milestone."
+
+**Lina**: "I don't want this to be another conversation where we all agree things
+need to change and then nothing actually changes. I've seen that pattern before at
+other companies. The post-mortem produces a list of action items, everyone feels
+good about it, and then three weeks later we're back to the same habits because
+the next deadline is looming."
+
+**Priya**: "You're right. The pattern of deferring process has to stop. We can't
+keep saying 'later.' We need to start now."
+
+**Ravi**: "Can I jump in here? I want to give the business perspective."
+
+**Priya**: "Please."
+
+**Ravi**: "From the customer side — Nara was understanding but they're watching us
+closely now. Belmont's legal team wants a formal response. Crestview was in a trial
+period and they haven't decided whether to convert yet. This incident could cost
+us the deal. We can't have another one of these."
+
+**Ravi**: "I spoke with all three accounts this morning. Nara's CTO said, and I'm
+quoting, 'mistakes happen, but we need to know this won't happen again.' They want
+to see what we're doing to prevent recurrence. Belmont is a different story — their
+legal team is involved and they want a formal written response. And Crestview...
+honestly, I don't know where we stand with them. They were already on the fence
+about the trial conversion, and this didn't help."
+
+**Priya**: "That's helpful context, Ravi. Thank you. We need to factor the customer
+communication into the action items."
+
+**Priya**: "We won't. Here's what I'm proposing..."
+
+---
+
+## 4. Systemic Issues Identified
+
+Priya summarized the systemic issues that emerged from the discussion. The team
+reviewed and agreed on the risk levels by consensus.
+
+| Issue | Description | Risk Level |
+|-------|-------------|------------|
+| No code review | All code ships without peer review | Critical |
+| No automated tests | Zero test coverage across entire codebase | Critical |
+| No staging environment | All deployments go directly to production | Critical |
+| Monolithic files | Core logic in 2-3 massive files (routes.py: 2,247 lines, billing.py: 1,100+ lines) | High |
+| No deployment process | Developers deploy from local machines at any time | High |
+| No on-call rotation | No defined process for after-hours incidents | Medium |
+| No documentation | Server config, cron jobs, and architecture undocumented | Medium |
+| No database migration process | Schema changes applied directly to production DB | Medium |
+
+**Lina**: "I want to add context on the monolithic files issue. routes.py is 2,247
+lines in a single file. billing.py is over 1,100 lines. When everything is in one
+file, there's no natural module boundary that forces you to think about interfaces
+and contracts. The webhook handler, the charge creation logic, the refund logic,
+the invoice generation — they're all tangled together in billing.py. That makes it
+harder to test any one piece in isolation, and it makes it easier to introduce bugs
+because a change to one function can have side effects on another."
+
+**Marcus**: "Yeah, and it makes code review harder too, even once we have it. Reviewing
+a diff in a 1,100-line file is way harder than reviewing changes to a focused module
+with clear responsibilities."
+
+**Jess**: "The deployment process one is also worth flagging. Right now, any of us
+can deploy at any time from our local machine. There's no deploy queue, no deploy
+log, no coordination. If two people deploy at the same time, we could end up in a
+weird state. And there's no way to quickly roll back."
+
+**Danny**: "We don't even have a consistent way to know what's currently running in
+production. If someone asks me 'what version of billing.py is live right now,' I'd
+have to SSH in and check."
+
+**Priya**: "All noted. Let's get to the action items."
+
+---
+
+## 5. Action Items
+
+Priya organized the action items into three tiers: immediate (this week), short-term
+(next two weeks), and medium-term (next month). Each item was discussed, assigned
+an owner, and given a deadline. The team agreed by consensus on priorities and
+assignments.
+
+### Immediate (This Week)
+
+**Priya**: "These are things that start today or tomorrow. Non-negotiable."
+
+| # | Action | Owner | Deadline |
+|---|--------|-------|----------|
+| 1 | **Code review for all PRs touching billing, auth, or data mutation** — no exceptions | Priya Kaur | 2025-04-15 |
+| 2 | **Write tests for billing webhook handler** — specifically retry/idempotency scenarios | Marcus Webb | 2025-04-18 |
+| 3 | **Audit all billing code paths** for similar dedup/idempotency issues | Marcus Webb, Jess Tanaka | 2025-04-18 |
+| 4 | **Formal incident response to Belmont Partners legal team** | Ravi Mehta | 2025-04-16 |
+
+**Marcus**: "For item 2, I want to be specific about what I'm testing. I'm going to
+write tests for: single webhook delivery, duplicate webhook with same event ID,
+duplicate webhook with different event IDs but same invoice ID, and concurrent
+webhook processing. Are there other scenarios I should cover?"
+
+**Jess**: "Webhook with malformed payload. And a webhook for an invoice that doesn't
+exist in our system — like if Stripe sends us an event for a different account or a
+test-mode invoice."
+
+**Marcus**: "Good. I'll add those."
+
+**Danny**: "For the audit in item 3, are we looking at just billing.py or the whole
+codebase?"
+
+**Priya**: "Start with billing.py — that's the highest risk. If you find patterns
+that might exist elsewhere, flag them and we'll expand the scope."
+
+**Jess**: "I'll pair with Marcus on the audit. Two sets of eyes on the billing code
+is probably a good idea given the circumstances."
+
+**Ravi**: "For item 4, I'm drafting the Belmont response today. I'll share it in
+#customer-success for review before sending. Priya, I'll need you to sign off on
+any commitments about process changes."
+
+**Priya**: "Absolutely. Loop me in on the draft."
+
+### Short-Term (Next 2 Weeks)
+
+**Priya**: "These are the foundational process changes. They need to happen before we
+ship any more major features."
+
+| # | Action | Owner | Deadline |
+|---|--------|-------|----------|
+| 5 | **Set up staging environment** — mirror of production for pre-deploy testing | Lina Okafor | 2025-04-25 |
+| 6 | **Establish PR review process** — at minimum, 1 approval required for merge | Priya Kaur | 2025-04-21 |
+| 7 | **Begin test coverage for critical paths** — billing, auth, document operations | All engineers | 2025-04-28 |
+| 8 | **Set up CI pipeline** — run tests on every PR, block merge on failure | Lina Okafor | 2025-04-28 |
+
+**Lina**: "For the staging environment, I'm thinking we use a separate Heroku app
+with its own database. It doesn't need to be a perfect mirror of production on day
+one — the important thing is that we have a place to deploy and test before pushing
+to production. I can have the basic infrastructure up by end of this week, with the
+full environment including test data seeding by the 25th."
+
+**Priya**: "That works. Start simple, iterate."
+
+**Danny**: "For item 6, what does the PR review process look like in practice? Are
+we requiring reviews for every change, or just billing and auth?"
+
+**Priya**: "Initially, reviews are required for billing, auth, and any data mutation.
+But I want to get to a place where every PR gets at least one review. Let me draft
+the process doc by the 21st and we'll iterate from there."
+
+**Jess**: "For item 7, we should agree on a testing framework. Are we going with
+pytest?"
+
+**Marcus**: "Pytest makes sense. It's standard, well-documented, and I've used it
+before."
+
+**Lina**: "Agreed. And for item 8, I'll set up GitHub Actions. The pipeline will run
+pytest on every PR and block merge if tests fail. I'll also add a linting step while
+I'm at it."
+
+**Danny**: "Can we also add a check that new code touching billing or auth includes
+tests? Like a coverage check on those specific modules?"
+
+**Lina**: "That's a good idea but might be too much for the initial setup. Let me
+get the basic pipeline running first and we can add coverage gates as a follow-up."
+
+**Priya**: "Agreed. Don't let perfect be the enemy of good."
+
+### Medium-Term (Next Month)
+
+**Priya**: "These are important but less urgent. They're about building the foundation
+for sustainable engineering practices."
+
+| # | Action | Owner | Deadline |
+|---|--------|-------|----------|
+| 9 | **Define SLOs** for payments, document operations, and API availability | Priya Kaur, Lina Okafor | 2025-05-10 |
+| 10 | **Refactor monolithic files** — break routes.py and billing.py into modules | Jess Tanaka, Marcus Webb | 2025-05-15 |
+| 11 | **Document server architecture, deployment process, and cron jobs** | Lina Okafor | 2025-05-10 |
+| 12 | **Establish on-call rotation** with PagerDuty integration | Lina Okafor | 2025-05-10 |
+
+**Lina**: "For item 9, what kind of SLOs are we thinking? Uptime targets? Latency
+percentiles?"
+
+**Priya**: "For payments, I'm thinking something like: all payment webhooks processed
+within 5 seconds, zero duplicate charges per month, refunds initiated within 1 hour
+of detection. For API availability, standard uptime target — 99.9% or whatever we
+can realistically commit to. We'll define the specifics together."
+
+**Jess**: "For item 10, the refactor should happen alongside the test-writing effort.
+We write tests for the existing behavior first, then refactor with the tests as a
+safety net. Otherwise we risk introducing regressions during the refactor."
+
+**Marcus**: "Good call. Tests first, then refactor."
+
+**Danny**: "For item 12, how does on-call work with a team of four engineers? That's
+a pretty tight rotation."
+
+**Lina**: "It's tight, but it's better than what we have now, which is nothing. If
+this incident had happened at 3 AM on a Saturday, it would have sat until someone
+checked their email. With PagerDuty, at least someone gets woken up."
+
+**Priya**: "We'll figure out a rotation that's sustainable. Maybe one week on, three
+weeks off per person. The point is that someone is always reachable."
+
+---
+
+## 6. Cultural Discussion
+
+Priya transitioned the conversation to a broader discussion about team culture and
+engineering values. She explicitly asked each person to share their perspective.
+
+**Priya**: "Before we wrap up, I want to have a broader conversation. This incident
+isn't just a technical failure — it's a cultural one. I want everyone to share what
+they're thinking."
+
+**Priya**: "I want to say something to the whole team. We built something real in
+the last two weeks. 7 features, 2 enterprise customers, $60K ARR. That's incredible.
+But we also shipped a bug that cost our customers $12K and damaged our reputation.
+The lesson isn't that we were wrong to move fast — it's that we moved fast without
+guardrails, and eventually that catches up to you."
+
+**Priya**: "I've been thinking about this a lot since last night. I started this
+company because I wanted to build something great, and I believed that speed was the
+most important thing. Ship fast, iterate, figure it out. And that worked for the
+first few months when it was just me and Jess and the stakes were lower. But we're
+handling real money now. We have enterprise customers with legal teams. The stakes
+are different, and our process needs to catch up."
+
+**Marcus**: "I think the lesson is simpler. I wrote payments code in a single file
+with no tests and no one looked at it. That's not fast, that's reckless. There's a
+difference."
+
+**Marcus**: "And I want to be accountable for that. I've been writing production code
+for five years. I know better. I got caught up in the sprint energy and let my
+standards slip. That's not something I want to repeat."
+
+**Jess**: "Fast with guardrails is still fast. Code review doesn't have to take a
+week. Tests don't have to cover everything. But zero review and zero tests is...
+well, we found out what that gets you."
+
+**Jess**: "I've worked at places with heavy process — two-week review cycles, ten
+approvers, bureaucracy for every change. That's the other extreme and it kills
+productivity. What we need is lightweight process. A 15-minute code review. A handful
+of tests for the critical path. A staging deploy before production. None of that is
+going to slow us down meaningfully, and it would have prevented this incident."
+
+**Danny**: "I just want to say — I'm glad we're having this conversation. I've been
+uncomfortable with the 'just ship it' thing for a while but didn't want to slow the
+team down."
+
+**Danny**: "I think part of the issue is that when you're the new person on the team
+and the founder is saying 'ship it,' it's hard to push back. I raised the testing
+question and got the 'later' answer, and I dropped it because I didn't want to be
+the person who was blocking progress. But I should have pushed harder."
+
+**Priya**: "That's on me, not you. If the culture makes it hard for people to raise
+concerns, that's a leadership problem. I need to create an environment where
+flagging risks is valued, not treated as friction."
+
+**Lina**: "Same. I've been flagging risks and getting told 'later.' I hope 'later'
+is now."
+
+**Lina**: "I want to add — this is the kind of thing that accumulates. Each
+individual shortcut feels small. Skip the review, skip the test, deploy straight to
+production. But they compound. And by the time you notice, you're in a situation where
+your entire billing system is a single untested file with no review history and no
+staging environment. That's where we are."
+
+**Priya**: "Later is now. Starting today, we review code. We write tests for critical
+paths. We set up staging. We do this the right way. We can still be fast — we just
+can't be reckless."
+
+**Ravi**: "From the business side, I'd rather ship one feature a week with confidence
+than three features a week with a ticking time bomb. The customer trust we lost is
+harder to rebuild than any feature."
+
+**Ravi**: "I want to share something from the Nara conversation this morning. Their
+CTO said they chose Foldly because we were responsive and fast-moving. They liked
+that we shipped features quickly. But he also said — and I'm paraphrasing — that
+speed means nothing if the product isn't reliable. He said they can wait an extra
+week for a feature, but they can't tolerate being overcharged. That really stuck
+with me."
+
+**Priya**: "That's a good way to frame it. Our customers chose us for speed, but
+they'll leave us over reliability. We need to be both."
+
+**Marcus**: "One more thing — I think we should be transparent with our customers
+about the changes we're making. Not in a 'please don't leave us' way, but in a
+'here's what we learned and here's what we're doing about it' way. Customers
+respect that."
+
+**Ravi**: "I agree. I'll factor that into the Belmont response and the follow-ups
+with Nara and Crestview."
+
+---
+
+## 7. Follow-Up Schedule
+
+Priya outlined the follow-up cadence to ensure action items are tracked and the
+team maintains accountability.
+
+- **Daily**: Brief check-in on action item progress in #engineering
+- **April 21**: Review meeting — assess progress on immediate and short-term items
+- **May 1**: Retrospective — evaluate whether new processes are working
+
+**Priya**: "The daily check-ins are lightweight — just post your progress on your
+assigned action items in #engineering. No meeting, just a Slack update. The April 21
+review meeting is the formal checkpoint — I want to see the PR review process
+documented, billing tests written, and the staging environment in progress. May 1
+is the retrospective where we assess whether the new processes are actually working
+or if we need to adjust."
+
+**Lina**: "Can we also create a shared tracker for the action items? A spreadsheet
+or a project board? I don't want these to get lost in Slack."
+
+**Priya**: "Good idea. Danny, can you set up a Notion board for tracking these?"
+
+**Danny**: "Done. I'll have it up by end of day and share the link in #engineering."
+
+**Jess**: "One more thing — should we share a summary of this post-mortem with the
+wider team? I know it's just the six of us, but Ravi's customer-facing team might
+benefit from understanding what happened and what we're changing."
+
+**Ravi**: "That would actually be really helpful. If my team understands the
+technical context, they can speak more confidently with customers about the
+remediation steps."
+
+**Priya**: "Agreed. Jess, since you took notes, can you prepare a summary version —
+strip out the detailed discussion, keep the timeline, root cause, systemic issues,
+and action items? We'll share that with the wider team."
+
+**Jess**: "Will do. I'll have it ready by tomorrow."
+
+---
+
+## 8. Closing Remarks
+
+**Priya**: "I want to close by saying thank you to everyone. This was a hard
+conversation but an important one. We made mistakes — I made mistakes — and we're
+going to fix them. The action items are real and the deadlines are real. I'm going
+to hold myself accountable and I'm asking all of you to hold me accountable too. If
+you see us slipping back into old patterns, say something. Don't wait. We're a
+better team than the one that shipped this bug, and we're going to prove it."
+
+**Priya**: "Meeting adjourned at 12:15 UTC. Thank you all."
+
+---
+
+## Meeting Notes Approval
+
+Reviewed and approved by all attendees.
+
+Priya Kaur — 2025-04-14 12:30 UTC
+Marcus Webb — 2025-04-14 12:32 UTC
+Jess Tanaka — 2025-04-14 12:33 UTC
+Danny Reeves — 2025-04-14 12:34 UTC
+Lina Okafor — 2025-04-14 12:35 UTC
+Ravi Mehta — 2025-04-14 12:37 UTC
+
+================================================================================
+END POST-MORTEM — MTG-2025-0414-001
+================================================================================

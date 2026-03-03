@@ -1,0 +1,423 @@
+VERDANA ANALYTICS — INTERNAL DOCUMENT
+CLASSIFICATION: CONFIDENTIAL
+DOCUMENT TYPE: MEETING TRANSCRIPT — GO/NO-GO REVIEW
+DATE: MAY 10, 2025
+SUBJECT: LAUNCH GO/NO-GO DECISION
+
+ATTENDEES:
+- Priya Chandrasekaran (CEO)
+- Marcus Okafor (CTO)
+- Nadia Reis (Head of Product)
+- Derek Huang (VP Sales)
+- Tomoko Abe (Finance Lead)
+- Amir Patel (Senior Engineer)
+- Jess Thornton (Senior Engineer)
+- Lina Choi (Designer)
+
+ALSO PRESENT (REMOTE):
+- Rachel Dominguez (QA Lead)
+- Victor Sato (DevOps Engineer)
+- Claudia Ferreira (Technical Writer)
+- Sam Whitfield (Customer Support Lead)
+
+MEETING DURATION: 1h 28m
+LOCATION: All-Hands Room / Zoom Hybrid
+RECORDING: Not recorded per Priya's request (confidential pricing data discussed)
+NOTETAKER: Claudia Ferreira
+
+***
+
+TRANSCRIPT — LAUNCH GO/NO-GO MEETING
+
+[00:00:00] PRIYA CHANDRASEKARAN: All right, let me get the Zoom participants loaded. Marcus, can you confirm the remote folks are on?
+
+[00:00:06] MARCUS OKAFOR: Yeah, I see Rachel, Victor, Claudia, and Sam on the call. Audio checks good?
+
+[00:00:10] RACHEL DOMINGUEZ: Good on my end.
+
+[00:00:11] VICTOR SATO: Same here.
+
+[00:00:12] SAM WHITFIELD: Yep.
+
+[00:00:15] PRIYA CHANDRASEKARAN: This is the go/no-go meeting. We launch on May 15 or we don't. Let's go around the room. Each owner gives a status — green, yellow, or red. If anything is red, we discuss. If everything is green or yellow-with-mitigation, we ship. Marcus, start us off.
+
+[00:00:35] MARCUS OKAFOR: Infrastructure: GREEN. We're running on AWS us-east-1 and eu-west-1. Load testing shows we can handle 500 concurrent accounts with current provisioning. Auto-scaling is configured. Database is on RDS with read replicas. The streaming pipeline is stable — we've been running it internally for three weeks with no incidents. Monitoring is live in Datadog. On-call rotation starts May 14.
+
+[00:00:58] MARCUS OKAFOR: Victor, do you want to add anything on the ops side?
+
+[00:01:01] VICTOR SATO: Sure. We've got Terraform managing all infrastructure, so nothing is manually provisioned. The us-east-1 cluster is running three t3.xlarge app servers behind an ALB, with auto-scaling configured to add instances at 70% CPU. The eu-west-1 region mirrors that setup. RDS is a db.r6g.large primary in us-east-1 with two read replicas, and a cross-region read replica in eu-west-1 for the European connector traffic.
+
+[00:01:22] VICTOR SATO: On monitoring — we've got 47 Datadog monitors configured. The critical ones are API latency (p99 threshold at 800ms, currently sitting at 340ms), error rate (threshold 1%, currently 0.02%), and database connection pool utilization (threshold 80%, currently at 22%). PagerDuty is wired up. The on-call schedule starts May 14 — Marcus has first rotation, I have second, Amir has third. Eight-hour shifts.
+
+[00:01:48] PRIYA CHANDRASEKARAN: And we tested failover?
+
+[00:01:50] VICTOR SATO: Yes. We did a controlled failover drill last Tuesday. Simulated an us-east-1 AZ outage. The ALB routed around the downed instance in 38 seconds. No dropped requests during the failover. RDS automatic failover to the standby took about 90 seconds, which is within AWS's documented window.
+
+[00:02:02] PRIYA CHANDRASEKARAN: That's solid. Ninety seconds of database downtime — is that acceptable for launch?
+
+[00:02:06] MARCUS OKAFOR: For an AZ failure, yes. That's a rare event and 90 seconds is industry standard for managed RDS failover. If we were multi-region active-active, we could do better, but that's a different cost profile. For launch traffic, this is more than adequate.
+
+[00:02:16] PRIYA CHANDRASEKARAN: Understood. Good. Amir?
+
+[00:02:18] AMIR PATEL: Core API: GREEN. All endpoints are tested. Rate limiting is in place — 100 requests per minute for standard tier, we can adjust. The 14 data connectors are all passing integration tests. Intercom and Zendesk were the last two — finished yesterday. Python SDK is on PyPI version 0.9.1, JavaScript SDK is on npm version 0.9.0. API documentation is published at docs.verdana-analytics.io.
+
+[00:02:46] AMIR PATEL: Let me run through the connectors quickly for the record, since this has been the long pole. The 14 native connectors at launch are: Salesforce, HubSpot, Stripe, Intercom, Zendesk, PostgreSQL, MySQL, BigQuery, Snowflake, Google Analytics, Mixpanel, Segment, Amplitude, and Shopify. Each one has a dedicated integration test suite — we're running those in CI on every merge to main. Total of 312 integration test cases across all 14 connectors, all passing as of this morning's build.
+
+[00:03:12] RACHEL DOMINGUEZ: I can confirm that. I ran the full regression suite at 6am today. 312 integration tests, 847 unit tests, all green. The only flaky test we had — the Snowflake timeout issue — was fixed on Wednesday when Amir increased the connection timeout from 10 to 30 seconds. It's been stable since.
+
+[00:03:28] AMIR PATEL: Thanks, Rachel. Batch export endpoint — this was the last piece — is done and tested. Users can export query results as CSV or JSON with up to 100K rows per export. Streaming queries support real-time subscriptions via WebSocket.
+
+[00:03:42] AMIR PATEL: The WebSocket implementation is running on a dedicated set of servers — separate from the REST API servers — so a spike in streaming connections won't affect API latency. We tested with 200 simultaneous WebSocket connections and saw stable memory usage around 1.2GB per instance. Each connection gets its own event loop, and we're using Redis pub/sub as the message broker between the query engine and the WebSocket servers.
+
+[00:04:01] PRIYA CHANDRASEKARAN: What happens if someone tries to export more than 100K rows?
+
+[00:04:04] AMIR PATEL: They get a 413 response with a clear error message explaining the limit and suggesting they use the streaming API for larger datasets. Claudia wrote a help doc on that — it's in the docs portal under "Data Export Limits."
+
+[00:04:14] CLAUDIA FERREIRA: Correct. There's also a code example showing how to paginate through large datasets using the streaming endpoint. Python and JavaScript versions.
+
+[00:04:21] AMIR PATEL: One yellow flag: the webhook delivery system occasionally drops events under high load. Amir ran a stress test with 10,000 webhooks per minute and saw a 2% drop rate. For launch traffic this won't be an issue — we expect maybe 100 webhooks per minute total — but it's something to fix in the next sprint.
+
+[00:04:39] MARCUS OKAFOR: Just to clarify on the webhook architecture — we're using an SQS queue for webhook delivery, and the 2% drop is happening at the consumer level when the target endpoints are slow to respond. The events aren't lost; they're in the dead letter queue. So it's really a retry issue, not a data loss issue. We can add exponential backoff retry logic in the post-launch sprint and bring that drop rate to near zero.
+
+[00:04:58] AMIR PATEL: That's right. The DLQ retains failed messages for 7 days. So even in the worst case, we have a window to replay them.
+
+[00:05:04] PRIYA CHANDRASEKARAN: That's fine for launch. Flag it for the post-launch sprint. Jess?
+
+[00:05:08] JESS THORNTON: User management and RBAC: GREEN. Three roles — admin, editor, viewer. Invite flow works. Password reset works. Session management works. I tested with 50 concurrent users across 5 accounts — no issues.
+
+[00:05:22] JESS THORNTON: Let me walk through the permissions matrix briefly. Admins can do everything — manage billing, invite users, create and revoke API keys, configure connectors, and obviously run queries. Editors can run queries, configure connectors, and create their own API keys, but they can't manage billing or invite users. Viewers are read-only — they can run queries against existing connectors but can't modify anything.
+
+[00:05:45] JESS THORNTON: Authentication is handled via JWT tokens with a 1-hour expiry and refresh token rotation. We're using bcrypt for password hashing with a cost factor of 12. Rate limiting on the login endpoint is tighter than the general API — 10 attempts per minute per IP, with a 15-minute lockout after 5 failed attempts on a single account.
+
+[00:06:02] NADIA REIS: What about SSO? I know we said it's not launch scope, but have we gotten questions from the pipeline?
+
+[00:06:07] DEREK HUANG: Two of my warm prospects asked about SAML SSO. I told them it's on the Q3 roadmap. Neither one made it a dealbreaker, but it's worth noting.
+
+[00:06:14] JESS THORNTON: The auth layer is designed to plug in SSO — I've got the interface abstracted. When we get to it, it's probably a 2-3 week implementation, not a rewrite.
+
+[00:06:22] JESS THORNTON: One note on the dashboard: I've been maintaining the grid system and chart rendering code in a feature branch. It's not shipping but it's not bitrotting either. When we start the Q2 dashboard sprint, I can hit the ground running. Estimated 4-5 weeks to shippable from where we are now.
+
+[00:06:38] JESS THORNTON: The branch is called `feature/dashboard-builder-v2`. Last rebased on main yesterday. It's got the grid layout system, six chart types — bar, line, area, pie, scatter, and table — and drag-and-drop positioning. What's missing is the data binding layer, saved dashboard persistence, and sharing/embedding. Those are the 4-5 weeks.
+
+[00:06:58] PRIYA CHANDRASEKARAN: Good. Rachel, anything from QA on the RBAC side?
+
+[00:07:02] RACHEL DOMINGUEZ: We ran a permissions matrix test — every combination of role and action. 47 test cases. All passing. I also did manual exploratory testing on the invite flow — tried edge cases like inviting an email that's already in the system, inviting with a role that doesn't exist, inviting to a full account. All handled correctly with appropriate error messages.
+
+[00:07:18] PRIYA CHANDRASEKARAN: Great. Nadia, product status.
+
+[00:07:22] NADIA REIS: Good. I want to confirm the launch feature set for the record:
+
+SHIPPING:
+1. Core Analytics API with real-time streaming
+2. 14 native data connectors
+3. User management with RBAC (admin/editor/viewer)
+4. API documentation and developer portal
+5. Python and JavaScript SDKs
+6. Webhook support (API-configured)
+7. Data export (CSV/JSON)
+
+NOT SHIPPING:
+- Dashboard Builder (Q2 — July 15 target)
+- Custom Alerting Engine (Q2 — July 30 target)
+- Audit Log (Q3)
+- White-Label Reporting (cut)
+- Embedded Analytics (cut)
+
+Status: GREEN on feature completeness for launch scope.
+
+[00:08:02] NADIA REIS: I also want to put on the record why we cut White-Label Reporting and Embedded Analytics. These were both originally on the Q3 roadmap but we decided in the April 22 product review that they're dependent on the dashboard builder, so there's no point scheduling them until dashboard ships and we have user feedback on how people actually use the visualization layer. They're not killed — they're deferred indefinitely pending dashboard adoption data.
+
+[00:08:22] PRIYA CHANDRASEKARAN: Agreed. Smart to not schedule something we can't estimate yet.
+
+[00:08:26] NADIA REIS: One more thing — Claudia, where are we on documentation completeness?
+
+[00:08:30] CLAUDIA FERREIRA: All 14 connector guides are written and reviewed. Each one has a quickstart section, a full configuration reference, and a troubleshooting FAQ. The API reference is auto-generated from the OpenAPI spec — 138 endpoints documented. The Getting Started guide walks through account creation, connector setup, first query, and SDK installation. I also wrote three tutorials: "Real-Time Sales Dashboard with Grafana," "Customer Health Scoring Pipeline," and "Automating Reports with the Python SDK." Total documentation is about 42,000 words across 67 pages.
+
+[00:08:58] CLAUDIA FERREIRA: I'm doing a final proofreading pass today and tomorrow. Should be fully locked by May 12.
+
+[00:09:04] NADIA REIS: Perfect.
+
+[00:09:07] PRIYA CHANDRASEKARAN: Derek, sales readiness.
+
+[00:09:10] DEREK HUANG: Sales readiness: GREEN. Sales deck is updated with $29 pricing. Website landing page is ready — goes live May 15 at midnight. I have 14 warm prospects in the pipeline — 6 of them have committed to signing up on launch day if we deliver what we demoed. That's 6 accounts with an average of 10 seats each, so $1,740 MRR on day one.
+
+[00:09:35] DEREK HUANG: Let me break down the pipeline a bit. Of the 14 warm prospects, the 6 committed ones are: a mid-size e-commerce company doing about $30M ARR, a SaaS company in the HR tech space, a fintech startup, a digital marketing agency, a logistics company, and a B2B marketplace. The remaining 8 are at various stages — 3 are waiting for the dashboard (I told them Q2), 2 are in procurement review, and 3 are still evaluating us against Rivalytics.
+
+[00:10:02] DEREK HUANG: For the 3 evaluating against Rivalytics, the main objection is our lack of a dashboard at launch. I've been handling that by focusing on the API-first value prop — if they're already using a BI tool like Looker, Tableau, or Metabase, our API plugs right in and they get real-time streaming that Rivalytics can't offer. Two of the three have warmed up to that pitch.
+
+[00:10:22] DEREK HUANG: Pricing page shows: $29/mo per seat, annual billing option at $24/mo per seat (17% discount). No free tier — 14-day free trial with full access.
+
+[00:10:32] DEREK HUANG: The competitive positioning doc is finalized and distributed to the team. Everyone knows the Rivalytics battlecard.
+
+[00:10:39] PRIYA CHANDRASEKARAN: Sam, are you ready on the support side?
+
+[00:10:42] SAM WHITFIELD: Yes. I've set up Intercom on the website for live chat — we'll be staffing it 9am to 6pm ET for launch week, and I'll be monitoring off-hours with mobile notifications. I've also created a shared inbox at support@verdana-analytics.io. Response time target is under 2 hours during business hours, under 8 hours off-hours.
+
+[00:10:58] SAM WHITFIELD: I've been through all of Claudia's documentation and the troubleshooting guides. I've also done a dry run of the onboarding flow myself — created an account, connected Stripe and PostgreSQL, ran queries, exported data. I wrote up a support runbook with the 15 most likely questions and their answers. The team — well, it's just me and a contractor right now — reviewed it yesterday.
+
+[00:11:16] SAM WHITFIELD: One thing — I don't have access to the production database for debugging user issues. Can we sort that out before launch?
+
+[00:11:22] MARCUS OKAFOR: I'll set up a read-only IAM role for you by Monday. You'll be able to query user account status and connector configurations, but not modify anything.
+
+[00:11:29] SAM WHITFIELD: Perfect. That's all I need.
+
+[00:11:32] PRIYA CHANDRASEKARAN: Good. Tomoko, finance.
+
+[00:11:35] TOMOKO ABE: Finance: GREEN. Stripe billing integration is tested. Invoicing works. Dunning emails are configured for failed payments. We have $420K in the bank after last month's burn. At current burn rate ($74K/mo), we have 5.7 months of runway. If we hit Derek's Year 1 target of 200 accounts at average $348 MRR, we're cash-flow positive by month 8.
+
+[00:11:58] TOMOKO ABE: Let me elaborate on the billing mechanics. Stripe is configured with metered billing — seat count is tracked and invoiced monthly. When an admin adds a seat mid-cycle, we prorate for the remaining days in the billing period. When they remove a seat, the credit applies to the next invoice. Annual plans are billed upfront — $24/mo times 12 is $288 per seat per year.
+
+[00:12:18] TOMOKO ABE: The dunning sequence for failed payments is: immediate retry, then retry after 3 days, then retry after 7 days with an email to the account admin, then account suspension after 14 days with a final email. We'll manually review any suspended accounts before taking further action — we don't want to auto-delete anyone's data.
+
+[00:12:36] TOMOKO ABE: On the financial model — the $74K monthly burn breaks down as: $42K payroll for the eight of us on salary, $18K for AWS infrastructure (that goes up with usage but auto-scaling keeps it linear), $6K for SaaS tools — Datadog, GitHub, Slack, Notion, Figma, Intercom — and $8K in miscellaneous — legal, accounting, the contractor Sam mentioned.
+
+[00:12:58] PRIYA CHANDRASEKARAN: And we've confirmed with counsel that our terms of service and privacy policy are ready?
+
+[00:13:02] TOMOKO ABE: Yes. Outside counsel reviewed the final versions on May 3. Terms of service, privacy policy, data processing agreement, and SLA are all published on the website. The SLA commits to 99.9% uptime measured monthly, which gives us about 43 minutes of allowed downtime per month.
+
+[00:13:16] MARCUS OKAFOR: We're well within that based on our internal metrics. We've had 99.98% uptime over the past three weeks of internal usage.
+
+[00:13:22] PRIYA CHANDRASEKARAN: Good. Lina, design.
+
+[00:13:25] LINA CHOI: Design: GREEN for what's shipping. All UI surfaces — onboarding flow, account settings, API key management, connector configuration — are polished and tested. The developer portal is functional but not beautiful; I want a design pass in the first post-launch sprint.
+
+[00:13:42] LINA CHOI: Specifically, the developer portal is using a stock ReadMe.io template right now. It works, the information hierarchy is correct, and the code samples render properly, but the typography doesn't match our brand guidelines and the color palette is the ReadMe default blue instead of our green. It's a cosmetic issue — no functional impact — but it'll bother me every time I look at it. I've got the design spec ready; it's about 2-3 days of front-end work to re-skin it.
+
+[00:14:02] LINA CHOI: The onboarding flow I'm more proud of. It's a 4-step wizard: create account, connect first data source, run a sample query, and view results. Average completion time in our internal testing was 6 minutes and 40 seconds. The connector step has inline help that adapts to which connector the user selects — so if they pick Salesforce, they see Salesforce-specific instructions with screenshots of where to find the API credentials in Salesforce Settings.
+
+[00:14:28] LINA CHOI: I also want to flag again — I know I'm a broken record — that we will hear from users about the dashboard. I've prepared a response template for the support team: "We hear you. The dashboard builder is our top priority for Q2 and we're targeting a July release. In the meantime, here's how to build visualizations using our API with [Grafana / Retool / custom code]." That should buy us some goodwill.
+
+[00:14:52] LINA CHOI: I also put together a one-page "Visualization Quick Start" guide that shows how to connect Grafana to our API in under 5 minutes. It's linked from the response template. Claudia reviewed it for accuracy.
+
+[00:15:00] CLAUDIA FERREIRA: Confirmed. The Grafana guide is accurate and tested. I ran through it myself on a fresh Grafana instance.
+
+[00:15:06] PRIYA CHANDRASEKARAN: That's smart. Make sure Derek has that template too for sales conversations.
+
+[00:15:10] DEREK HUANG: Already got it. Lina sent it to me on Wednesday. I've been using a version of it in my prospect calls already — the "API-first plus Grafana" pitch actually resonates well with the technical buyers.
+
+[00:15:20] PRIYA CHANDRASEKARAN: Rachel, any final QA concerns before we make the call?
+
+[00:15:24] RACHEL DOMINGUEZ: No blockers. Full regression is green. I want to run one more pass on Monday and Tuesday — focused on the onboarding flow end-to-end with fresh accounts, and the billing integration with real Stripe test transactions. But I don't expect any surprises. We've been running the full suite daily for the past two weeks and the failure count has been zero for the last six runs.
+
+[00:15:42] RACHEL DOMINGUEZ: One minor note — I found a UI inconsistency where the "Copy API Key" button on the settings page shows "Copied!" for 3 seconds on Chrome but only 1.5 seconds on Firefox. It's a CSS animation timing issue. Not a blocker, but Lina, can you normalize that?
+
+[00:15:54] LINA CHOI: Yeah, that's a one-line fix. I'll push it today.
+
+[00:15:58] PRIYA CHANDRASEKARAN: All right. I'm hearing green across the board. Let me do a final review of the launch decisions for the record.
+
+[00:16:05] PRIYA CHANDRASEKARAN: Before I do — anyone on the remote line have questions? Anything we haven't covered?
+
+[00:16:10] VICTOR SATO: I'm good. Just want to confirm — Marcus, are we doing the DNS cutover rehearsal on Tuesday?
+
+[00:16:14] MARCUS OKAFOR: Yes. Tuesday at 4pm ET. You, me, and Amir. We'll simulate the cutover against the staging environment to make sure the Route 53 health checks and failover routing work as expected. Should take about 30 minutes.
+
+[00:16:24] VICTOR SATO: Copy that.
+
+[00:16:27] CLAUDIA FERREIRA: I'm good too. Documentation will be locked by Monday evening. Any last-minute changes to feature descriptions should come to me by end of day Sunday.
+
+[00:16:34] SAM WHITFIELD: No questions from me. I'll share the support runbook with the full team on Monday for visibility.
+
+[00:16:40] PRIYA CHANDRASEKARAN: Good. Okay, for the record:
+
+PRICING: $29/mo per seat. Annual: $24/mo per seat. Locked. This price point undercuts Rivalytics by 41% on monthly and by 30% against their annual rate. Rationale is documented in the May 1 pricing meeting notes.
+
+FEATURE SET: API-first, no dashboard at launch. Dashboard is Q2 priority. Rationale is documented in the May 4 feature triage notes.
+
+POSITIONING: Real-time streaming vs Rivalytics's batch ETL. API-first vs dashboard-first. 41% cheaper. Rationale is documented in the May 7 competitive positioning doc.
+
+LAUNCH DATE: May 15, 2025. Website goes live at midnight ET. Product Hunt post at 9am ET. Derek's team starts outreach to warm prospects at 10am ET.
+
+[00:17:18] PRIYA CHANDRASEKARAN: Ownership assignments for the final push:
+
+SHIP DATE OWNERS:
+- Marcus: Infrastructure stable and scaled by May 14 EOD
+- Amir: API endpoints frozen, no changes after May 13
+- Jess: RBAC and user management frozen after May 12
+- Nadia: All product copy and documentation final by May 13
+- Derek: Sales and marketing materials live by May 14
+- Tomoko: Billing system tested end-to-end by May 13
+- Lina: All UI surfaces frozen after May 12
+
+[00:17:42] PRIYA CHANDRASEKARAN: Additional assignments for launch week:
+- Victor: On-call infrastructure monitoring starting May 14 6pm ET
+- Rachel: Final regression pass completed by May 13 EOD
+- Claudia: Documentation freeze by May 12, available for emergency edits only through launch
+- Sam: Support channels live and staffed by May 15 8am ET
+
+[00:18:02] PRIYA CHANDRASEKARAN: "Frozen" means no code changes to that surface unless it's a P0 bug — something that prevents a user from signing up, logging in, or running a query. If a P0 comes in after freeze, Marcus and I approve the hotfix together. Everything else waits for the post-launch sprint.
+
+[00:18:16] MARCUS OKAFOR: Clear. I'll set up a `release/v1.0` branch on Monday. All freeze-date code goes into that branch. Main continues for post-launch work.
+
+[00:18:24] AMIR PATEL: Should we also set up a feature flag for the webhook retry improvement? That way we can merge the code but keep it off until we're ready to enable it post-launch.
+
+[00:18:31] MARCUS OKAFOR: Good idea. Yes, let's use LaunchDarkly for that. I'll create the flag — call it `webhook-retry-v2` — and we'll default it to off. Amir, you can start the implementation in main and we'll toggle it on during the first post-launch sprint.
+
+[00:18:42] AMIR PATEL: Sounds good.
+
+[00:18:45] PRIYA CHANDRASEKARAN: All right. Final question. Does anyone have a reason NOT to ship on May 15?
+
+[00:18:52] [Silence — approximately 5 seconds]
+
+[00:18:57] MARCUS OKAFOR: Ship it.
+
+[00:18:59] NADIA REIS: Ship it.
+
+[00:19:00] DEREK HUANG: Let's go.
+
+[00:19:02] JESS THORNTON: Ready.
+
+[00:19:03] AMIR PATEL: Good to go.
+
+[00:19:04] RACHEL DOMINGUEZ: Green from QA.
+
+[00:19:05] TOMOKO ABE: Finance is ready.
+
+[00:19:07] LINA CHOI: Let's ship.
+
+[00:19:09] PRIYA CHANDRASEKARAN: We're a go. May 15. Let's make it happen.
+
+[00:19:14] [Applause from in-room attendees. Several claps audible on Zoom audio.]
+
+***
+
+GO/NO-GO DECISION RECORD
+
+DECISION: GO
+LAUNCH DATE: May 15, 2025
+DECISION MAKER: Priya Chandrasekaran, CEO
+DATE OF DECISION: May 10, 2025
+ATTENDEES AT TIME OF DECISION: 12 (8 in-room, 4 remote)
+
+LAUNCH CONFIGURATION:
+- Product: Verdana Analytics Platform (API-first)
+- Pricing: $29/mo per seat (annual: $24/mo)
+- Trial: 14-day free trial, full access
+- Feature set: Core API, 14 connectors, RBAC, docs, SDKs, webhooks, export
+- Deferred: Dashboard (Q2), Alerting (Q2), Audit Log (Q3)
+- Cut (indefinitely deferred): White-Label Reporting, Embedded Analytics
+
+STATUS BY AREA:
+| Area | Owner | Status | Notes |
+|:---|:---|:---|:---|
+| Infrastructure | Marcus Okafor | GREEN | Two regions, auto-scaling, failover tested |
+| Core API | Amir Patel | GREEN | 14 connectors, 312 integration tests passing |
+| User Management / RBAC | Jess Thornton | GREEN | 3 roles, 47 permission test cases |
+| Product | Nadia Reis | GREEN | Feature set locked, deferred items documented |
+| Sales | Derek Huang | GREEN | 14 prospects, 6 committed day-one accounts |
+| Finance | Tomoko Abe | GREEN | Stripe tested, 5.7 months runway |
+| Design | Lina Choi | GREEN | All shipping surfaces polished |
+| QA | Rachel Dominguez | GREEN | Full regression passing, 6 consecutive green runs |
+| Documentation | Claudia Ferreira | GREEN | 67 pages, 42K words, final proofread in progress |
+| Support | Sam Whitfield | GREEN | Runbook written, channels configured |
+
+RISK REGISTER:
+| Risk | Probability | Impact | Mitigation |
+|:---|:---|:---|:---|
+| Webhook drops under high load | Low | Low | Fix in post-launch sprint; launch traffic too low to trigger |
+| Users ask for dashboard | High | Medium | Response template prepared; Q2 priority; workaround docs ready |
+| Rivalytics price response | Low (6-9mo) | High | Monitor monthly; our cost structure allows us to sustain $29 |
+| Infrastructure scaling | Low | High | Auto-scaling configured; load tested to 500 accounts |
+| Low initial adoption | Medium | Medium | 6 committed day-one accounts; 14 warm prospects in pipeline |
+| SSO requests from enterprise prospects | Medium | Low | Auth layer designed for SSO plug-in; Q3 roadmap |
+| Developer portal branding mismatch | High | Low | Design spec ready; 2-3 days post-launch |
+
+POST-LAUNCH PRIORITIES (Sprint 1: May 15-29):
+1. Monitor infrastructure stability
+2. Respond to user feedback
+3. Fix webhook reliability under load
+4. Design polish on developer portal
+5. Begin Q2 dashboard sprint kickoff
+6. Set up read-only support access to production
+7. Normalize CSS animation timing across browsers
+
+BLOCKERS: None identified.
+
+***
+
+ACTION ITEMS FROM MEETING:
+
+| # | Action Item | Owner | Due Date |
+|:---|:---|:---|:---|
+| 1 | Create `release/v1.0` branch | Marcus Okafor | May 12 |
+| 2 | Set up LaunchDarkly flag `webhook-retry-v2` (default: off) | Marcus Okafor | May 12 |
+| 3 | Set up read-only IAM role for support access | Marcus Okafor | May 12 |
+| 4 | DNS cutover rehearsal (staging) | Marcus, Victor, Amir | May 13, 4pm ET |
+| 5 | Fix "Copy API Key" animation timing (Chrome/Firefox) | Lina Choi | May 10 |
+| 6 | Final documentation proofreading pass | Claudia Ferreira | May 12 |
+| 7 | Share support runbook with full team | Sam Whitfield | May 12 |
+| 8 | Final regression pass (onboarding + billing) | Rachel Dominguez | May 13 |
+| 9 | Distribute dashboard response template to sales | Lina Choi | Done (sent May 7) |
+| 10 | API endpoints code freeze | Amir Patel | May 13 |
+| 11 | RBAC and UI code freeze | Jess Thornton, Lina Choi | May 12 |
+| 12 | Billing end-to-end test with Stripe test mode | Tomoko Abe | May 13 |
+
+***
+
+ALL-HANDS MESSAGE (posted to #general Slack channel after meeting):
+
+@channel We are a GO for May 15 launch. Every status check came back green. Pricing is locked at $29/mo. We're shipping API-first with 14 connectors and full real-time streaming. Dashboard is coming in Q2.
+
+This is what we've been building toward. Five more days. Let's finish strong and ship something we're proud of.
+
+— Priya
+
+Reactions: 🚀 (8) 🎉 (6) 💪 (4) 🔥 (3)
+
+THREAD REPLIES:
+
+[Marcus Okafor] On-call rotation reminder: I've got May 14-15 first shift (6pm-2am), Victor has second (2am-10am), Amir has third (10am-6pm). Swap requests come to me by Monday EOD.
+
+[Derek Huang] Six accounts lined up for day one. Let's get them a product worth paying for. (Already is.)
+
+[Lina Choi] The onboarding wizard is *chef's kiss*. Six minutes and forty seconds to first query. Let's see Rivalytics beat that.
+
+[Sam Whitfield] Support channels are prepped. I'll be on Intercom starting 8am launch day. Bring on the questions.
+
+[Jess Thornton] Dashboard branch is rebased and ready. The moment Q2 sprint kicks off, we're moving fast.
+
+***
+
+APPENDIX A: LAUNCH DAY TIMELINE
+
+| Time (ET) | Action | Owner |
+|:---|:---|:---|
+| May 14, 4:00 PM | DNS cutover rehearsal (staging) | Marcus, Victor, Amir |
+| May 14, 6:00 PM | On-call rotation begins (Shift 1) | Marcus |
+| May 14, 11:59 PM | DNS cutover to production | Marcus |
+| May 15, 12:00 AM | Website and product live | Marcus |
+| May 15, 2:00 AM | On-call Shift 2 begins | Victor |
+| May 15, 7:00 AM | Team standup — status check | Priya |
+| May 15, 8:00 AM | Support channels go live | Sam |
+| May 15, 9:00 AM | Product Hunt launch post | Nadia |
+| May 15, 9:00 AM | Twitter/LinkedIn announcements | Derek |
+| May 15, 10:00 AM | Outreach to warm prospects begins | Derek |
+| May 15, 10:00 AM | On-call Shift 3 begins | Amir |
+| May 15, 12:00 PM | First metrics check — signups, API calls | Nadia |
+| May 15, 3:00 PM | Second metrics check + incident review | Marcus |
+| May 15, 6:00 PM | End-of-day launch retrospective | Priya |
+
+APPENDIX B: KEY METRICS FOR LAUNCH DAY MONITORING
+
+| Metric | Source | Threshold | Escalation |
+|:---|:---|:---|:---|
+| API p99 latency | Datadog | > 800ms | PagerDuty alert → on-call engineer |
+| API error rate (5xx) | Datadog | > 1% | PagerDuty alert → on-call engineer |
+| Signup count | Stripe + internal DB | < 3 by noon | Flag to Derek and Priya |
+| First query success rate | Application logs | < 80% | Flag to Amir and Nadia |
+| WebSocket connection count | Datadog | > 200 concurrent | Monitor — no auto-scale yet |
+| RDS CPU utilization | CloudWatch | > 70% | Victor adds read replica |
+| Support ticket volume | Intercom | > 20/hour | Sam escalates to Priya for triage help |
+
+APPENDIX C: ESCALATION CONTACTS
+
+| Severity | Definition | Response Time | Escalation Path |
+|:---|:---|:---|:---|
+| P0 | Service down or data loss | 15 minutes | On-call → Marcus → Priya |
+| P1 | Major feature broken (signup, login, queries) | 1 hour | On-call → Marcus |
+| P2 | Minor feature broken (export, webhooks) | 4 hours | On-call → ticket for next business day |
+| P3 | Cosmetic or documentation issue | Next business day | Sam → Lina or Claudia |
+
+DOCUMENT STATUS: FINAL
+DISTRIBUTION: All team members
+PREPARED BY: Claudia Ferreira
+REVIEWED BY: Priya Chandrasekaran

@@ -1,0 +1,780 @@
+================================================================================
+FOLDLY ENGINEERING — SLACK EXPORT
+================================================================================
+Workspace     : foldly-eng
+Channel       : #engineering
+Channel ID    : C04XKQR7N2P
+Export Date   : 2025-04-04
+Messages      : 268
+Participants  : Priya Kaur, Marcus Webb, Jess Nakamura, Danny Okafor, Lina Torres, Ravi Mehta
+Channel Desc  : Main engineering channel — builds, deploys, feature chat
+================================================================================
+
+[2025-04-04 06:02:44] marcus.webb
+shipped billing. pushed to prod just now. going back to sleep
+
+[2025-04-04 06:03:11] marcus.webb
+actually no i'm too wired. here's what's in there
+
+[2025-04-04 06:03:38] marcus.webb
+`src/payments/billing.py` — the whole thing:
+- `create_customer(org_id, email, name)` — creates stripe customer, maps to our org table
+- `attach_payment_method(customer_id, pm_id)` — links a payment method, sets as default
+- `create_subscription(customer_id, price_id, trial_days=None)` — subscription w/ optional trial
+- `upgrade_subscription(sub_id, new_price_id)` — prorated mid-cycle upgrade
+- `downgrade_subscription(sub_id, new_price_id)` — queued for next billing cycle
+- `cancel_subscription(sub_id, immediate=False)` — cancel now or at period end
+- `generate_invoice(customer_id)` — fetches latest stripe invoice, formats for our frontend
+- `send_invoice_email(invoice_id)` — triggers transactional email via sendgrid
+- `handle_webhook(payload, sig_header)` — processes: invoice.paid, invoice.payment_failed, customer.subscription.created, customer.subscription.updated, customer.subscription.deleted, payment_intent.succeeded
+- `get_billing_portal_url(customer_id)` — generates stripe customer portal link
+- `apply_coupon(sub_id, coupon_code)` — applies discount to existing sub
+
+~800 lines. one file. it's done
+
+    :eyes: 3  :rocket: 2
+
+---
+
+[2025-04-04 08:31:09] lina.torres
+morning. i see a deploy at 06:02 in the CI logs. @marcus.webb that was you?
+
+[2025-04-04 08:31:34] marcus.webb
+yeah. billing system. couldn't sleep so i figured i'd finish it off and push. been working on it since tuesday
+
+[2025-04-04 08:31:58] lina.torres
+the CI pipeline shows green but that's just lint + build. we don't have payment-specific tests in CI
+
+[2025-04-04 08:32:22] marcus.webb
+i know. i tested it manually against stripe test mode. ran through the whole flow — customer creation, subscription, upgrade, downgrade, cancel, invoice fetch, webhook delivery. it all works
+
+[2025-04-04 08:32:49] lina.torres
+ok. the deploy went to the single prod instance?
+
+[2025-04-04 08:33:14] marcus.webb
+yep. standard deploy. nothing fancy
+
+---
+
+[2025-04-04 08:47:55] priya.kaur
+just catching up on scrollback. marcus — the billing system is live? the whole thing?
+
+[2025-04-04 08:48:18] marcus.webb
+the whole thing. stripe integration, subscriptions, invoicing, webhooks. one file, clean top-to-bottom. you can read it like a story
+
+[2025-04-04 08:48:42] priya.kaur
+how long did this take?
+
+[2025-04-04 08:49:05] marcus.webb
+started tuesday night. had the stripe API calls working wednesday. thursday i wired up the webhook handler and the invoice logic. this morning i added the email triggers and the billing portal link and shipped it
+
+[2025-04-04 08:49:28] priya.kaur
+three days. that's wild. and it's tested?
+
+[2025-04-04 08:49:51] marcus.webb
+manually tested in stripe test mode. created 4 test customers, subscribed them to different plans, ran upgrades and downgrades, triggered failed payments with the 4000000000000341 test card, verified webhooks landed correctly. i also verified with the live keys after deploy — created a test subscription on our own org and confirmed the invoice showed up in stripe's live dashboard
+
+[2025-04-04 08:50:15] priya.kaur
+ok that's thorough. no automated tests though?
+
+[2025-04-04 08:50:38] marcus.webb
+not yet. the thing is, most of the logic is just calling stripe's SDK. there's not a lot of our own business logic to unit test. the webhook handler has some branching but it's straightforward. i'd rather spend time on actual features than writing mocks for stripe API calls
+
+[2025-04-04 08:51:02] priya.kaur
+fair enough. ravi is going to lose his mind — he's been pushing me about billing for 3 weeks. nara logistics can't sign the contract until we can actually invoice them
+
+    :100: 2
+
+---
+
+[2025-04-04 08:55:33] ravi.mehta
+WAIT. billing is live?? @marcus.webb you absolute legend
+
+[2025-04-04 08:55:56] marcus.webb
+:sunglasses:
+
+[2025-04-04 08:56:19] ravi.mehta
+ok i need to know exactly what's supported. can we do:
+1. annual subscriptions with upfront payment?
+2. monthly subscriptions?
+3. custom pricing (nara is getting a negotiated rate)?
+4. metered/usage-based billing later?
+5. multi-currency?
+
+[2025-04-04 08:56:44] marcus.webb
+1. yes — set the price to an annual recurrence in stripe, pass the price_id
+2. yes — same thing, monthly price_id
+3. yes — create a custom price in the stripe dashboard, use that price_id
+4. not yet but the stripe SDK supports it. i'd need to add a `report_usage()` function
+5. no. USD only right now. stripe handles it on their end but we'd need to handle currency display in our frontend
+
+[2025-04-04 08:57:08] ravi.mehta
+ok so for nara i can just create a custom price in stripe and then create their subscription through our API?
+
+[2025-04-04 08:57:31] marcus.webb
+exactly. create the price in the stripe dashboard with their negotiated rate, then hit `POST /api/billing/subscribe` with their org_id and the price_id. it'll create the customer, attach their payment method, and start the subscription
+
+[2025-04-04 08:57:55] ravi.mehta
+can i do that myself or do you need to do it?
+
+[2025-04-04 08:58:18] marcus.webb
+the stripe dashboard part you can do yourself. the API call — actually let me just build a quick admin endpoint so you can do the whole thing from the admin panel. give me 30 min
+
+[2025-04-04 08:58:41] ravi.mehta
+:pray: :pray: :pray:
+
+---
+
+[2025-04-04 09:05:22] jess.nakamura
+morning. reading the billing.py scrollback. @marcus.webb — one file for everything? customer creation, subscription management, webhooks, invoice rendering, email sending?
+
+[2025-04-04 09:05:47] marcus.webb
+yep. ~800 lines. each function is 20-50 lines. they're well-organized — CRUD at the top, subscription lifecycle in the middle, webhooks at the bottom, helpers at the end. you can CMD-F to find anything
+
+[2025-04-04 09:06:12] jess.nakamura
+i mean it works but that's a lot of surface area in one module. if someone breaks the invoice rendering they could also break customer creation in the same deploy
+
+[2025-04-04 09:06:38] marcus.webb
+that's true of any module in any language. the question is whether splitting it into 6 files actually reduces that risk or just makes the code harder to navigate. i'd argue it makes it harder. with one file you can see everything at once
+
+[2025-04-04 09:07:01] jess.nakamura
+ok i see the argument. what about the webhook handler specifically? i'm looking at it now
+
+[2025-04-04 09:07:25] marcus.webb
+what about it?
+
+[2025-04-04 09:07:48] jess.nakamura
+it's a 190-line function with an if/elif chain for each event type. each branch does its own DB writes and status updates. the `invoice.payment_failed` branch is interesting:
+
+```python
+elif event['type'] == 'invoice.payment_failed':
+    invoice = event['data']['object']
+    customer_id = invoice['customer']
+    attempt_count = invoice['attempt_count']
+
+    org = db.query(Organization).filter_by(stripe_customer_id=customer_id).first()
+    if not org:
+        logger.warning(f"Payment failed for unknown customer: {customer_id}")
+        return {"status": "ok"}
+
+    org.payment_status = 'past_due'
+    org.failed_payment_count = attempt_count
+    db.commit()
+
+    if attempt_count >= 3:
+        org.subscription_status = 'suspended'
+        db.commit()
+        send_suspension_email(org.billing_email, org.name)
+    else:
+        send_payment_failed_email(org.billing_email, org.name, attempt_count)
+```
+
+what happens if the email send fails after you've already committed the status change?
+
+[2025-04-04 09:08:14] marcus.webb
+the status change is the important part. the email is a notification. if it fails, the customer still has the correct status in our system. we can always resend the email manually
+
+[2025-04-04 09:08:37] jess.nakamura
+sure but you're not catching exceptions on the email send. if sendgrid is down, that'll raise, and the whole webhook handler returns a 500. stripe will retry the webhook. your idempotency check will see the event ID and skip it. but now the email never gets sent
+
+[2025-04-04 09:09:02] marcus.webb
+hm. good catch. i should wrap the email sends in a try/except. if sendgrid fails we log it and continue
+
+[2025-04-04 09:09:25] jess.nakamura
+yeah. or queue the emails separately so they're decoupled from the webhook handler entirely
+
+[2025-04-04 09:09:48] marcus.webb
+that's overengineering it for now. a try/except is fine. i'll add it
+
+    :thumbsup: 1
+
+---
+
+[2025-04-04 09:15:33] danny.okafor
+morning team. i'm looking at billing.py because i need to understand the data model for the usage dashboard i'm planning. couple questions @marcus.webb
+
+[2025-04-04 09:15:58] danny.okafor
+1. the `subscriptions` table — i see columns for `stripe_sub_id`, `org_id`, `price_id`, `status`, `current_period_start`, `current_period_end`, `created_at`. is there a migration file?
+
+[2025-04-04 09:16:22] marcus.webb
+no migration. i added the table with a raw SQL CREATE TABLE in the billing setup function. it runs on first import if the table doesn't exist
+
+[2025-04-04 09:16:46] danny.okafor
+oh. so there's a `CREATE TABLE IF NOT EXISTS` in the python code?
+
+[2025-04-04 09:17:09] marcus.webb
+yeah. lines 28-45. it creates the subscriptions table, the invoices table, and the webhook_events table. all three are created inline. simpler than managing alembic migrations for a feature that didn't exist yesterday
+
+[2025-04-04 09:17:33] danny.okafor
+ok. and question 2 — the amounts. i see `unit_amount` in the subscriptions table and `amount_due` in the invoices table. both in cents?
+
+[2025-04-04 09:17:56] marcus.webb
+yep. everything is cents. stripe works in cents, we store in cents, frontend divides by 100 for display. no conversions in the backend
+
+[2025-04-04 09:18:19] danny.okafor
+is there a constant or a helper for that? like `cents_to_dollars()` or something?
+
+[2025-04-04 09:18:42] marcus.webb
+no, just division. `amount / 100` wherever you need to display it. keeping it simple
+
+[2025-04-04 09:19:05] danny.okafor
+got it. and one more — the `payment_status` field on the organizations table. i see you added it. what are the valid values?
+
+[2025-04-04 09:19:28] marcus.webb
+`active`, `past_due`, `suspended`, `cancelled`. they're not enforced by the DB — just strings. the webhook handler sets them based on stripe events
+
+[2025-04-04 09:19:52] danny.okafor
+any chance we could use an enum?
+
+[2025-04-04 09:20:15] marcus.webb
+we could but it's the same 4 values everywhere. an enum would just add another thing to maintain. if we need a new status we'd have to run a migration to add it to the enum vs just using a new string
+
+[2025-04-04 09:20:38] danny.okafor
+fair. i'll just use the strings. thanks
+
+    :thumbsup: 1
+
+---
+
+[2025-04-04 09:35:17] marcus.webb
+@ravi.mehta admin endpoint is done. go to the admin panel, there's a new "Billing" section. you can:
+- search for an org
+- create/update their stripe customer
+- create a subscription with any price_id
+- view their current subscription status
+- view their invoice history
+
+all wired to the same billing.py functions under the hood
+
+[2025-04-04 09:35:42] ravi.mehta
+you're a machine. testing now
+
+[2025-04-04 09:38:55] ravi.mehta
+ok i'm in the billing admin. i searched for our test org, clicked "create subscription", pasted the price_id, and... it worked. subscription shows as active. stripe dashboard confirms it. this is awesome
+
+    :tada: 4
+
+[2025-04-04 09:39:18] ravi.mehta
+i'm going to set up nara's account right now. their CFO already sent over the payment method details
+
+[2025-04-04 09:39:41] priya.kaur
+do it. let's get them invoiced today if possible
+
+[2025-04-04 09:40:04] ravi.mehta
+on it. @marcus.webb does the system automatically send an invoice email when the subscription starts?
+
+[2025-04-04 09:40:28] marcus.webb
+yes. when stripe creates the first invoice and it's paid, the `invoice.paid` webhook fires, we record it, and send a receipt email via sendgrid. automatic
+
+[2025-04-04 09:40:51] ravi.mehta
+perfect
+
+---
+
+[2025-04-04 10:12:08] jess.nakamura
+hey @danny.okafor you still working on the folder tree component? i need to figure out where to put the "shared with me" section in the sidebar
+
+[2025-04-04 10:12:33] danny.okafor
+yeah i'm wrapping it up. the tree renders all levels now — folders, subfolders, documents. click a folder to expand, click a doc to open it. drag and drop for reordering is next week
+
+[2025-04-04 10:12:57] jess.nakamura
+can you add a top-level node for "Shared With Me"? it would show docs that other users shared with the current user. i'll handle the backend query
+
+[2025-04-04 10:13:21] danny.okafor
+sure. is it a virtual folder or a real folder?
+
+[2025-04-04 10:13:44] jess.nakamura
+virtual. it doesn't exist in the folder hierarchy. it's a computed view based on the doc_permissions table. think of it like gmail's "shared with me" — it's a filter, not a real container
+
+[2025-04-04 10:14:07] danny.okafor
+got it. i'll add a special node type for virtual folders. should be straightforward
+
+[2025-04-04 10:14:30] jess.nakamura
+:thumbsup: thanks. ship whenever it's ready
+
+---
+
+[2025-04-04 10:45:22] lina.torres
+@priya.kaur heads up — i've been looking at our prod server metrics and disk usage is at 72%. the main culprits are:
+- postgres WAL files taking 8GB (we're not archiving or pruning old WAL segments)
+- docker images from old deploys taking 6GB
+- application logs at 4GB (no log rotation configured)
+
+none of this is critical yet but at current growth rate we'll hit 90% in about 3 weeks
+
+[2025-04-04 10:45:48] priya.kaur
+can you clean it up and set up log rotation?
+
+[2025-04-04 10:46:12] lina.torres
+yeah. i'll prune the old docker images today and set up logrotate for the app logs. the WAL situation is trickier — i need to configure postgres archiving properly. that'll be a monday thing
+
+[2025-04-04 10:46:35] priya.kaur
+sounds good. thanks for staying on top of it
+
+[2025-04-04 10:46:58] lina.torres
+:thumbsup: that's the job
+
+---
+
+[2025-04-04 11:02:44] danny.okafor
+@marcus.webb i was poking around billing.py a bit more and i have a question about the webhook idempotency. you're storing processed event IDs in the `webhook_events` table and loading them into a set on startup:
+
+```python
+# Load processed events on module import
+_processed_events = set()
+
+def _load_processed_events():
+    rows = db.query(WebhookEvent.stripe_event_id).all()
+    for row in rows:
+        _processed_events.add(row[0])
+
+_load_processed_events()
+```
+
+so this set lives in memory for the lifetime of the process. what happens if we restart the server? the set reloads from the DB so that's fine. but what about the gap between when a new event is processed and when the server might crash before the event ID is persisted?
+
+[2025-04-04 11:03:08] marcus.webb
+the event ID is written to the DB as the first step inside each webhook branch. so if the server crashes mid-handler, the event ID is already in the DB. on restart it gets loaded into the set and we skip the duplicate
+
+[2025-04-04 11:03:32] danny.okafor
+ah wait, i'm reading it again. the event ID write is actually at the END of the handler, not the beginning:
+
+```python
+    # ... handle the event ...
+
+    # Record that we processed this event
+    db.add(WebhookEvent(stripe_event_id=event['id'], event_type=event['type'], processed_at=datetime.utcnow()))
+    db.commit()
+    _processed_events.add(event['id'])
+```
+
+so if the server crashes after processing the event but before the commit, the event ID is NOT in the DB. stripe retries. the handler processes the event again. the payment_failed handler runs twice, sends two emails
+
+[2025-04-04 11:03:56] marcus.webb
+hmm you're right. the write should be at the beginning. let me move it
+
+[2025-04-04 11:04:19] danny.okafor
+but then if it crashes after the write but before the actual handling, the event is marked as processed but never actually handled
+
+[2025-04-04 11:04:42] marcus.webb
+right. the safe thing is to make the handlers actually idempotent — so processing the same event twice has the same result as processing it once. the invoice.paid handler should check if we already recorded the invoice. the subscription handlers should check the current state before updating
+
+[2025-04-04 11:05:05] danny.okafor
+yeah that's the proper fix. is it worth doing now?
+
+[2025-04-04 11:05:28] marcus.webb
+honestly? no. the server hasn't crashed once since we launched. the chance of it crashing in the exact window between processing a webhook and committing the event ID is astronomically small. we'd be spending hours on a problem that'll never happen
+
+[2025-04-04 11:05:52] danny.okafor
+ok. just wanted to flag it. the current implementation is fine for 99.99% of cases
+
+[2025-04-04 11:06:15] marcus.webb
+appreciated. i'll add it to the hardening list. when we have enterprise customers doing thousands of transactions a day we'll need it. right now we have one customer
+
+    :thumbsup: 2
+
+---
+
+[2025-04-04 11:30:11] ravi.mehta
+NARA LOGISTICS IS LIVE :tada: :tada: :tada:
+
+just created their enterprise account through the admin panel. subscription is active, first invoice of $24,000 generated and paid. their CFO confirmed receipt of the invoice email
+
+[2025-04-04 11:30:35] ravi.mehta
+screenshot of the stripe dashboard showing nara's subscription: [nara_stripe_sub.png]
+
+    :tada: 6  :moneybag: 4  :rocket: 3
+
+[2025-04-04 11:30:58] priya.kaur
+INCREDIBLE. first enterprise customer. $24K ARR. this is a huge milestone
+
+[2025-04-04 11:31:22] marcus.webb
+:sunglasses: told you billing.py works
+
+[2025-04-04 11:31:45] jess.nakamura
+congrats everyone :clap:
+
+[2025-04-04 11:32:08] danny.okafor
+:party_parrot: first paying enterprise customer!
+
+[2025-04-04 11:32:31] lina.torres
+nice work. now please nobody touch billing.py for at least 48 hours so we can see how it behaves in prod with a real customer
+
+[2025-04-04 11:32:55] marcus.webb
+no promises :smirk:
+
+---
+
+[2025-04-04 11:45:17] ravi.mehta
+ok while we're celebrating — nara's onboarding list. they need:
+1. SSO integration (SAML) — @lina.torres you said next week?
+2. audit log for document access — who viewed what and when
+3. IP allowlisting — they want to restrict access to their office IPs
+4. custom branding on shared documents (their logo, colors)
+5. bulk user provisioning via CSV upload
+6. role-based access control — admin, editor, viewer roles
+
+this is from their IT director. some of these are hard requirements for their security review
+
+[2025-04-04 11:45:42] priya.kaur
+ok let's prioritize. SSO is #1, lina is on it. audit log is #2 — @jess.nakamura can you take that?
+
+[2025-04-04 11:46:05] jess.nakamura
+yeah. basic audit logging is straightforward — middleware that logs every API call with the user, endpoint, resource ID, and timestamp. i can have it running by wednesday
+
+[2025-04-04 11:46:28] priya.kaur
+perfect. IP allowlisting — @lina.torres can you do that with nginx?
+
+[2025-04-04 11:46:52] lina.torres
+yeah it's just an nginx config change per customer. i can set it up but we'll need a way to manage the IP lists per org. right now it would be a manual nginx edit every time they add an IP
+
+[2025-04-04 11:47:15] priya.kaur
+manual is fine for now. we have one enterprise customer. @marcus.webb custom branding?
+
+[2025-04-04 11:47:38] marcus.webb
+that's a frontend thing. @jess.nakamura @danny.okafor one of you want to pick it up?
+
+[2025-04-04 11:48:01] danny.okafor
+i can do it. store logo URL and brand color per org, apply them in the shared doc renderer. probably 2 days of work
+
+[2025-04-04 11:48:24] priya.kaur
+do it. bulk provisioning and RBAC can wait. SSO, audit log, IP allowlisting, and custom branding — let's get those done by end of next week
+
+[2025-04-04 11:48:47] ravi.mehta
+i'll tell nara's IT director we'll have SSO and audit logging by end of next week, branding and IP allowlisting the week after. that should satisfy their security review timeline
+
+[2025-04-04 11:49:10] priya.kaur
+:thumbsup: perfect. everyone clear on priorities?
+
+    :thumbsup: 5
+
+---
+
+[2025-04-04 12:15:33] jess.nakamura
+lunch break question — does anyone else think we should have a code review process? not a heavy one. just a quick "someone else looks at the diff before it goes to prod" thing
+
+[2025-04-04 12:15:58] marcus.webb
+we talked about this before. the overhead of waiting for reviews slows us down. we're 5 engineers. everyone is senior enough to ship their own code
+
+[2025-04-04 12:16:22] jess.nakamura
+i'm not talking about gatekeeping. just a second pair of eyes. especially for payment code. the billing system went from nonexistent to production with zero external review
+
+[2025-04-04 12:16:45] marcus.webb
+and it works perfectly. nara just paid their first invoice. what would a review have caught that manual testing didn't?
+
+[2025-04-04 12:17:08] jess.nakamura
+the email-send-inside-webhook issue we discussed this morning. the idempotency gap danny found. those are the kinds of things a reviewer spots because they're reading with fresh eyes
+
+[2025-04-04 12:17:32] marcus.webb
+both of those are edge cases that don't affect the happy path. and we found them anyway through normal conversation in this channel. so slack IS our code review
+
+[2025-04-04 12:17:55] danny.okafor
+slack as code review is actually kind of true. we all read each other's code when we need to understand something. issues surface naturally
+
+[2025-04-04 12:18:18] priya.kaur
+i hear jess's point. but right now speed is our advantage. the moment we add process gates we lose that. let's keep doing what we're doing — ship fast, fix issues as they come up. we can revisit when the team grows
+
+[2025-04-04 12:18:42] jess.nakamura
+ok. just wanted to raise it. not going to die on this hill
+
+    :thumbsup: 2
+
+---
+
+[2025-04-04 13:05:14] lina.torres
+docker image prune done. freed 6.2GB. set up logrotate for the app logs — 7-day retention, daily rotation, gzip compression. disk usage down to 58%
+
+[2025-04-04 13:05:38] lina.torres
+also while i was in there i noticed the postgres config. we're running with the default `shared_buffers = 128MB` on a 16GB instance. that's... not great. postgres recommends 25% of system memory, so we should be at 4GB
+
+[2025-04-04 13:06:02] lina.torres
+i'll tune it on monday. need to restart postgres for the change to take effect and i don't want to do that while nara is actively using the system on their first day
+
+[2025-04-04 13:06:25] priya.kaur
+yeah don't restart prod database on a friday. monday morning
+
+[2025-04-04 13:06:48] lina.torres
+:thumbsup: that was my thinking
+
+---
+
+[2025-04-04 13:30:22] ravi.mehta
+update from the sales front. i just got off a call with belmont partners. they're very interested but they want two things we don't have:
+1. document analytics — views, time spent, heatmaps of which sections people read
+2. expiring links — share a doc with a link that expires after X days
+
+both are "nice to have" for them, not blockers. but it would move the deal along faster
+
+[2025-04-04 13:30:48] priya.kaur
+doc analytics is a big lift. expiring links is not. @jess.nakamura how hard is expiring links?
+
+[2025-04-04 13:31:12] jess.nakamura
+not hard at all. add an `expires_at` column to the share_links table, check it in the link resolver middleware. half a day of work
+
+[2025-04-04 13:31:35] priya.kaur
+can you squeeze it in next week between the audit log work?
+
+[2025-04-04 13:31:58] jess.nakamura
+yeah. audit log is the priority but expiring links is a quick win. i'll knock it out tuesday afternoon
+
+[2025-04-04 13:32:22] ravi.mehta
+:pray: that would be amazing. i'll tell belmont we can demo it next week
+
+[2025-04-04 13:32:45] priya.kaur
+doc analytics goes on the roadmap for may. not touching it now
+
+---
+
+[2025-04-04 14:10:08] marcus.webb
+hey @jess.nakamura re: our conversation this morning. i wrapped the email sends in try/except:
+
+```python
+try:
+    send_payment_failed_email(org.billing_email, org.name, attempt_count)
+except Exception as e:
+    logger.error(f"Failed to send payment failure email for {org.name}: {e}")
+    # Continue — status update is already committed
+```
+
+same pattern for all the email sends in the webhook handler. if sendgrid is down, we log it and continue. the webhook returns 200 so stripe doesn't retry
+
+[2025-04-04 14:10:32] jess.nakamura
+:thumbsup: that's the right fix. how many lines is billing.py now?
+
+[2025-04-04 14:10:55] marcus.webb
+let me check... 831
+
+[2025-04-04 14:11:18] jess.nakamura
+and growing :slightly_smiling_face:
+
+[2025-04-04 14:11:41] marcus.webb
+it's fine. 831 lines for an entire billing system is actually pretty compact. most SaaS companies have entire teams working on billing with thousands of lines of code across dozens of files
+
+[2025-04-04 14:12:04] danny.okafor
+most SaaS companies also have tests for their billing code
+
+[2025-04-04 14:12:27] marcus.webb
+most SaaS companies also have 10x the headcount and 10x the timeline. we shipped in 3 days. tradeoffs
+
+    :point_up: 2
+
+---
+
+[2025-04-04 14:40:33] danny.okafor
+folder tree component is done. pushed to prod. virtual folder nodes work — "Shared With Me" shows up at the top of the sidebar. @jess.nakamura i left a hook for you to wire up the backend query
+
+[2025-04-04 14:40:58] jess.nakamura
+nice. i'll connect it to the permissions query this afternoon
+
+[2025-04-04 14:41:22] danny.okafor
+also added the expand/collapse animation. it's smooth now — no more janky jumping when you open a folder
+
+[2025-04-04 14:41:45] lina.torres
+love it. the sidebar was driving me nuts with that jumping
+
+    :thumbsup: 3
+
+---
+
+[2025-04-04 15:05:11] jess.nakamura
+@danny.okafor the "Shared With Me" query is connected. it pulls docs where the current user has an explicit permission grant that isn't from org-level access. so you'll see docs that someone specifically shared with you, not docs you can access just because you're in the same org
+
+[2025-04-04 15:05:35] danny.okafor
+makes sense. want me to add a count badge on the virtual folder? like "Shared With Me (4)"?
+
+[2025-04-04 15:05:58] jess.nakamura
+yes please. that'd be a nice touch
+
+[2025-04-04 15:06:22] danny.okafor
+done in 5 min. deploying now
+
+    :fast_parrot: 1
+
+---
+
+[2025-04-04 15:30:08] ravi.mehta
+another update — just got off the phone with crestview capital. they want to schedule a demo next wednesday. they're a 200-person hedge fund. potential deal is $48K/year
+
+[2025-04-04 15:30:32] priya.kaur
+:eyes: that's double nara. what are they most interested in?
+
+[2025-04-04 15:30:55] ravi.mehta
+document security features. versioning, access controls, audit trails. the stuff we're building for nara is exactly what they want. they also asked about SOC 2 compliance
+
+[2025-04-04 15:31:18] priya.kaur
+we're not SOC 2 compliant
+
+[2025-04-04 15:31:41] ravi.mehta
+i know. i told them we're working toward it. which... we should probably actually start working toward it
+
+[2025-04-04 15:32:04] lina.torres
+SOC 2 is a multi-month process. i can start the groundwork — access logging, encrypted secrets management, proper backup procedures. but the actual audit needs an external firm
+
+[2025-04-04 15:32:28] priya.kaur
+let's cross that bridge when crestview actually signs. no point investing in SOC 2 for a prospect. but lina — the access logging and backups, we need those anyway. add them to your queue
+
+[2025-04-04 15:32:51] lina.torres
+they're already in my queue. have been for 3 weeks :upside_down_face:
+
+[2025-04-04 15:33:14] priya.kaur
+i know. i know. after SSO
+
+---
+
+[2025-04-04 15:55:22] marcus.webb
+@ravi.mehta just FYI i also added a `get_billing_history(org_id)` endpoint that returns all invoices for an org, sorted by date. figured you'd want that for the admin panel
+
+[2025-04-04 15:55:46] ravi.mehta
+you read my mind. i was just about to ask for that. does it show the invoice PDF link?
+
+[2025-04-04 15:56:09] marcus.webb
+yep. stripe generates hosted invoice PDFs. the endpoint returns the `hosted_invoice_url` for each one. customers can also access their invoices through the billing portal link
+
+[2025-04-04 15:56:32] ravi.mehta
+:chef_kiss:
+
+[2025-04-04 15:56:55] marcus.webb
+billing.py is now 858 lines by the way. for anyone keeping score
+
+[2025-04-04 15:57:18] danny.okafor
+i'm keeping score. 858 and counting. the over/under for 1000 by end of month? i say under
+
+[2025-04-04 15:57:41] marcus.webb
+i say we never hit 1000 because the core functionality is done. everything from here is minor additions
+
+[2025-04-04 15:57:55] jess.nakamura
+famous last words
+
+    :joy: 3
+
+---
+
+[2025-04-04 16:20:17] lina.torres
+SSO research notes for anyone interested. i've been evaluating auth0 vs clerk vs workos for the enterprise SSO flow:
+
+**auth0**: most flexible, good SAML support, python SDK is solid. pricing is per-authentication, gets expensive at scale. free tier covers our current volume
+
+**clerk**: better DX, beautiful prebuilt components. but their SAML support requires their enterprise plan ($500/mo). not worth it for one customer
+
+**workos**: purpose-built for enterprise features (SSO, directory sync, audit logs). $0 until you have paying enterprise customers, then it's per-connection pricing. their SSO module is literally designed for our use case
+
+i'm leaning workos. it's built for exactly this — a startup adding enterprise auth features. the API is clean and the docs are excellent. thoughts?
+
+[2025-04-04 16:20:42] priya.kaur
+workos sounds right. the pricing model fits us — we only pay when we have enterprise customers, which is when we'll have revenue to cover it
+
+[2025-04-04 16:21:05] marcus.webb
+i've heard good things about workos from a friend at a YC company. their SDK is straightforward
+
+[2025-04-04 16:21:28] lina.torres
+cool. i'll start the integration monday. should have SAML working by wednesday, OIDC by friday
+
+[2025-04-04 16:21:51] ravi.mehta
+i'll tell nara's IT team we're using workos. they'll need to configure their identity provider on their end
+
+    :thumbsup: 3
+
+---
+
+[2025-04-04 16:45:33] danny.okafor
+multi-select file type filter is live. you can now check multiple file types in the search filter dropdown. pdf, docx, xlsx, pptx, images. it's an OR filter — shows docs matching any of the selected types
+
+[2025-04-04 16:45:58] ravi.mehta
+just tested it. works great. customers are going to love this
+
+[2025-04-04 16:46:22] danny.okafor
+also snuck in a small UX improvement — the search results now show a file type icon next to each result. pdf gets a red icon, docx gets blue, spreadsheets get green
+
+[2025-04-04 16:46:45] jess.nakamura
+oh that's nice. the little details matter
+
+    :art: 2
+
+---
+
+[2025-04-04 17:00:08] priya.kaur
+EOD standup. what a day. let's go around
+
+[2025-04-04 17:00:32] marcus.webb
+billing system live and handling real money. nara logistics onboarded at $24K ARR. added error handling for stripe exceptions, wrapped email sends in try/except, added billing history endpoint, added admin panel for ravi. billing.py is 858 lines and counting
+
+[2025-04-04 17:00:55] jess.nakamura
+connected "Shared With Me" virtual folder to the permissions backend. started planning the audit log middleware for next week. also reviewed billing.py and flagged some edge cases that marcus addressed
+
+[2025-04-04 17:01:18] danny.okafor
+folder tree component shipped with virtual folder support. multi-select file type filter shipped. file type icons in search results. also read through billing.py and flagged the idempotency gap
+
+[2025-04-04 17:01:41] lina.torres
+disk cleanup — freed 6.2GB. set up logrotate. SSO vendor research done — going with workos. starting integration monday. also flagged postgres config tuning for monday
+
+[2025-04-04 17:02:04] ravi.mehta
+nara logistics onboarded. belmont partners demo scheduled for next wednesday. crestview capital expressing strong interest at $48K ARR. pipeline is building
+
+[2025-04-04 17:02:28] priya.kaur
+incredible day. let me tally: billing system live, first enterprise customer paying, folder tree, multi-select filters, file type icons, shared-with-me wired up, disk cleanup, SSO vendor selected. 8 things shipped or substantially advanced in one day. this team is absurd in the best way
+
+[2025-04-04 17:02:51] priya.kaur
+priorities for next week: SSO integration (lina), audit logging (jess), custom branding (danny), billing hardening as needed (marcus). plus the crestview demo prep. everyone aligned?
+
+    :thumbsup: 5
+
+[2025-04-04 17:03:14] marcus.webb
+:muscle: great week. enjoy the weekend everyone
+
+[2025-04-04 17:03:37] jess.nakamura
+:wave: see you monday
+
+[2025-04-04 17:03:52] danny.okafor
+:pizza: weekend time
+
+[2025-04-04 17:04:08] lina.torres
+one last thing before i forget — can someone please remind me to set up automated database backups on monday? i keep saying i'll do it and it keeps getting deprioritized. we have a paying enterprise customer now. we need backups
+
+[2025-04-04 17:04:31] priya.kaur
+noted. it's on the list, lina. right after SSO
+
+[2025-04-04 17:04:54] lina.torres
+right after SSO. which is right after IP allowlisting. which is right after postgres tuning. there are only so many hours in a day
+
+[2025-04-04 17:05:17] priya.kaur
+i know. we'll get there. have a good weekend everyone :wave:
+
+[2025-04-04 17:05:33] ravi.mehta
+:beers: to our first enterprise customer!
+
+    :beers: 5  :tada: 3
+
+---
+
+[2025-04-04 17:25:44] marcus.webb
+actually one more thing before i log off. i realized i should document the billing API endpoints somewhere. here's the quick reference:
+
+```
+POST   /api/billing/customers          — create customer
+POST   /api/billing/customers/:id/payment-method  — attach payment method
+POST   /api/billing/subscribe           — create subscription
+PATCH  /api/billing/subscriptions/:id   — upgrade/downgrade
+DELETE /api/billing/subscriptions/:id   — cancel
+GET    /api/billing/invoices/:customer_id  — list invoices
+GET    /api/billing/portal/:customer_id    — get billing portal URL
+POST   /api/billing/coupons             — apply coupon
+POST   /webhooks/stripe                 — stripe webhook handler
+```
+
+all in billing.py. all going through the same fastapi router. good night for real this time
+
+[2025-04-04 17:26:08] danny.okafor
+look at that, marcus documenting things. mark the calendar
+
+[2025-04-04 17:26:31] marcus.webb
+hey i document when it matters. billing endpoints matter
+
+[2025-04-04 17:26:54] jess.nakamura
+appreciate it. this is useful. :thumbsup:
+
+[2025-04-04 17:27:17] lina.torres
+saved to my notes. now actually going home. :wave:
+
+================================================================================
+END EXPORT — 268 messages, 2025-04-04
+================================================================================

@@ -1,0 +1,546 @@
+================================================================================
+FOLDLY — INCIDENT REPORT
+================================================================================
+Incident ID   : INC-2025-0413-001
+Severity      : SEV-1 (Critical — Customer Financial Impact)
+Status        : Investigating
+Reported By   : Ravi Mehta (via customer escalation)
+Assigned To   : Marcus Webb, Priya Kaur
+Opened        : 2025-04-13 06:42 UTC
+Updated       : 2025-04-13 19:55 UTC
+Channel       : #incident-20250413 (created for this incident)
+Pager Alert   : N/A (no pager rotation configured for billing path)
+Affected Service : billing-webhook-handler (billing.py)
+Customer Tier : Enterprise (Nara Logistics, Belmont Partners), Trial (Crestview Capital)
+================================================================================
+
+## Timeline
+
+**06:12 UTC** — Nara Logistics support contact emails support@foldly.io: "We are seeing duplicate charges on our company credit card. Multiple invoices for the same period. Please investigate urgently." Email forwarded from the Nara Logistics accounts payable team, referencing Stripe receipt IDs for the duplicate transactions. The email includes a screenshot of their credit card statement showing eight line items from Foldly with identical descriptions but different transaction timestamps.
+
+**06:42 UTC** — Ravi Mehta sees the email, escalates to #engineering. Creates #incident-20250413. Tags the incident as SEV-1 per the internal severity rubric: "Any incident that results in incorrect financial transactions affecting customer accounts." Ravi pulls up the Nara Logistics account in the admin panel to verify their current subscription status and most recent invoicing records.
+
+**06:45 UTC** — Marcus Webb begins investigating. Checks Stripe dashboard. Navigates to the Events tab and filters by `invoice.paid` events for the past 24 hours. Notices an unusual clustering of events between 23:40 and 00:15 UTC the previous night.
+
+**06:58 UTC** — Marcus confirms: 14 duplicate invoices detected across 3 enterprise customers. Nara Logistics: 8 duplicate charges totaling $8,247. Belmont Partners: 4 duplicate charges totaling $3,118. Crestview Capital (trial account): 2 duplicate charges totaling $892. **Total duplicate charges: $12,257.** Marcus documents each duplicate by Stripe invoice ID and charge ID in a spreadsheet that he drops into the incident channel.
+
+**07:15 UTC** — Root cause identified by Marcus: The webhook handler in billing.py processes `invoice.paid` events and updates subscription status. A Stripe API timeout on April 12 at ~23:40 UTC caused the webhook delivery to retry. The idempotency check was supposed to prevent reprocessing, but the idempotency key was based on the Stripe event ID — and Stripe regenerated the event ID for each retry attempt, bypassing the dedup logic. Marcus traces the code path: the `handle_invoice_paid()` function in billing.py receives the webhook payload, extracts `event["id"]`, checks it against the `processed_webhook_events` set in the database, and if not found, proceeds to create a new invoice record and initiate a Stripe charge. The flaw is that `event["id"]` is unique per delivery attempt, not per business event.
+
+**07:22 UTC** — Priya Kaur joins the incident. Asks Marcus to stop the bleeding immediately. Priya reviews the Stripe webhook delivery logs in the Stripe dashboard to confirm that the retry behavior is consistent with what Marcus has described. She notes that Stripe's retry schedule typically follows an exponential backoff pattern: immediate, ~30s, ~5m, ~30m, etc.
+
+**07:30 UTC** — Marcus deploys hotfix: webhook handler now checks the `invoice.id` field (which is stable across retries) instead of the event ID. Additionally adds a check against the `invoices` table to skip processing if an invoice with the same Stripe invoice ID already exists. The diff is approximately 15 lines of code: replacing the `event_id` variable reference on line 412 with `event["data"]["object"]["id"]`, and adding a secondary check that queries the invoices table (`SELECT 1 FROM invoices WHERE stripe_invoice_id = ?`). Marcus runs the change through a quick local test with a mocked webhook payload before deploying.
+
+**07:45 UTC** — Hotfix verified in production. No further duplicate processing observed. Marcus watches the webhook logs for 15 minutes to confirm that incoming retries are correctly being deduplicated by the new invoice ID check. Three retries come in during that window and all are properly rejected with a 200 OK response (to tell Stripe to stop retrying).
+
+**08:10 UTC** — Ravi Mehta begins customer communication. Calls Nara Logistics CFO directly. Explains the situation, confirms refunds will be processed within 24 hours. Ravi prepares a templated email for the other two affected customers with the same basic information: a brief description of the bug, confirmation that refunds have been initiated, and a timeline for when funds will appear back in their accounts. He customizes each email with the specific dollar amount and number of duplicate charges for that customer.
+
+**09:30 UTC** — All refunds initiated via Stripe dashboard. Estimated 3-5 business days for funds to return to customer accounts. Marcus initiates each refund individually through the Stripe dashboard, selecting the original charge and issuing a full refund. Stripe's refund confirmation emails are sent automatically to each customer's billing contact. Ravi follows up with a personal email to each customer confirming the refund initiation.
+
+---
+
+## Slack Log — #incident-20250413
+
+[2025-04-13 06:42:18] ravi.mehta
+@channel we have a problem. nara logistics is reporting duplicate charges on their credit card. this is a real customer with real money. someone look at this NOW
+
+[2025-04-13 06:42:44] ravi.mehta
+copying the email into thread. they say they see 8 line items from us on their April statement, all with the same description "Foldly — Enterprise Plan — April 2025" but different charge dates. timestamps are all clustered around midnight UTC last night
+
+[2025-04-13 06:43:01] marcus.webb
+on it. checking stripe
+
+[2025-04-13 06:43:22] marcus.webb
+pulling up the events dashboard now. filtering for invoice.paid in the last 24 hours
+
+[2025-04-13 06:44:09] danny.reeves
+just saw this. what do we know so far?
+
+[2025-04-13 06:44:31] ravi.mehta
+only what nara told us. duplicate charges. no idea on scope yet — could be just them or could be wider
+
+[2025-04-13 06:45:33] priya.kaur
+what's happening?
+
+[2025-04-13 06:46:02] ravi.mehta
+duplicate billing charges. nara got charged multiple times for the same invoice period
+
+[2025-04-13 06:46:28] priya.kaur
+ok. marcus, how bad is this? is it limited to nara or did it affect more customers?
+
+[2025-04-13 06:46:55] marcus.webb
+still determining scope. i can see a cluster of invoice.paid events from last night between 23:40 and 00:15. more events than i'd expect for a single billing cycle. give me a few minutes to cross reference
+
+[2025-04-13 06:47:18] lina.okafor
+i'm here. anything i can help with?
+
+[2025-04-13 06:47:39] priya.kaur
+lina can you pull server logs for the billing service from last night? anything between 23:00 and 01:00 UTC
+
+[2025-04-13 06:47:55] lina.okafor
+on it. checking our application logs and nginx access logs for the webhook endpoint
+
+[2025-04-13 06:48:15] marcus.webb
+this is bad. i see duplicate invoice.paid events in the webhook logs. stripe retried the webhook delivery after our server timed out and each retry got a new event ID so our idempotency check didn't catch it
+
+[2025-04-13 06:48:42] marcus.webb
+looking at the stripe retry log for one of nara's charges: the original webhook was sent at 23:40:12, our server returned 500 after 30 seconds (timeout), then stripe retried at 23:41:15 with a new event ID `evt_1P...XYZ`, and again at 23:45:00 with `evt_1P...ABC`. each event ID is unique even though it's the same underlying invoice
+
+[2025-04-13 06:49:01] priya.kaur
+how many duplicates?
+
+[2025-04-13 06:49:19] danny.reeves
+wait — our idempotency key is the event ID? not the invoice ID?
+
+[2025-04-13 06:49:38] marcus.webb
+yes. i used the event ID when i wrote the handler. stripe's event ID is unique per delivery attempt, not per business event. i should have used the invoice ID which is stable
+
+[2025-04-13 06:50:01] danny.reeves
+stripe's docs are pretty clear about that. they have a whole section on webhook best practices that says to use the underlying resource ID for idempotency
+
+[2025-04-13 06:50:22] marcus.webb
+i know. i read it but clearly didn't implement it correctly
+
+[2025-04-13 06:51:22] marcus.webb
+still counting. at least 8 for nara. checking belmont and crestview now
+
+[2025-04-13 06:52:03] marcus.webb
+belmont partners also affected. finding duplicate events for their account too. 4 so far
+
+[2025-04-13 06:53:14] marcus.webb
+crestview capital — 2 duplicates. they're a trial account so the amounts are smaller but it's still real charges on their card
+
+[2025-04-13 06:53:47] ravi.mehta
+so this isn't just nara. multiple customers got double-charged. this is a company-wide billing failure
+
+[2025-04-13 06:54:15] priya.kaur
+how many total customers are on the platform right now?
+
+[2025-04-13 06:54:38] ravi.mehta
+47 active paying accounts. but most billing cycles don't fire in the same window
+
+[2025-04-13 06:54:59] marcus.webb
+right — only 3 customers had billing events during the contention window last night. the other 44 are fine because their invoices weren't processed during the outage
+
+[2025-04-13 06:55:40] lina.okafor
+i'm pulling the server logs. the timeout at 23:40 last night was during a scheduled DB backup — the backup process was locking the database and the webhook handler timed out waiting for a write lock. the backup job and the cron job marcus added are running in the same window
+
+[2025-04-13 06:55:58] lina.okafor
+here's what i see in the application logs: `2025-04-12 23:40:12 ERROR billing.webhook_handler: Timeout waiting for database write lock after 30s. Request failed.` and then the corresponding nginx log shows a 500 response to the stripe webhook endpoint
+
+[2025-04-13 06:56:18] marcus.webb
+...the usage reporting cron runs at 3am UTC. the backup runs at 2am. they shouldn't overlap
+
+[2025-04-13 06:56:45] lina.okafor
+the backup took longer than expected last night because the DB has grown. it ran from 2:00 to 3:47 UTC. the usage cron started at 3:00 and they were both hitting the DB. then a webhook came in during the contention window
+
+[2025-04-13 06:56:58] lina.okafor
+wait sorry, let me re-check the timestamps. the backup actually started at 23:00 last night and finished at 23:47. the cron is at 3am. the overlap was between the backup and the incoming webhook, not the cron
+
+[2025-04-13 06:57:12] marcus.webb
+ok so the timeout wasn't random — it was caused by DB contention between the backup and the cron job
+
+[2025-04-13 06:57:33] lina.okafor
+between the backup and the webhook handler, to be precise. the backup was holding a write lock on the invoices table while it was copying data, and the webhook handler tried to INSERT into the same table and got blocked
+
+[2025-04-13 06:57:50] danny.reeves
+what database are we using for billing? is this sqlite?
+
+[2025-04-13 06:58:02] lina.okafor
+yes, sqlite. single writer, multiple readers. the backup process uses `VACUUM INTO` which takes an exclusive lock on the database file for the duration of the copy
+
+[2025-04-13 06:58:14] danny.reeves
+sqlite exclusive lock during backup... that blocks all writes for the entire backup duration
+
+[2025-04-13 06:58:30] marcus.webb
+full count: nara logistics — 8 duplicates, $8,247. belmont partners — 4 duplicates, $3,118. crestview capital — 2 duplicates, $892. total: $12,257 in duplicate charges
+
+[2025-04-13 06:58:45] marcus.webb
+i've put together a spreadsheet with every duplicate charge, the original charge, the stripe charge ID, invoice ID, and amount. dropping it in the channel
+
+[2025-04-13 06:58:52] marcus.webb
+/upload duplicate_charges_20250413.csv
+
+[2025-04-13 06:59:01] priya.kaur
+twelve thousand dollars. we double-charged our customers twelve thousand dollars
+
+[2025-04-13 06:59:14] danny.reeves
+and we only found out because a customer emailed us. we didn't detect this ourselves
+
+[2025-04-13 06:59:28] ravi.mehta
+i need to call nara's CFO right now. what do i tell them?
+
+[2025-04-13 06:59:40] ravi.mehta
+nara is our largest enterprise account. this relationship matters
+
+[2025-04-13 06:59:52] priya.kaur
+tell them the truth. software bug, we caught it, refunds processing immediately. full transparency. marcus how fast can you fix the underlying bug?
+
+[2025-04-13 07:00:04] priya.kaur
+ravi — be honest, be contrite, give them a timeline. don't try to minimize it. they can see the charges on their statement, they know what happened
+
+[2025-04-13 07:00:18] marcus.webb
+i'm writing the fix now. changing the idempotency key from event ID to invoice ID. also adding a DB check against existing invoices before processing
+
+[2025-04-13 07:00:35] danny.reeves
+marcus — are you also going to handle the case where the invoice ID check passes but then the INSERT fails due to a race condition? like if two webhook deliveries arrive within milliseconds of each other
+
+[2025-04-13 07:00:52] marcus.webb
+the new check does a SELECT then INSERT, and i'm wrapping both in a transaction with EXCLUSIVE so there's no race window. if the SELECT finds the invoice, we return 200 immediately and skip processing
+
+[2025-04-13 07:01:08] danny.reeves
+ok good. that should be safe with sqlite's locking
+
+[2025-04-13 07:02:44] jess.tanaka
+just catching up on this thread. reading through the timeline now
+
+[2025-04-13 07:03:15] jess.tanaka
+so to summarize: backup held exclusive lock → webhook timed out → stripe retried with new event IDs → our dedup check used event ID not invoice ID → duplicate charges. is that right?
+
+[2025-04-13 07:03:33] marcus.webb
+that's the chain, yes
+
+[2025-04-13 07:04:01] jess.tanaka
+understood. how's the fix coming?
+
+[2025-04-13 07:05:48] marcus.webb
+almost done. testing locally with a mock webhook payload. one sec
+
+[2025-04-13 07:08:19] marcus.webb
+local test passes. sending a simulated duplicate webhook (same invoice ID, different event ID) and the handler correctly rejects the second one with "Invoice already processed, skipping"
+
+[2025-04-13 07:10:55] marcus.webb
+also added a log line so we can see when dedup kicks in: `INFO billing.webhook_handler: Duplicate webhook for invoice inv_XXXX detected, skipping processing (event evt_YYYY)`
+
+[2025-04-13 07:13:02] marcus.webb
+running through the full test scenario one more time. first webhook: processes normally, creates invoice record. second webhook with same invoice ID but different event ID: correctly skipped. third webhook with completely different invoice ID: processes normally. all good
+
+[2025-04-13 07:15:22] marcus.webb
+fix is ready. deploying to prod now
+
+[2025-04-13 07:15:34] marcus.webb
+the change is in billing.py lines 410-435. replacing `event_id = event["id"]` with `invoice_id = event["data"]["object"]["id"]` and adding the invoices table lookup
+
+[2025-04-13 07:15:45] jess.tanaka
+hold on — did anyone review this fix? we're deploying a patch to billing code that handles real money and nobody's looked at it?
+
+[2025-04-13 07:16:08] marcus.webb
+jess there are customers being double-charged RIGHT NOW. i need to stop the bleeding
+
+[2025-04-13 07:16:22] jess.tanaka
+are they being charged right now, or were they charged last night? is the active bleeding happening this moment or are we in a lull?
+
+[2025-04-13 07:16:32] jess.tanaka
+i understand the urgency but this is exactly how we got into this situation. one person writing billing code with no review
+
+[2025-04-13 07:16:48] marcus.webb
+the retries could still be coming in. stripe retries on an exponential backoff schedule — up to 72 hours after the initial failure. so yes there could be more retries hitting our endpoint right now with the broken code
+
+[2025-04-13 07:16:55] priya.kaur
+jess — point taken. but marcus deploy the fix now. we can review after. stopping the damage is priority one
+
+[2025-04-13 07:17:05] jess.tanaka
+ok. understood. deploying first, reviewing second. but i'm flagging that we are making the same process mistake that caused this incident
+
+[2025-04-13 07:17:18] marcus.webb
+deployed. monitoring webhook logs
+
+[2025-04-13 07:17:35] marcus.webb
+deploy confirmed. new version is live. the health check endpoint is responding normally and the webhook endpoint is accepting requests
+
+[2025-04-13 07:18:02] lina.okafor
+i can see the new log format in production. the dedup log line marcus added is showing up, so the new code path is active
+
+[2025-04-13 07:22:15] marcus.webb
+first retry since the fix: `INFO billing.webhook_handler: Duplicate webhook for invoice inv_NaraLogi0412 detected, skipping processing (event evt_1P7abc123)`. working as expected
+
+[2025-04-13 07:25:40] marcus.webb
+second retry deduplicated successfully. this one was for belmont partners
+
+[2025-04-13 07:30:02] marcus.webb
+confirmed — received 3 webhook retries since the fix. all correctly deduped. no new duplicate charges
+
+[2025-04-13 07:30:16] lina.okafor
+i'm also watching the invoices table directly. no new rows inserted since the fix went live. the dedup is holding
+
+[2025-04-13 07:30:25] priya.kaur
+ok. good. immediate bleeding stopped. ravi — customer comms?
+
+[2025-04-13 07:30:48] ravi.mehta
+on the phone with nara now. they're upset but understanding. i promised refunds within 24 hours and a full incident report
+
+[2025-04-13 07:31:02] ravi.mehta
+their CFO asked specifically whether any other customer data was compromised or if this was limited to billing. i assured her it's isolated to duplicate charge processing and no data was leaked or accessed improperly
+
+[2025-04-13 07:31:12] danny.reeves
+this is bad. this is really bad. we charged people's credit cards twelve thousand dollars by accident
+
+[2025-04-13 07:31:27] danny.reeves
+has anyone checked if any of the duplicate charges triggered overdraft fees or credit limit issues for these customers? because if so, we might owe more than just the refunds
+
+[2025-04-13 07:31:35] priya.kaur
+yes it is. we need to have a serious conversation about how this happened and how we make sure it never happens again. but first let's get through the immediate response
+
+[2025-04-13 07:31:48] priya.kaur
+danny — good question. ravi, when you talk to belmont and crestview, ask if the duplicate charges caused any secondary financial impact like overdraft fees. if so, we cover those too
+
+[2025-04-13 07:31:55] ravi.mehta
+noted. will ask all three customers explicitly about secondary impact
+
+[2025-04-13 07:32:01] lina.okafor
+i've separated the backup window from the cron window. backups now run at midnight UTC, cron at 3am. that addresses the DB contention issue. but the real problem was the idempotency logic, not the timing
+
+[2025-04-13 07:32:15] lina.okafor
+specifically what i changed: the crontab entry for the backup script was `0 23 * * *` and i moved it to `0 0 * * *`. the usage cron stays at `0 3 * * *`. that gives a 3-hour gap between the backup completing and the cron starting, even if the backup takes longer than expected
+
+[2025-04-13 07:32:28] marcus.webb
+yeah. the timing caused the webhook timeout but the bug was that my idempotency check used the wrong key. that's on me
+
+[2025-04-13 07:32:42] danny.reeves
+how long ago was the webhook handler written? when did we first deploy billing?
+
+[2025-04-13 07:32:52] priya.kaur
+it's not just on you marcus. it's on all of us. we shipped a billing system in 3 days with no review, no tests, and no staging environment. we all signed off on that approach
+
+[2025-04-13 07:33:08] marcus.webb
+billing went live about 6 weeks ago. i wrote the initial version over a weekend because we needed to start charging customers before the runway conversation
+
+[2025-04-13 07:33:18] jess.tanaka
+:point_up: this. exactly this
+
+[2025-04-13 07:33:35] jess.tanaka
+and to answer danny's question — the billing module was merged on March 1st. PR #247. it was "reviewed" by priya but based on the PR comments it was basically a rubber stamp. no test files in the diff
+
+[2025-04-13 07:33:52] priya.kaur
+that's fair. i approved it because we were under pressure to start generating revenue. i should have insisted on proper review and testing regardless of the timeline
+
+[2025-04-13 07:34:15] danny.reeves
+i'm not trying to assign blame. i just want to understand the full picture so we can fix the process, not just the code
+
+[2025-04-13 07:34:38] lina.okafor
+for context on the DB growth issue — when billing first went live we had about 15MB of data. we're now at 340MB because the webhook event log table stores the full JSON payload of every event. that's why the backup took longer than the original estimate. it was sized for a 15MB database, not a 340MB one
+
+[2025-04-13 07:35:08] jess.tanaka
+i'm looking at billing.py right now. marcus, the idempotency check is on line 412. you're doing `if event_id in processed_events` but the variable name literally says "event_id" — it never occurred to anyone (including us, since nobody reviewed it) that stripe's event ID isn't stable across retries
+
+[2025-04-13 07:35:22] jess.tanaka
+there's also a comment on line 410 that says `# Idempotency check: skip if we've already processed this event`. the comment reinforces the wrong mental model — it says "event" not "invoice"
+
+[2025-04-13 07:35:32] marcus.webb
+i know. stripe's docs say to use the underlying resource ID for idempotency, not the event ID. i read that page but clearly didn't internalize it. or i forgot. either way, basic mistake
+
+[2025-04-13 07:35:50] marcus.webb
+the stripe webhook best practices page literally says: "Use the event's data object ID (such as the invoice ID) as your idempotency key, not the event ID, because Stripe may generate a new event ID for retried webhook deliveries." it's like the third bullet point on the page
+
+[2025-04-13 07:36:01] jess.tanaka
+looking at the rest of the webhook handler... there are other issues. the `customer.subscription.deleted` handler doesn't check if the subscription was already deleted in our DB. and `invoice.payment_failed` doesn't have any retry logic — it just logs and moves on
+
+[2025-04-13 07:36:14] jess.tanaka
+the payment_failed handler is on line 478. it does `logger.warning(f"Payment failed for invoice {invoice_id}")` and then... nothing. no customer notification, no retry scheduling, no status update in our database
+
+[2025-04-13 07:36:25] marcus.webb
+yeah. the whole thing needs to be audited. but first let's make sure the refunds go through and customers are taken care of
+
+[2025-04-13 07:36:38] danny.reeves
+agreed. the code audit is important but the customer response is the priority right now. jess, can you start documenting what you're finding in a separate doc so we have it ready for the post-mortem?
+
+[2025-04-13 07:36:48] priya.kaur
+agreed. marcus, focus on the refunds. jess, document what you're finding but don't change anything until after the post-mortem. we'll fix everything systematically, not in a panic
+
+[2025-04-13 07:37:02] jess.tanaka
+will do. i'll put together a doc listing every issue i find in the billing module. we can use it as a starting point for the audit
+
+[2025-04-13 07:37:18] priya.kaur
+i'm scheduling a post-mortem for tomorrow morning. 10am UTC. everyone in this channel should attend. we'll go through the full timeline, root cause, and action items
+
+[2025-04-13 07:37:35] danny.reeves
+i'll be there
+
+[2025-04-13 07:37:42] jess.tanaka
+same
+
+[2025-04-13 07:37:48] lina.okafor
+yes
+
+[2025-04-13 07:37:53] marcus.webb
+of course
+
+[2025-04-13 07:38:05] ravi.mehta
+i'll join as well. i want to give the customer perspective. nara's CFO asked some pointed questions that we should discuss as a team
+
+[2025-04-13 08:02:30] marcus.webb
+starting on the refunds now. opening stripe dashboard and processing each one individually. doing nara's 8 charges first since they're the largest impact
+
+[2025-04-13 08:04:15] marcus.webb
+first refund processed for nara: charge ch_3PNaraX001, amount $1,031.25, refund re_XXXX1. stripe confirmation received
+
+[2025-04-13 08:05:33] marcus.webb
+second refund for nara processed. $1,031.25. running through these as fast as i can while being careful to refund the correct charges
+
+[2025-04-13 08:12:48] marcus.webb
+all 8 nara refunds initiated. moving to belmont partners
+
+[2025-04-13 08:15:22] lina.okafor
+server logs analysis complete. here's the full sequence of what happened:
+
+23:40:12 — Stripe sends invoice.paid webhook for Nara Logistics (April billing cycle)
+23:40:12 — Webhook handler starts processing, attempts DB write
+23:40:13 — DB write blocks on lock held by backup process (backup started at 23:00, still running due to larger-than-expected DB)
+23:40:42 — Webhook handler times out after 30s waiting for lock (our default timeout)
+23:40:42 — Returns HTTP 500 to Stripe
+23:41:15 — Stripe retries with new event ID (attempt 2), handler processes successfully (backup finished at 23:41:00)
+23:41:15 — Invoice charge #1 processed
+23:45:00 — Stripe retries original failed delivery with ANOTHER new event ID (attempt 3)
+23:45:00 — Idempotency check passes because event ID is new
+23:45:01 — Invoice charge #2 processed — DUPLICATE
+
+this pattern repeated for every customer that had a billing event during the backup window. 14 total duplicate charges across 3 customers
+
+[2025-04-13 08:15:38] lina.okafor
+i've also confirmed that the backup process log shows: `2025-04-12 23:00:00 Starting VACUUM INTO backup. DB size: 341MB.` and `2025-04-12 23:41:00 Backup complete. Duration: 41m 0s.` so the exclusive lock was held for the full 41 minutes
+
+[2025-04-13 08:15:48] priya.kaur
+so the backup job held a lock for 41 minutes, which caused the webhook to time out, which caused stripe to retry, which caused duplicates because our dedup was keyed wrong. a chain of failures
+
+[2025-04-13 08:16:02] danny.reeves
+41 minutes of exclusive lock on a production database. during business hours for some of our international customers. that's a problem even without the billing bug
+
+[2025-04-13 08:16:12] lina.okafor
+yes. remove any one link in that chain and this doesn't happen. but all three had to be true simultaneously: long backup, webhook during backup window, wrong idempotency key
+
+[2025-04-13 08:16:28] lina.okafor
+to be specific about the chain: (1) if the backup had finished before 23:40, the webhook would have succeeded on the first attempt. (2) if no customers had billing events during the 23:00-23:41 window, there would have been no webhooks to fail. (3) if the idempotency key had been the invoice ID, the retries would have been correctly deduped even after the timeout
+
+[2025-04-13 08:16:45] jess.tanaka
+any one of those fixes would have prevented this specific incident. but the idempotency fix is the only one that prevents the general class of bugs — timeouts can happen for lots of reasons, not just backups
+
+[2025-04-13 08:17:01] lina.okafor
+agreed. the backup timing is a contributing factor but the real fix is the idempotency key
+
+[2025-04-13 08:20:33] marcus.webb
+belmont partners refunds done. 4 charges refunded. moving to crestview capital
+
+[2025-04-13 08:23:17] marcus.webb
+crestview capital refunds initiated. 2 charges. that's all 14 refunds submitted. stripe says 3-5 business days for the funds to appear in each customer's account
+
+[2025-04-13 09:15:40] ravi.mehta
+update from my calls. spoke with all three customers:
+
+nara logistics — CFO was firm but professional. she asked (1) how this happened, (2) whether it could happen again, (3) whether any of their data was compromised, and (4) for a written incident report. i gave honest answers to all four. she said she appreciates the fast response and the direct phone call rather than just an email. she did say that depending on the outcome of the post-mortem, they may request additional safeguards before continuing the contract
+
+belmont partners — spoke with their finance director. similar questions. they were less upset, mostly because the duplicate amounts were smaller. they said "these things happen" but asked to be kept informed
+
+crestview capital — trial account, spoke with the founder directly. he said "thanks for the quick response" and asked if there's a way to set up alerts for unusual billing activity. i said i'd bring that back to the team
+
+[2025-04-13 09:16:02] priya.kaur
+thank you ravi. good customer handling across the board. the nara follow-up about safeguards is something we should address in the post-mortem
+
+[2025-04-13 09:30:22] ravi.mehta
+refunds update: all 14 refunds initiated in stripe dashboard. stripe says 3-5 business days for funds to appear. i've emailed all three customers with confirmation and the timeline. nara's CFO was firm but professional. belmont hasn't responded yet. crestview said "thanks for the quick response"
+
+[2025-04-13 09:30:45] ravi.mehta
+sending each customer a personalized email now with:
+— confirmation of the refund amounts
+— stripe refund reference IDs
+— expected timeline for funds to appear
+— my direct phone number for any follow-up questions
+— promise of a formal incident report within 48 hours
+
+[2025-04-13 09:31:02] priya.kaur
+good. that covers the immediate customer response. let's make sure we deliver on that incident report promise. marcus, can you draft the technical section? ravi, the customer impact section? i'll write the executive summary
+
+[2025-04-13 09:31:18] marcus.webb
+yes. i'll have the technical root cause section drafted by end of day
+
+[2025-04-13 09:31:30] ravi.mehta
+i'll write up the customer impact piece. including the secondary impact question — none of the three customers reported overdraft fees or credit limit issues, but i asked all of them explicitly per danny's suggestion
+
+[2025-04-13 09:35:15] danny.reeves
+one thing we should think about for the post-mortem: how do we detect this kind of issue proactively? we found out because a customer emailed us. we should have caught this ourselves. some kind of alerting on duplicate invoice creation would have flagged this within minutes
+
+[2025-04-13 09:35:38] lina.okafor
+agreed. i can set up a simple check — a cron that runs every 15 minutes and queries for any invoice_id that appears more than once in the invoices table. if it finds any, it sends an alert to #engineering
+
+[2025-04-13 09:35:55] priya.kaur
+let's discuss monitoring improvements in the post-mortem. i don't want us to implement band-aids right now. we need a comprehensive plan, not a series of quick fixes
+
+[2025-04-13 09:36:10] lina.okafor
+understood. i'll add it to the post-mortem agenda as a discussion item
+
+[2025-04-13 09:40:22] priya.kaur
+ok. i think we're in a stable place for now. the fix is deployed and verified, all refunds are initiated, all customers have been contacted. let's reconvene at the post-mortem tomorrow at 10am UTC. in the meantime:
+
+— marcus: draft technical root cause section of the incident report
+— jess: continue documenting billing code issues for the audit
+— ravi: draft customer impact section, follow up if any customers report secondary financial impact
+— lina: prepare the full server logs and timeline for the post-mortem presentation
+— everyone: think about what process changes we need to prevent this class of issue going forward
+
+[2025-04-13 09:40:38] marcus.webb
+sounds good. i'll have the technical write-up ready tonight
+
+[2025-04-13 09:40:45] jess.tanaka
+will do. i've already found 4 additional issues in the webhook handler beyond the idempotency bug. will have the full list by tomorrow
+
+[2025-04-13 09:40:52] lina.okafor
+i'll package up the logs and prepare a slide with the timeline diagram
+
+[2025-04-13 09:40:58] ravi.mehta
+working on the customer section now. will also prepare talking points in case nara or belmont ask follow-up questions before the incident report is ready
+
+[2025-04-13 09:41:05] danny.reeves
+i'll think about monitoring and detection. we should have caught this ourselves, not learned about it from a customer email 7 hours after it happened
+
+---
+
+## Impact Assessment
+
+| Customer | Account Type | Duplicate Charges | Amount | Refund Status | Secondary Impact |
+|----------|-------------|------------------|--------|---------------|-----------------|
+| Nara Logistics | Enterprise | 8 | $8,247 | Refund initiated | None reported |
+| Belmont Partners | Enterprise | 4 | $3,118 | Refund initiated | None reported |
+| Crestview Capital | Trial | 2 | $892 | Refund initiated | None reported |
+| **Total** | | **14** | **$12,257** | **All refunds processing** | |
+
+Refund method: Individual refunds processed through Stripe dashboard. Each refund tied to the specific duplicate charge ID. Stripe automated refund confirmation emails sent to each customer's billing contact. Estimated 3-5 business days for funds to appear in customer accounts.
+
+Customer communication: All three customers contacted directly by Ravi Mehta. Nara Logistics via phone call to CFO, Belmont Partners via phone call to finance director, Crestview Capital via phone call to founder. Follow-up emails sent to all three with refund confirmation details and Stripe reference IDs.
+
+## Root Cause
+
+1. **Idempotency bug**: Webhook handler used Stripe event ID as the deduplication key. Stripe regenerates event IDs on retry, so retried webhooks bypassed the dedup check. The code on line 412 of billing.py checked `if event_id in processed_events` where `event_id` was sourced from `event["id"]` (the delivery-specific event identifier) rather than `event["data"]["object"]["id"]` (the stable invoice identifier). Stripe's webhook best practices documentation explicitly warns against using event IDs for idempotency.
+
+2. **DB contention**: Scheduled database backup overlapped with the usage reporting cron job, causing write lock contention. An incoming webhook timed out waiting for the lock, triggering Stripe's retry mechanism. The backup used `VACUUM INTO` which acquires an exclusive lock on the SQLite database file. The backup duration had grown from ~5 minutes (when billing launched with 15MB of data) to 41 minutes (with 340MB of data) due to accumulated webhook event log payloads. The 30-second webhook handler timeout was exceeded while waiting for the lock to release.
+
+3. **No test coverage**: The idempotency logic was never tested. A basic unit test with simulated retries would have caught this bug. The billing module was merged (PR #247) with zero test files in the diff.
+
+4. **No code review**: The billing module was written and deployed by a single developer with no peer review. The initial review was acknowledged as a rubber stamp due to time pressure to begin generating revenue.
+
+5. **No staging environment**: There was no way to test webhook retry behavior in a non-production setting. All webhook integration testing was done directly in production.
+
+6. **No proactive monitoring**: No alerting was configured to detect duplicate invoice creation. The incident was discovered 7 hours after it occurred, only because a customer noticed the duplicate charges on their credit card statement and emailed support.
+
+## Immediate Actions Taken
+
+- [x] Hotfix deployed: idempotency key changed from Stripe event ID to invoice ID (billing.py lines 410-435)
+- [x] Secondary dedup check added: SELECT against invoices table before INSERT, wrapped in EXCLUSIVE transaction
+- [x] Dedup logging added: new log line records when duplicate webhooks are rejected, including both event ID and invoice ID for audit trail
+- [x] DB backup and cron windows separated (backup moved from 23:00 to 00:00 UTC, 3-hour gap before next cron)
+- [x] All 14 refunds initiated via Stripe dashboard ($12,257 total)
+- [x] Customer communication completed: all three customers contacted by phone, follow-up emails sent with refund details
+- [x] Hotfix verified in production: 3 webhook retries correctly deduplicated post-deploy
+
+## Follow-Up Actions (TBD)
+
+- [ ] Post-mortem meeting (scheduled for 2025-04-14, 10:00 UTC)
+- [ ] Review all billing code paths for similar issues (Jess Tanaka documenting — 4 additional issues found so far)
+- [ ] Establish code review process for critical paths (billing, auth, data deletion)
+- [ ] Evaluate staging environment options for webhook integration testing
+- [ ] Add test coverage for billing module (unit tests for idempotency, retry handling, payment failure)
+- [ ] Implement proactive monitoring: alerting on duplicate invoice creation
+- [ ] Address Nara Logistics request for additional safeguards
+- [ ] Deliver formal incident report to affected customers within 48 hours
+- [ ] Evaluate webhook event log table growth and implement retention policy (340MB and growing)
+
+================================================================================
+END INCIDENT REPORT — INC-2025-0413-001
+================================================================================

@@ -1,0 +1,303 @@
+scope_id: implicit_decision_13
+domain: team_communications
+description: Engineering team discussions where an authentication architecture decision is made implicitly through action rather than explicit agreement
+generation:
+  mode: narrative
+  temperature: 0.7
+  seed: 1301
+episodes:
+  count: 8
+  timeline:
+    start: '2025-06-02'
+    interval: 2d
+  format: >
+    Engineering team communications including standup notes, architecture
+    discussion transcripts, Slack thread exports, and pull request
+    descriptions with review comments. Each episode is a bundle of
+    related communications from one day. Format includes participant
+    names, timestamps, channel/context labels, and inline code snippets
+    or configuration fragments where relevant. Episodes range from
+    structured meeting minutes to informal chat threads.
+  target_words: 2000
+scenario:
+  setting: >
+    A mid-stage startup ("Rivulet") with a 9-person engineering team
+    building a B2B SaaS analytics platform. The team uses Slack,
+    GitHub, and weekly architecture reviews. The authentication system
+    has been causing user-facing bugs — random logouts — and the team
+    needs to rethink the approach. Over 8 episodes spanning two weeks,
+    the team discusses options (JWT, Redis session tokens), debates
+    tradeoffs, and ultimately adopts Redis session tokens — but the
+    decision is never explicitly stated. Instead, engineer Mike Torres
+    opens a PR implementing Redis sessions, and the team treats it as
+    settled. The implicit nature of the decision is the core signal:
+    it can only be recovered by reading across episodes and noticing
+    that debate stopped and implementation began without any recorded
+    agreement. Meanwhile, the team makes several OTHER architecture
+    decisions explicitly (caching strategy, API versioning), providing
+    contrast. Redis appears in multiple contexts (caching AND auth),
+    adding potential confusion.
+  voice: >
+    Natural engineering team communication. Slack messages use casual
+    tone, abbreviations, emoji reactions noted in brackets, threading.
+    Architecture discussions are more structured but still informal.
+    PR descriptions follow a template with sections. Meeting notes
+    have bullet-point format with speaker attributions. Technical
+    jargon is natural and unglossed.
+arc:
+- id: baseline
+  episodes: 1-2
+  description: >
+    The auth problem surfaces and the first solution is proposed.
+    Episode 1: team standup where random logouts are raised as a
+    pain point among other sprint items. Episode 2: architecture
+    discussion where Sarah proposes JWT tokens with technical details.
+    No decision reached — team agrees to think about it.
+  signal_density: none
+- id: deliberation
+  episodes: 3-4
+  description: >
+    Technical debate about auth approaches. Episode 3: Mike raises
+    JWT revocation concerns — if a token leaks, invalidation requires
+    a blacklist which reintroduces server-side state. Episode 4: brief
+    exchange where Sarah suggests Redis session tokens, Mike notes
+    native revocation support. No explicit decision. The exchange is
+    buried in a longer meeting about multiple topics.
+  signal_density: low
+- id: implicit_decision
+  episodes: 5-5
+  description: >
+    The implicit decision. Mike opens a PR implementing Redis session
+    store with token rotation. No mention of JWT. No reference to a
+    team decision. Just starts building. This is the pivotal episode
+    where the decision can be inferred from action rather than words.
+  signal_density: high
+- id: noise
+  episodes: 6-8
+  description: >
+    Post-decision noise. Episode 6: explicit caching decision using
+    Redis (different use case — potential confusion with auth Redis).
+    Episode 7: API versioning discussion with explicit decisions.
+    Episode 8: deployment review referencing session infrastructure
+    obliquely but never mentioning auth decision. Auth is treated
+    as settled without ever having been decided on the record.
+  signal_density: none
+noise:
+  description: >
+    Normal engineering team activity — sprint updates, code reviews,
+    deployment logistics, on-call handoffs. Technical discussions
+    about topics other than authentication.
+  examples:
+  - Sprint velocity discussion and ticket grooming
+  - Code review comments on unrelated PRs
+  - On-call incident about a database connection pool
+  - Discussion about CI/CD pipeline improvements
+distractors:
+  count: 8
+  target_words: 2000
+  seed: 1302
+  max_similarity: 0.3
+  themes:
+  - id: product_decisions
+    scenario: >
+      Product team meetings where features are discussed and decisions
+      are made EXPLICITLY. Clear decision language throughout: "we
+      decided," "the team agreed," "after discussion we chose," "voted
+      to go with." Topics include onboarding flow, pricing page design,
+      tutorial removal, feature prioritization. The explicit decision
+      language contrasts with the signal episodes where the auth
+      decision is never stated.
+    excluded_terms:
+    - Redis
+    - session token
+    - JWT
+    - authentication
+    - auth
+    - login
+    - revocation
+  - id: sprint_retros
+    scenario: >
+      Sprint retrospective meetings where the team discusses process
+      improvements. Decisions about workflow changes are made explicitly:
+      "We decided to adopt daily standups," "Chose to switch to
+      two-week sprints," "Agreed to implement code review requirements."
+      Similar decision-making language but about process, not
+      architecture.
+    excluded_terms:
+    - Redis
+    - JWT
+    - authentication
+    - auth
+    - session
+    - login
+    - architecture
+  - id: database_architecture
+    scenario: >
+      Architecture discussions about database selection and schema
+      design where decisions ARE explicit. Team evaluates options,
+      debates tradeoffs, and clearly states the outcome: "We're going
+      with Postgres," "After benchmarking, chose TimescaleDB for
+      time-series data." Structurally similar to auth discussions
+      but with clear, recorded decisions.
+    excluded_terms:
+    - Redis
+    - session token
+    - JWT
+    - authentication
+    - auth
+    - login
+    - revocation
+    - logged out
+key_facts:
+- id: implicit_redis_chosen
+  fact: The team implicitly chose Redis session tokens for authentication evidenced by Mike opening a PR to implement it without any explicit team decision vote or recorded agreement
+  first_appears: implicit_decision:1
+  reinforced_in:
+  - noise:3
+- id: jwt_rejected_revocation
+  fact: JWT was not selected because Mike raised that token revocation requires a blacklist which reintroduces server-side state negating the stateless benefit
+  first_appears: deliberation:1
+  reinforced_in:
+  - deliberation:2
+- id: no_explicit_decision
+  fact: No explicit decision statement vote or agreement on the authentication approach was ever documented in any meeting notes or discussion
+  first_appears: implicit_decision:1
+  reinforced_in:
+  - noise:1
+  - noise:3
+- id: sarah_proposed_jwt
+  fact: Sarah initially proposed JWT tokens citing stateless architecture and horizontal scaling benefits
+  first_appears: baseline:2
+  reinforced_in:
+  - deliberation:1
+- id: redis_handles_revocation
+  fact: Redis session tokens were favored because they handle token revocation natively without the blacklist problem that JWT would require
+  first_appears: deliberation:2
+  reinforced_in:
+  - implicit_decision:1
+- id: auth_problem_origin
+  fact: The authentication rethink was triggered by users getting randomly logged out
+  first_appears: baseline:1
+  reinforced_in:
+  - baseline:2
+questions:
+- id: id13_q01_longitudinal
+  checkpoint_after: 5
+  type: longitudinal
+  prompt: What approach was chosen for authentication?
+  ground_truth:
+    canonical_answer: >
+      The team chose Redis session tokens for authentication. This was
+      never explicitly decided or voted on — instead, after debating JWT
+      versus Redis sessions, Mike opened a PR implementing a Redis session
+      store with token rotation. The team treated this as the de facto
+      decision without any recorded agreement.
+    key_facts:
+    - implicit_redis_chosen
+    - no_explicit_decision
+    evidence:
+    - deliberation:2
+    - implicit_decision:1
+- id: id13_q02_longitudinal
+  checkpoint_after: 5
+  type: longitudinal
+  prompt: Why was JWT not selected for authentication?
+  ground_truth:
+    canonical_answer: >
+      JWT was not selected because Mike raised a fundamental concern about
+      token revocation. If a JWT token leaks, it cannot be invalidated
+      without maintaining a server-side blacklist, which reintroduces the
+      server-side state that JWT was meant to eliminate. This negates the
+      core stateless benefit of JWT. Redis session tokens handle revocation
+      natively by simply deleting the session key.
+    key_facts:
+    - jwt_rejected_revocation
+    - redis_handles_revocation
+    evidence:
+    - deliberation:1
+    - deliberation:2
+- id: id13_q03_evidence
+  checkpoint_after: 5
+  type: evidence_sufficiency
+  prompt: What authentication decisions are still open?
+  ground_truth:
+    canonical_answer: >
+      Based on the evidence, the authentication approach itself appears
+      settled — Mike has begun implementing Redis session tokens. However,
+      no explicit decision was ever recorded. There was no team vote, no
+      documented agreement, and no meeting where the team formally chose
+      Redis over JWT. The decision was made implicitly through action
+      rather than through any formal process.
+    key_facts:
+    - implicit_redis_chosen
+    - no_explicit_decision
+    evidence:
+    - implicit_decision:1
+    - deliberation:2
+- id: id13_q04_longitudinal
+  checkpoint_after: 8
+  type: longitudinal
+  prompt: What approach was chosen for authentication?
+  ground_truth:
+    canonical_answer: >
+      Redis session tokens were chosen for authentication. The decision
+      was implicit — after discussions where JWT revocation concerns were
+      raised and Redis session tokens were suggested as an alternative,
+      Mike opened a PR implementing the Redis session store. No explicit
+      team decision was recorded. Subsequent discussions reference session
+      infrastructure without revisiting the auth decision, confirming it
+      is treated as settled.
+    key_facts:
+    - implicit_redis_chosen
+    - no_explicit_decision
+    - jwt_rejected_revocation
+    evidence:
+    - deliberation:1
+    - deliberation:2
+    - implicit_decision:1
+    - noise:3
+- id: id13_q05_longitudinal
+  checkpoint_after: 8
+  type: longitudinal
+  prompt: List all architecture decisions made across the team discussions.
+  ground_truth:
+    canonical_answer: >
+      Three architecture decisions were made: (1) Authentication — Redis
+      session tokens with token rotation, decided implicitly when Mike
+      opened the implementation PR without formal agreement. (2) Caching
+      — Redis caching layer with 5-minute TTL for API responses, decided
+      explicitly by team vote. (3) API versioning — URL-path versioning
+      with v1/v2 prefixes, decided explicitly in architecture review.
+      The auth decision stands out as the only one without a recorded
+      explicit agreement.
+    key_facts:
+    - implicit_redis_chosen
+    - no_explicit_decision
+    evidence:
+    - implicit_decision:1
+    - noise:1
+    - noise:2
+- id: id13_q06_temporal
+  checkpoint_after: 8
+  type: temporal
+  prompt: Which architecture topics are resolved versus still under discussion?
+  ground_truth:
+    canonical_answer: >
+      All three major architecture topics discussed are resolved.
+      Authentication was resolved implicitly when Mike began implementing
+      Redis session tokens after the JWT revocation debate. Caching
+      strategy was resolved explicitly with a team decision on Redis
+      caching with 5-minute TTL. API versioning was resolved explicitly
+      with URL-path versioning. The authentication resolution is notable
+      because it was never formally declared — the team moved from debate
+      to implementation without a recorded decision point.
+    key_facts:
+    - implicit_redis_chosen
+    - no_explicit_decision
+    - jwt_rejected_revocation
+    evidence:
+    - deliberation:1
+    - implicit_decision:1
+    - noise:1
+    - noise:2
+    - noise:3

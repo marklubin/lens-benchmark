@@ -1,0 +1,382 @@
+RIVULET ENGINEERING — DAILY STANDUP NOTES
+Date: 2025-06-02 (Monday)
+Time: 09:15–09:42 AM PT
+Facilitator: Priya Chandrasekaran (Engineering Manager)
+Attendees: Sarah Kim (Senior Backend), Mike Torres (Senior Backend), David Okafor (Backend), Lin Zhang (Frontend), Rachel Fernandez (Full-Stack), James Holden (Backend/DevOps), Anika Patel (Frontend), Carlos Rivera (Platform/Infra), Ben Nakamura (QA Lead), Tariq Al-Rashid (Security Engineer)
+Format: Round-robin updates, blockers, then open discussion
+Sprint: Sprint 24 ("Falcon")
+Sprint Goal: Ship analytics export pipeline v2, close P1 auth bugs
+Board Snapshot (as of 09:00 AM): 14 story points committed, 0 in review, 0 done, 2 carried over from Sprint 23
+
+---
+
+PRE-STANDUP CHAT (Slack #eng-standup, 09:08–09:14 AM)
+
+[09:08] Carlos Rivera: anybody else having trouble pulling from the container registry this morning? getting intermittent 503s from ECR
+[09:09] Ben Nakamura: yeah I saw that too. retried twice and it worked the third time
+[09:10] Carlos Rivera: probably a regional thing. us-west-2 had a status blip on the AWS dashboard around 8:45. seems to have cleared. just wanted to flag in case anyone's CI runs are failing
+[09:11] James Holden: thanks for the heads up. I was wondering why my test container took 4 minutes to pull
+[09:12] Anika Patel: good morning all! joining from the SF office today, might have a slight echo on the mic
+[09:13] Priya Chandrasekaran: morning everyone. give me 2 minutes to pull up the board and we'll start sharp at 9:15
+[09:14] Lin Zhang: morning. coffee still brewing, but I'm here
+
+---
+
+ROUND-ROBIN UPDATES
+
+[Priya Chandrasekaran]
+Good morning everyone. Sprint 24, day 1. We have 14 story points committed. Let's keep it tight — updates, blockers, then we have a few things to discuss at the end. Quick reminder for everyone: please keep updates to two minutes or less. If you need a deeper dive on something, let's take it offline and I'll help schedule time. Sarah, kick us off.
+
+[Sarah Kim]
+- Finished the schema migration for the export pipeline over the weekend. PR #1847 is up for review — it adds the new `export_jobs` table and the background worker scaffold. The migration itself is pretty straightforward — three new tables: `export_jobs`, `export_job_chunks`, and `export_job_audit_log`. The worker is based on our existing Celery task pattern, one task per chunk, with a fan-out/fan-in pattern for the final assembly step.
+- Here's what the core schema looks like for anyone reviewing:
+
+  ```sql
+  CREATE TABLE export_jobs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      created_by UUID NOT NULL REFERENCES users(id),
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      format VARCHAR(10) NOT NULL,  -- csv, parquet, json
+      query_hash VARCHAR(64) NOT NULL,
+      total_rows BIGINT,
+      exported_rows BIGINT DEFAULT 0,
+      s3_key TEXT,
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      CONSTRAINT valid_status CHECK (status IN ('pending','chunking','uploading','complete','failed'))
+  );
+  ```
+
+- Today: wiring up the S3 upload path. Should have a draft PR by EOD. Using multipart upload with 50MB chunks so we don't run into the 5GB single PUT limit. Going to use `boto3`'s `TransferConfig` with `multipart_threshold` set to 50MB and `max_concurrency` of 4.
+- Blocker: none, but I need someone to review #1847 before I build on top of it. It touches the job queue schema. Ben, I'd love your eyes on the test coverage too — I wrote about 15 unit tests but I'm not sure I've covered all the edge cases on the status transitions.
+
+[Ben Nakamura]
+I can take a look at #1847 this morning. I've got a window before the regression suite kicks off at 11. Quick question — did you add any constraint tests for the status CHECK? Like trying to insert an invalid status value?
+
+[Sarah Kim]
+Good catch — I have a test for that but it's testing at the ORM level, not at the DB level. I'll add a raw SQL test too.
+
+[Priya Chandrasekaran]
+Great, thank you Ben. Mike, you're next.
+
+[Mike Torres]
+- Spent Friday debugging the flaky integration tests in the billing module. Turned out to be a race condition in the Stripe webhook handler — we were processing idempotency keys before the transaction committed. The flow was: webhook comes in, we start a DB transaction, check the idempotency key, process the event, then commit. But if a retry came in before the first transaction committed, the idempotency check would miss it because the key wasn't visible yet (read committed isolation). Fixed by adding a `SELECT ... FOR UPDATE SKIP LOCKED` advisory lock on the idempotency key before checking. PR #1842, merged Friday evening.
+- Today: picking up FALCON-12, the rate limiter refactor. Going to move the sliding window logic from the application layer into a Lua script on Redis so we stop hitting the double-count bug. Right now the check-and-increment is two separate Redis commands, and between those two commands another request can sneak in and also pass the check. Classic TOCTOU. The Lua script makes it atomic — check the sorted set count, add the new entry, trim old entries, all in one EVALSHA call.
+- For reference, the current approach in `rate_limiter.py` looks like:
+
+  ```python
+  count = redis.zcount(key, window_start, "+inf")
+  if count < limit:
+      redis.zadd(key, {request_id: now})
+  ```
+
+  And I'm replacing it with a single `EVALSHA` that does both operations atomically.
+- Blocker: none.
+
+[Tariq Al-Rashid]
+Mike, on the rate limiter — are we keeping the per-tenant rate limits in the config file or are we moving to a database-backed config? I ask because I'm working on the abuse detection rules and I want to make sure we can update limits dynamically without a deploy.
+
+[Mike Torres]
+For now it's still config-file based, pulled from `settings.RATE_LIMITS` which is a dict keyed by plan tier. But the Lua script doesn't care where the limit comes from — it takes the limit as a parameter. So if we want to switch to database-backed later, it's just the calling code that changes, not the Redis logic. Happy to sync on the abuse detection stuff separately.
+
+[Tariq Al-Rashid]
+Sounds good, let's do that this week.
+
+[Priya Chandrasekaran]
+David, you're up.
+
+[David Okafor]
+- Working on the dashboard widget performance ticket (FALCON-09). Identified that the main bottleneck is the aggregation query — it's doing a full table scan on `events` because the composite index only covers `(tenant_id, created_at)` but we're filtering on `event_type` too. The `events` table is at 38 million rows now and the query is taking 4.2 seconds on staging, which is unacceptable for a dashboard widget that's supposed to load in under 500ms.
+- The EXPLAIN ANALYZE output shows:
+
+  ```
+  Seq Scan on events  (cost=0.00..1245892.00 rows=38421000 width=128)
+    Filter: ((tenant_id = '...') AND (event_type = '...') AND (created_at >= '2025-05-01'))
+    Rows Removed by Filter: 37845000
+  ```
+
+  With the new index `(tenant_id, event_type, created_at)`, preliminary tests on my local copy show it should drop to an Index Scan with ~200ms execution time.
+- Today: adding the composite index and running EXPLAIN ANALYZE on staging. I want to do it on staging because the data distribution there is closer to production. The index build shouldn't lock the table since we're using `CREATE INDEX CONCURRENTLY`, but I want to monitor the build time and disk usage during the operation.
+- Blocker: need staging database access refreshed. My credentials expired over the weekend. Carlos, can you re-issue?
+
+[Carlos Rivera]
+- Yeah, I'll get that to you in the next hour. Had the same issue last week — the rotation policy is set to 7 days which is too aggressive for staging. I'll file a ticket to extend it. Thinking we should bump staging to 30 days while keeping production at 7. I'll put together a quick proposal for the rotation tiers — staging at 30, dev at 90, production at 7.
+- My update: finished the Terraform modules for the new monitoring stack. Datadog agent is deployed across all ECS services. Here's the rollout status:
+
+  | Service           | Agent Version | Status       |
+  |-------------------|---------------|--------------|
+  | api-gateway       | 7.52.0        | Running      |
+  | export-worker     | 7.52.0        | Running      |
+  | billing-service   | 7.52.0        | Running      |
+  | notification-svc  | 7.52.0        | Running      |
+  | analytics-engine  | 7.52.0        | Running      |
+
+  Dashboards are live but I'm still tuning alert thresholds — getting too many false positives on the memory utilization metric. The ECS tasks are configured with a soft limit of 512MB and a hard limit of 1GB, and the alert fires at 80% of hard limit (800MB), but normal operation sits at 600-750MB for the analytics engine because of the JVM heap. I'm going to switch to monitoring the delta rather than the absolute value.
+
+- Today: tuning alerts, then starting on the CI pipeline caching improvements. Our build times crept up to 14 minutes and I want to get them back under 8. Main culprits are: Docker layer cache misses (we're not preserving the cache between runs), npm install running from scratch every time (no node_modules cache), and the integration test suite is pulling fresh test fixtures from S3 on every run instead of caching them.
+- Blocker: none.
+
+[Ben Nakamura]
+Carlos, on the CI caching — can you also look at the test parallelization? Right now we're running all 847 tests serially. I've been meaning to set up `pytest-xdist` with 4 workers but haven't had the bandwidth.
+
+[Carlos Rivera]
+Yeah, I'll bundle that in. The CI improvements are going to be a couple of PRs — one for Docker layer caching, one for dependency caching, one for test parallelization. I'll tag you on the test one.
+
+[Priya Chandrasekaran]
+Lin, go ahead.
+
+[Lin Zhang]
+- Continuing on the analytics query builder frontend (FALCON-07). Got the drag-and-drop dimension selector working on Friday. Uses `@dnd-kit/core` for the drag interactions and `@dnd-kit/sortable` for the dimension list reordering. Looks good but there's a rendering glitch on Firefox — the drop zones overlap when you have more than 6 dimensions. I think it's a flexbox gap calculation issue specific to Firefox's rendering engine. Chrome and Safari render it correctly.
+- I captured the Firefox issue — the CSS is using `gap: 8px` on a flex container, which Firefox handles slightly differently when combined with `overflow-y: auto`. The drop zone height calculation doesn't account for the scroll offset in Firefox. I've got a workaround in mind using explicit margins instead of gap.
+- Today: Firefox fix, then starting on the filter panel.
+- Blocker: waiting on the design spec for the filter panel from product. Rachel, do you know if Megan finalized it?
+
+[Rachel Fernandez]
+- I'll ping Megan after standup. She was iterating on it Friday, should be ready. I saw her Figma file was updated around 4pm Friday so it might already be final — just needs the handoff notes.
+- My update: working on the notification service migration (FALCON-14). Moving from polling to WebSockets. Got the basic socket connection working using `socket.io` on the client and `python-socketio` with the `asyncio` server on the backend. The handshake works, authentication via JWT token in the connection headers is working, and I can push a test event from the server to a connected client.
+- But I'm hitting an issue with the load balancer — sticky sessions aren't working right with our ALB config. When I connect from the browser, the initial HTTP upgrade request goes to one target, but subsequent WebSocket frames are getting routed to a different target. The connection drops and the client falls back to long-polling. I checked the ALB access logs and I can see the connection ID changing target IPs between the upgrade and the first data frame.
+- Blocker: the ALB sticky session issue. Might need Carlos to look at the LB config.
+
+[Carlos Rivera]
+Send me the ALB ARN and I'll check the target group settings. Probably need to switch from cookie-based to header-based affinity. For WebSocket connections, the ALB needs to route based on the connection ID, not a cookie, because the WebSocket upgrade doesn't send cookies the same way. The target group stickiness type needs to be `app_cookie` with a custom cookie that gets set during the HTTP upgrade. Or alternatively, we could switch to a Network Load Balancer for the WebSocket tier, which does connection-level stickiness by default. Let me look at the tradeoffs and get back to you by lunch.
+
+[Rachel Fernandez]
+That would be great. I'll DM you the ARN right after standup. The current config is:
+
+```
+Target Group: rivulet-notifications-tg
+Protocol: HTTP
+Health Check: /health (HTTP 200)
+Stickiness: Enabled, duration-based, 1 day
+```
+
+[Priya Chandrasekaran]
+Thanks Rachel. James, you're next.
+
+[James Holden]
+- Wrapped up the data retention policy implementation (FALCON-04). PR #1849 is up. It adds TTL-based cleanup for the raw events table — anything older than 90 days gets archived to cold storage, then purged after 180. The archival process works in batches of 10,000 rows, writes them as gzipped Parquet files to S3, transitions the objects to Glacier after 30 days via an S3 lifecycle policy, and then deletes the source rows from Postgres in a separate cleanup pass.
+- The batch size of 10,000 was chosen based on testing — at that size, each batch takes about 1.2 seconds to read, serialize, and upload, and the DELETE doesn't hold a lock long enough to interfere with production reads. I tested with batch sizes of 1K, 5K, 10K, 25K, and 50K:
+
+  | Batch Size | Read+Upload (s) | Delete Lock (ms) | Total Time (min) |
+  |------------|-----------------|-------------------|-------------------|
+  | 1,000      | 0.3             | 12                | 47                |
+  | 5,000      | 0.7             | 45                | 14                |
+  | 10,000     | 1.2             | 82                | 8.5               |
+  | 25,000     | 2.8             | 210               | 5.2               |
+  | 50,000     | 5.1             | 480               | 4.1               |
+
+  The 25K and 50K sizes start to show noticeable lock contention during peak hours so 10K is the sweet spot.
+- Today: writing integration tests for the archival job. Want to make sure the S3 Glacier transition works correctly. Going to use `moto` to mock S3 and verify the lifecycle policy application. Also want to test the failure recovery path — if the job crashes mid-batch, it should resume from the last successfully archived batch on the next run via a watermark stored in a `retention_job_state` table.
+- Blocker: none.
+
+[Anika Patel]
+- Working on the tenant onboarding flow rewrite (FALCON-11). The current flow has 7 steps and product wants to get it down to 3. Here's the mapping:
+
+  Old flow (7 steps):
+  1. Create account → 2. Verify email → 3. Company info → 4. Team size → 5. Use case selection → 6. Billing setup → 7. Workspace creation
+
+  New flow (3 steps):
+  1. Create account + verify email (inline verification code) → 2. Billing setup → 3. Workspace creation (auto-populates company info from billing)
+
+  Steps 4 and 5 (team size and use case) are being moved to an optional post-onboarding survey that appears on first dashboard load.
+
+- I've got the new stepper component built — it's a generic `<MultiStepForm>` component that takes a list of step configs and handles transitions, validation, and back-navigation. Using React Hook Form for field management and Zod for schema validation. Currently integrating the workspace creation API.
+- Today: connecting the billing setup step. Need to test with Stripe test mode. The Stripe Elements integration is mostly copy-paste from the old flow but I'm updating it to use the new Payment Element (the combined card/bank/wallet UI) instead of the old Card Element.
+- Blocker: none.
+
+[Ben Nakamura]
+Anika, when you have the new flow ready for testing, can you give me a heads up? I want to run it through the accessibility checker. The old flow had three WCAG AA violations that we never fixed — missing aria-labels on the step indicators, no keyboard navigation between steps, and the error messages weren't associated with their input fields via `aria-describedby`.
+
+[Anika Patel]
+Absolutely. I'm building with accessibility in mind this time — the stepper component already has proper ARIA roles and keyboard nav. I'll ping you when it's on the dev branch, probably Wednesday.
+
+[Tariq Al-Rashid]
+My quick update since I'm here — continuing the dependency audit for SOC 2. Ran `npm audit` and `safety check` over the weekend. We have 4 moderate-severity npm vulnerabilities, all in transitive dependencies of `react-scripts`. None are exploitable in our context but the auditor might flag them. Also found that our `cryptography` Python package is 2 minor versions behind, which I'm updating in PR #1851. No blockers.
+
+[Priya Chandrasekaran]
+Thanks Tariq. Good timing with the SOC 2 work — we'll talk about that more in a minute.
+
+---
+
+BLOCKERS SUMMARY
+1. David needs staging DB credentials refreshed (Carlos handling, ETA within the hour)
+2. Lin waiting on filter panel design spec (Rachel following up with Megan post-standup)
+3. Rachel's ALB sticky session issue for WebSocket connections (Carlos to investigate, will report back by lunch)
+
+---
+
+OPEN DISCUSSION
+
+[Priya Chandrasekaran]
+Alright, before we break — two things. First, the on-call report from last week. James, you were on call. Anything notable?
+
+[James Holden]
+Pretty quiet week overall. We had one P2 on Thursday — the export service ran out of disk space on the ECS task because someone exported a 4GB dataset and we weren't streaming to S3. The task has 20GB ephemeral storage by default and the export process was writing the entire CSV to local disk before uploading. With the 4GB raw data plus CSV serialization overhead, it ballooned to about 22GB and the task got OOM-killed.
+
+Temporary fix was bumping the ECS task ephemeral storage to 30GB. Long-term fix is in Sarah's export pipeline v2 which streams directly to S3. Here's the incident timeline:
+
+- 14:22 PT: PagerDuty alert — export-worker task terminated with exit code 137 (OOM)
+- 14:25 PT: I acknowledged and started investigating. Checked ECS task logs, saw the disk usage spike.
+- 14:32 PT: Identified the root cause — non-streaming export of a large dataset
+- 14:38 PT: Applied the temporary fix — updated the ECS task definition to 30GB ephemeral storage
+- 14:45 PT: Restarted the export. It completed successfully at 14:51.
+- 14:55 PT: Notified the customer (Tenant: Orion Analytics) via support ticket SUP-4419 that their export was ready.
+
+The total customer impact was about 30 minutes of delay on their export. I've added a note to Sarah's export v2 ticket (FALCON-06) referencing this incident.
+
+Other than that, three alerts on the billing webhook latency monitor but they were all transient spikes during the Stripe maintenance window. Stripe had scheduled maintenance between 02:00 and 04:00 UTC on Wednesday — webhook delivery latency spiked to 8-12 seconds during that window versus our normal 200-400ms. No customer impact because the webhook handler has a 30-second timeout and all events eventually delivered.
+
+Oh, and one thing I want to flag — I got two support tickets about users getting randomly logged out. Ticket SUP-4421 and SUP-4423. Both from different tenants. The users say they were in the middle of a session and got kicked back to the login page. I checked the server logs and the session lookup returned a 404 on both — the session IDs were valid format but not found in the store. I pulled the timestamps from the auth middleware logs:
+
+- SUP-4421: Session lookup failed at 2025-05-29 11:47:23 UTC, session created at 2025-05-29 09:12:08 UTC (2h35m old, should still be valid — our session TTL is 24 hours)
+- SUP-4423: Session lookup failed at 2025-05-30 14:02:51 UTC, session created at 2025-05-30 10:30:17 UTC (3h32m old)
+
+Both sessions were well within their TTL. They just vanished from the session table.
+
+[Priya Chandrasekaran]
+That's the third time this month we've heard about random logouts. There was that batch of tickets two weeks ago too — SUP-4398 through SUP-4402. Five users in one day.
+
+[Mike Torres]
+Yeah, I looked into those earlier ones. The session store is PostgreSQL-backed right now — we're using the `django.contrib.sessions` database backend. The relevant settings in our `settings.py` are:
+
+```python
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_COOKIE_AGE = 86400  # 24 hours
+SESSION_SAVE_EVERY_REQUEST = True
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_HTTPONLY = True
+```
+
+The problem is twofold: first, we're running session cleanup as a cron job that deletes expired sessions, but the expiry check has a timezone bug. It's comparing UTC timestamps against session creation times that were stored in the server's local timezone. The cron job runs `DELETE FROM django_session WHERE expire_date < NOW()`, but `expire_date` was being set using `datetime.now()` instead of `datetime.utcnow()` in one of our custom session middleware patches — and our servers are running in US-Pacific, which is UTC-7. So sessions created during certain hours look like they expired 7 hours earlier than they actually did. Any session created between 00:00 and 07:00 UTC (5pm to midnight Pacific) gets an `expire_date` that, when compared to UTC `NOW()`, appears to already be expired.
+
+Second issue is that when the database connection pool is saturated — which happens during our traffic spikes between 10am and 2pm ET — session lookups time out and Django falls back to creating a new session, which invalidates the old one from the user's perspective. The connection pool is configured with `CONN_MAX_AGE = 600` and `MAX_CONNS = 20` via pgBouncer, but the session lookup, the user lookup, and the actual request handler are all competing for the same pool.
+
+[Sarah Kim]
+That connection pool saturation is going to get worse as we scale. We're at what, 200 concurrent users during peak now? The session table has 14,000 rows and growing.
+
+[Mike Torres]
+15,200 as of this morning. And the session lookup is hitting the table on every authenticated request. Even with the index, it's adding 2-3ms per request at current load, which is fine, but at 500 concurrent users it'll start competing with the actual application queries for pool connections. I ran a quick simulation by replaying our production query log at 2.5x speed on staging, and at that load the p99 for session lookups went from 3ms to 47ms, and the application query p99 went from 18ms to 89ms. The pool was at 100% utilization 60% of the time during that test.
+
+[Ben Nakamura]
+Is there a way to reproduce this in our test suite? If we're going to fix this, I want regression tests that would catch if we introduce a similar scaling issue in the future.
+
+[Mike Torres]
+Good question. We could add a load test to the CI pipeline that runs against a test database with a realistic number of sessions. But it'd be slow — probably 2-3 minutes even with a stripped-down dataset. Might be better as a nightly job rather than per-PR.
+
+[Priya Chandrasekaran]
+This sounds like it's becoming a real problem. Auth is becoming a problem. Users getting logged out randomly — that's not acceptable for a B2B product where people are in the middle of building dashboards. We need to rethink this.
+
+[David Okafor]
+Agreed. The Postgres session backend was fine when we had 30 users but it's clearly not scaling. I see the same pattern with the events table query I'm working on — Postgres is great for relational data but when you use it as a key-value store for high-frequency lookups, you're fighting against its architecture.
+
+[Mike Torres]
+I've been thinking about this. The fundamental issue is that we're using a general-purpose relational database as a session store. Sessions are essentially a key-value lookup pattern — you have a session ID and you need to get the associated data as fast as possible. PostgreSQL can do it but it's not optimized for it. The overhead of MVCC, WAL writes, vacuum, index maintenance — none of that adds value for a workload that's just "get value by key, set value by key, delete key after TTL."
+
+[Tariq Al-Rashid]
+Whatever direction we go, I want to make sure we don't lose the audit trail on session creation and termination. Right now the session table gives us a record of when sessions were created and expired. If we move to an in-memory store, we need to make sure we're still logging session lifecycle events somewhere for the SOC 2 audit.
+
+[Mike Torres]
+That's a fair point. We can emit session lifecycle events to our existing audit log pipeline regardless of where the session data lives. The session middleware already has hooks for create/access/destroy — we just need to wire them to the audit logger.
+
+[Priya Chandrasekaran]
+Let's not redesign it in standup. Can we schedule an architecture discussion for this? I want to give it proper time.
+
+[Sarah Kim]
+I have some ideas. Can we do it tomorrow afternoon? I can put together some options.
+
+[Priya Chandrasekaran]
+Works for me. Let's do 2pm tomorrow. I'll send a calendar invite. Sarah, Mike, David — anyone else who wants to join is welcome but you three are required. Bring concrete proposals. I want us to walk out of that meeting with a decision, not just a discussion. So please come prepared with options, pros and cons, and migration complexity estimates.
+
+[Mike Torres]
+Sounds good. I'll pull some numbers on the session table growth rate and query latency distribution so we have data. I'll put it in a shared Google Doc so everyone can look at it before the meeting.
+
+[Sarah Kim]
+I'll also include a rough sizing estimate for different approaches so we're comparing apples to apples on infrastructure cost.
+
+[Priya Chandrasekaran]
+Perfect. Second item — Carlos, what's the status on the SOC 2 compliance work?
+
+[Carlos Rivera]
+Making progress. The auditor sent back their gap analysis last Thursday. I've been working through it over the weekend and here's where we stand. Main gaps are: we need to formalize our incident response runbook (James, I'll need your help with that — you've got the most on-call experience and you've been keeping informal notes that we can turn into the official document), we need audit logging on all admin actions (that's partially done — I'd say 70%. We have logging on user management actions, billing changes, and API key operations, but we're missing it on tenant settings changes, SSO configuration, and data export approvals), and we need to document our data retention policies which James's PR actually covers for the events table.
+
+Here's the gap analysis summary:
+
+| Control Area           | Status      | Gap                                    |
+|------------------------|-------------|----------------------------------------|
+| Incident Response      | Not started | No formal runbook, no escalation matrix|
+| Audit Logging          | 70%         | Missing 3 admin action categories      |
+| Data Retention         | In progress | PR #1849 covers events; need policy docs|
+| Access Control         | 85%         | Need to document credential rotation   |
+| Change Management      | 90%         | Need sign-off workflow for prod deploys |
+| Encryption             | Complete    | AES-256 at rest, TLS 1.3 in transit    |
+
+I'm targeting end of Sprint 25 to have everything buttoned up.
+
+[James Holden]
+Happy to help with the runbook. I've got my on-call notes from the last 6 months in Notion. I'll clean them up and share the link with you. We should probably also define escalation tiers — like what constitutes a P1 versus P2, who gets paged for what, and the expected response times.
+
+[Carlos Rivera]
+Exactly. I was thinking three tiers: P1 (full outage or data breach) — all-hands, 15-minute response. P2 (degraded service or single-tenant impact) — on-call engineer, 30-minute response. P3 (non-urgent, no customer impact) — next business day. I'll draft the tiers and share them for review.
+
+[Priya Chandrasekaran]
+Good. Let's make sure we don't let it slip. SOC 2 is a hard requirement for the Meridian Health deal and they want to see the report by end of July. That gives us about 8 weeks, and the auditor needs 3-4 weeks for their assessment once we submit. So realistically we need everything done by end of June.
+
+[Carlos Rivera]
+Understood. I'll flag if anything blocks. I'll also set up a weekly SOC 2 sync — just 15 minutes on Wednesdays — to track progress. I'll send the invite today.
+
+[Priya Chandrasekaran]
+Good idea. Alright, one more thing before we wrap — quick reminder that the engineering all-hands is this Thursday at 11am. VP of Product is presenting the Q3 roadmap. Please attend if you can — there are some significant changes to the analytics direction that will affect our work.
+
+[Ben Nakamura]
+Is that recorded? I have a conflict with the QA sync at 11.
+
+[Priya Chandrasekaran]
+Yes, it'll be recorded and posted to the #eng-all-hands channel. But if you can reschedule the QA sync, I'd encourage attending live — there will be a Q&A portion.
+
+Alright, that's it. Good standup everyone. Let's have a strong sprint.
+
+---
+
+POST-STANDUP NOTES
+
+Quick logistics after the call:
+- Carlos DMed David the temporary staging credentials at 09:48 and confirmed access was working by 09:55. INFRA-892 filed for extending staging credential rotation to 30 days.
+- Rachel sent Carlos the ALB ARN (arn:aws:elasticloadbalancing:us-west-2:XXXXXXXXXX:targetgroup/rivulet-notifications-tg/abcdef123456) via DM.
+- Priya sent the calendar invite for Tuesday 2pm auth architecture discussion. Required: Sarah, Mike, David. Optional: everyone else.
+
+---
+
+ACTION ITEMS
+- Carlos: Re-issue David's staging DB credentials (DONE — completed 09:48)
+- Carlos: File ticket to extend staging credential rotation (filed as INFRA-892)
+- Rachel: Follow up with Megan on filter panel design spec
+- Carlos: Investigate Rachel's ALB sticky session config for WebSocket support (report back by lunch)
+- Priya: Send calendar invite for auth architecture discussion (Tuesday 2pm) (DONE)
+- Sarah: Prepare auth architecture options for Tuesday meeting (include sizing estimates)
+- Mike: Pull session table metrics for Tuesday meeting (share via Google Doc)
+- Carlos + James: Coordinate on incident response runbook for SOC 2
+- Carlos: Set up weekly SOC 2 sync (Wednesdays, 15 min)
+- Ben: Review Sarah's PR #1847 (export pipeline schema migration)
+- Tariq + Mike: Sync on abuse detection rate limit requirements this week
+- Ben: Run accessibility check on Anika's new onboarding flow when ready (~Wednesday)
+
+TICKET REFERENCES
+- FALCON-04: Data retention policy (James, PR #1849)
+- FALCON-06: Export pipeline v2 (Sarah, referenced in on-call incident)
+- FALCON-07: Analytics query builder frontend (Lin)
+- FALCON-09: Dashboard widget performance (David)
+- FALCON-11: Tenant onboarding rewrite (Anika)
+- FALCON-12: Rate limiter refactor (Mike)
+- FALCON-14: Notification service WebSocket migration (Rachel)
+- INFRA-892: Extend staging credential rotation policy (Carlos)
+- PR #1842: Stripe webhook race condition fix (Mike, merged)
+- PR #1847: Export pipeline schema migration (Sarah, in review)
+- PR #1849: Data retention TTL cleanup (James, in review)
+- PR #1851: Cryptography package update (Tariq, in review)
+- SUP-4419: Export service disk space incident (resolved)
+- SUP-4421, SUP-4423: Random logout reports (investigating)
+- SUP-4398–4402: Prior random logout batch (Mike investigated, timezone + pool issues identified)
+
+NEXT STANDUP: 2025-06-03 09:15 AM PT

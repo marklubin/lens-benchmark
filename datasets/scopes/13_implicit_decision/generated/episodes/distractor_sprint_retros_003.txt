@@ -1,0 +1,601 @@
+CRESCENDO LABS — SPRINT 16 RETROSPECTIVE
+Date: 2025-07-02 (Wednesday)
+Time: 3:00–4:30 PM CT
+Location: Conference Room 2B + Zoom (hybrid)
+Facilitator: Kai Nakamura (Scrum Master)
+Team: Horizon Squad (backend services team)
+Attendees (in-person): Kai Nakamura, Derek Lane (Tech Lead), Priti Sharma, Angela Fong, Marcus Webb
+Attendees (remote): Yuto Hayashi (home office, Portland), Simone Osei (home office, Atlanta)
+Guest: Rita Espinoza (QA Lead) — invited for test strategy discussion (remote)
+Sprint: Sprint 16 ("Umbra")
+Sprint Duration: 2 weeks (2025-06-19 — 2025-07-02)
+Velocity: 22 story points completed / 23 committed (96%)
+
+Note-taker: Angela Fong (rotating duty)
+Miro Board: https://miro.com/app/board/crescendo-horizon-s16-retro
+Recording: Will be posted in #horizon-squad Slack channel after the meeting
+
+---
+
+PRE-MEETING SETUP
+
+[Kai Nakamura — 2:58 PM]
+For remote folks — can you confirm you can see the Miro board? I've pre-loaded the voting template.
+
+[Yuto Hayashi — 2:59 PM]
+Miro is loading. One second. OK, I see the blank topic cards. Good to go.
+
+[Simone Osei — 2:59 PM]
+Same here. Audio and screen share both working.
+
+[Rita Espinoza — 3:00 PM]
+I'm on. Thanks for inviting me — I'll mostly listen unless the test strategy topic comes up.
+
+[Kai Nakamura — 3:01 PM]
+Perfect. Let's get started. Quick attendance check — Marcus, are you in? I see your laptop open but you might be grabbing coffee.
+
+[Marcus Webb — 3:01 PM]
+Here. Just sat down. Sorry, coffee run went long.
+
+---
+
+SPRINT SUMMARY
+
+[Kai Nakamura — 3:02 PM]
+Let me run through the Sprint 16 summary before we get into the retro format. I'm pulling this from the sprint board as of 2:00 PM today.
+
+**Sprint Goal:** Launch partner webhook delivery system and complete payment settlement v2 export.
+
+**What shipped:**
+- Partner webhook delivery system (HTTP POST with retry, event filtering, signature verification) — 10 pts
+  - Owned by: Simone Osei (primary), Marcus Webb (pairing)
+  - PR #1847, merged June 27
+  - Retry strategy: exponential backoff, 3 attempts, 30-second max delay
+  - Signature verification: HMAC-SHA256 with partner-specific secrets
+  - Event filtering: partners can subscribe to specific event types via configuration
+- Payment settlement v2 export (CSV + PDF with configurable templates) — 8 pts
+  - Owned by: Priti Sharma (primary), Angela Fong (pairing)
+  - PR #1852 (CSV) merged June 30, PR #1855 (PDF) merged July 1
+  - Template engine: Jinja2 with customer-defined field mappings
+  - PDF generation: WeasyPrint for layout, shared template engine between CSV and PDF
+- Monthly tech debt: fixed 14 flaky tests (previously @skip), added missing down-migrations for 3 tables — 4 pts
+  - Owned by: Angela Fong (flaky tests), Derek Lane (migrations)
+  - 12 of the 14 flaky tests were integration tests with timing-dependent assertions
+  - 2 were unit tests with mocked datetime that didn't account for timezone offsets
+  - Down-migrations added for: partner_webhooks, settlement_templates, audit_events
+
+**What didn't ship:**
+- Partner webhook dashboard (frontend) — 1 pt remaining (a minor styling fix), will carry to Sprint 17
+  - The styling fix is CSS alignment for the webhook event log table on mobile viewports
+  - Yuto started the fix on July 1 but deprioritized it when the API key rotation bug came in
+
+**Unplanned work accepted:**
+- 1 item: emergency fix for partner API key rotation bug discovered by DataBridge in production. Trade-off discussion held per policy — dropped the webhook dashboard styling to accommodate. Trade-off was accepted within 1 hour.
+  - DataBridge reported the issue via support ticket #8841 at 2:14 PM on June 25
+  - Kai convened a quick Slack huddle at 2:30 PM with Derek and Simone to assess impact
+  - Decision: swap the webhook dashboard styling fix for the API key rotation fix
+  - Fix implemented by Simone, reviewed by Derek, merged at 5:47 PM same day
+
+**Incidents:**
+- P3: Partner API key rotation returned 403 for 8 minutes during the key transition window. Root cause: race condition between old and new key validation. Fixed same day. Post-incident review completed within 24 hours.
+  - Incident timeline: 2:08 PM — DataBridge reports 403 errors. 2:14 PM — support ticket created. 2:16 PM — PagerDuty alert fires for elevated 4xx rate on partner API. 2:22 PM — Simone identifies the race condition in the key validation middleware. 2:41 PM — hotfix PR #1849 opened. 2:56 PM — PR merged and deployed. 3:04 PM — DataBridge confirms 200s returning.
+  - Post-incident review held June 26, 10:00 AM. Attendees: Simone, Derek, Kai, and Nora from the platform team.
+  - Action item from PIR: add integration test covering overlapping key windows during rotation.
+
+**Design reviews conducted:**
+- Partner webhook delivery: 40-minute review. Identified retry backoff strategy and dead-letter handling for permanently unreachable endpoints.
+  - Reviewed June 20. Attendees: Simone, Derek, Marcus, Kai.
+  - Key decision: dead-letter events go to a DLQ table with a 30-day TTL. Partners can replay via admin API.
+  - Open question deferred to Sprint 17: should we alert partners when their endpoint has been unreachable for 24+ hours?
+- Payment settlement v2: 25-minute review. Simplified PDF generation by using a shared template engine.
+  - Reviewed June 23. Attendees: Priti, Angela, Derek.
+  - Original design had separate rendering paths for CSV and PDF. Derek suggested unifying through Jinja2 templates with output-format-specific macros.
+  - Estimated savings: ~200 lines of code and a single template maintenance point.
+
+**Runbooks written:**
+- Partner webhook delivery service runbook (Simone)
+  - Covers: service health checks, DLQ monitoring, manual replay procedure, scaling considerations
+  - Location: internal wiki > Services > Partner Webhook Delivery
+- Payment settlement v2 export runbook (Priti)
+  - Covers: template configuration, export scheduling, error handling, manual re-export procedure
+  - Location: internal wiki > Services > Payment Settlement
+
+---
+
+RETRO FORMAT: LEAN COFFEE (new format — trying it out)
+
+[Kai Nakamura — 3:05 PM]
+We're trying a different retro format today: Lean Coffee. Everyone writes topics on cards, we vote on which to discuss, and each topic gets 5 minutes. If the team wants to continue a topic, we extend by 3 minutes. If not, we move on. This keeps us focused on the topics the team cares about most.
+
+I got this idea from a blog post that one of the other scrum masters shared in #agile-practices. Seemed worth trying since our last few retros have run over time because one or two topics dominated the conversation.
+
+Everyone, write your topics on the Miro board. You have 3 minutes.
+
+[Derek Lane — 3:06 PM]
+Quick question — should topics be things that went well, things that need improvement, or either?
+
+[Kai Nakamura — 3:06 PM]
+Either. Whatever you think the team should discuss. Could be a celebration, a concern, a process question, anything.
+
+[3-minute writing period]
+
+[Angela Fong — 3:09 PM]
+I submitted three topics. Wasn't sure how many we're allowed.
+
+[Kai Nakamura — 3:09 PM]
+No limit on submissions, but you only get 3 votes. So even if you submit five topics, you can only push three of them into the discussion queue.
+
+[Kai Nakamura — 3:10 PM]
+Topics submitted (12 total). Everyone gets 3 votes — dot-vote your top 3 topics.
+
+[Simone Osei — 3:11 PM]
+Can we see who submitted what, or is it anonymous?
+
+[Kai Nakamura — 3:11 PM]
+Anonymous submission, but you can self-identify when we discuss your topic. Voting is also anonymous. Go ahead and vote now — I'll give everyone 60 seconds.
+
+[1-minute voting period]
+
+[Kai Nakamura — 3:12 PM]
+Votes are in. Let me rank them.
+
+[Voting results — topics ranked by votes:]
+
+1. **On-call rotation and burnout** — 6 votes
+2. **Test strategy: unit vs integration vs e2e** — 5 votes
+3. **Sprint length: should we switch to 1-week sprints?** — 4 votes
+4. **Knowledge silos and bus factor** — 4 votes
+5. **Documentation standards** — 3 votes
+6. **Cross-team dependencies** — 2 votes
+7. Other topics (1 vote or fewer, deferred)
+
+[Kai Nakamura — 3:13 PM]
+Six topics with real vote support. We have about 75 minutes of discussion time. At 5 minutes each with possible extensions, we should be able to get through 4-5 topics. Let's start at the top.
+
+---
+
+TOPIC 1: ON-CALL ROTATION AND BURNOUT (3:14 PM — 3:32 PM)
+
+[Marcus Webb — 3:14 PM]
+I wrote this topic. We have 7 engineers on the on-call rotation. That means each person is on-call every 7 weeks. The problem is that on-call weeks are exhausting — you're checking alerts all evening and weekend, and you still need to do sprint work during the day. After on-call, I need a recovery day but I don't take one because there's no policy for it.
+
+I'm not complaining — I understand on-call is part of the role. But there's no structural support for recovery, and that's going to cause problems long-term.
+
+[Simone Osei — 3:16 PM]
+I feel the same way. My last on-call week had the partner API key rotation incident on a Wednesday night and two false alarms over the weekend. I was sleep-deprived by Monday and my productivity was visibly lower all Sprint 16 Day 1.
+
+The Sunday false alarm was at 3:47 AM — high memory utilization on the staging environment. Staging. Not even production. I was awake for an hour before I realized it was a non-issue.
+
+[Angela Fong — 3:16 PM]
+Wait, staging alerts page on-call? That shouldn't be happening.
+
+[Simone Osei — 3:17 PM]
+It does. The alert rules don't distinguish between environments for some of the infrastructure monitors.
+
+[Derek Lane — 3:17 PM]
+The alert noise is a factor too. We're averaging 8 alerts per on-call week. Of those, about 3 are false positives. That means the on-call person is getting woken up or interrupted for things that aren't real problems.
+
+I pulled the PagerDuty stats for the last 4 on-call rotations. Sprint 13: 9 alerts, 4 false. Sprint 14: 7 alerts, 2 false. Sprint 15: 6 alerts, 3 false. Sprint 16: 8 alerts, 3 false. So we're averaging about 7-8 total, 3 false.
+
+[Yuto Hayashi — 3:18 PM]
+At my previous company, we had a "comp day" policy — after an on-call week with overnight pages, you got a day off the following Monday. It made a huge difference for morale and prevented burnout-driven attrition.
+
+They framed it not as a perk but as an operational necessity. Tired engineers make worse decisions and write buggier code. The comp day pays for itself.
+
+[Angela Fong — 3:19 PM]
+I'd support that. But we also need to reduce the alert noise. If we're getting 3 false positives per week, we need to tune our alerting thresholds. That's just noise fatigue.
+
+[Priti Sharma — 3:20 PM]
+Agreed on both. The false positive rate is nearly 40%. That's way too high. Every false alarm trains people to take alerts less seriously. That's how you miss a real incident.
+
+[Kai Nakamura — 3:20 PM]
+Two problems here: on-call recovery and alert quality. Let's address both.
+
+For on-call recovery: proposal — after any on-call week with overnight pages (10pm-7am), the engineer gets the following Monday as a comp day. It's not PTO — it's part of the on-call cost of doing business.
+
+For alert quality: proposal — dedicate 2 story points per sprint to alert tuning. The engineer coming off on-call reviews their week's alerts and tunes the ones that were false positives. This turns on-call pain into systematic improvement.
+
+[Marcus Webb — 3:21 PM]
+I like that framing — "turns on-call pain into systematic improvement." The person who just experienced the false alarms is the best person to tune them because the frustration is fresh and the context is loaded.
+
+[Priti Sharma — 3:22 PM]
+The comp day is great but what about on-call weeks with no overnight pages? Those are still tiring — you're on alert mode all week even if nothing fires.
+
+[Derek Lane — 3:22 PM]
+The cognitive overhead of being on-call is real even when nothing happens. You're always carrying your laptop, always checking your phone, always half-expecting something to break.
+
+[Marcus Webb — 3:23 PM]
+I'd argue the comp day should only be for overnight pages. Daytime alerts during work hours are part of the job. Overnight pages are the outlier that causes real burnout.
+
+If we give comp days for every on-call week regardless, that's 7 extra days off per rotation cycle across the team. Management might push back on that. But comp days specifically for overnight disruptions — that's a targeted, defensible policy.
+
+[Kai Nakamura — 3:24 PM]
+Let's keep it scoped to overnight pages for now. We can revisit if the feedback shows broader burnout.
+
+I'll draft the policy doc and share it with engineering management for approval. I don't expect pushback — other teams at Crescendo already have similar policies.
+
+[5 minutes elapsed — vote to extend: 6/7 yes]
+
+[Kai Nakamura — 3:25 PM]
+Strong vote to continue. Three more minutes.
+
+[Derek Lane — 3:26 PM]
+On the alert tuning — I want to set a target. Right now we have 8 alerts per week, 3 false positives. Target: reduce false positives to 0-1 per week within 3 sprints. That means each sprint, the post-on-call engineer tunes 1-2 alerts. In 6 weeks, we should have clean alerts.
+
+I'll set up a tracking spreadsheet so we can measure progress sprint over sprint. Each on-call engineer logs their alerts — total count, false positive count, and which alerts were tuned.
+
+[Simone Osei — 3:27 PM]
+Can we also look at the alert routing? Right now all alerts go to the on-call engineer. But some alerts (like high memory utilization) are better handled by the infrastructure team, not the application on-call.
+
+The staging memory alert that woke me up at 3:47 AM is a perfect example. Even if it had been a real issue, the application on-call engineer isn't the right person to troubleshoot infrastructure memory pressure on a staging box.
+
+[Marcus Webb — 3:28 PM]
+There might also be alerts that should go to specific teams based on the service. Like, if the payment gateway throws errors, that should page the payments on-call, not the general Horizon Squad on-call. But I think that's a bigger re-architecture of our alert routing.
+
+[Kai Nakamura — 3:28 PM]
+Good point. Derek, can you do a routing review?
+
+[Derek Lane — 3:28 PM]
+Yes. I'll review all current alert routes and propose a routing matrix. I'll categorize each alert by: (a) is it production-only or does it fire for staging too, (b) which team should own it, and (c) what's the appropriate severity. I'll have the matrix ready by Sprint 17 planning.
+
+[Angela Fong — 3:29 PM]
+Can you also flag which alerts don't have runbook links? When I was on-call two rotations ago, I got an alert for "payment settlement export timeout" and there was no runbook. I spent 20 minutes just figuring out what to look at.
+
+[Derek Lane — 3:29 PM]
+Good call. I'll include a "has runbook" column in the routing matrix.
+
+[Kai Nakamura — 3:29 PM]
+**Decisions:**
+1. **We decided to implement a comp day policy: engineers get Monday off after on-call weeks with overnight pages (10pm-7am).**
+2. **We decided to allocate 2 story points per sprint for alert tuning by the outgoing on-call engineer.**
+3. **We decided to set a target of 0-1 false positive alerts per week within 3 sprints.**
+4. Derek will review and propose alert routing matrix by Sprint 17 planning.
+
+[Marcus Webb — 3:30 PM]
+Quick question — who's on-call for Sprint 17?
+
+[Kai Nakamura — 3:30 PM]
+Angela. So Angela, you'll be the first person to log alerts under the new tracking process and do the alert tuning at the end of your rotation.
+
+[Angela Fong — 3:31 PM]
+Got it. I'll coordinate with Derek on the routing matrix since I'll have fresh data.
+
+---
+
+TOPIC 2: TEST STRATEGY (3:32 PM — 3:52 PM)
+
+[Rita Espinoza — 3:32 PM]
+Thanks for inviting me. I wanted to discuss our testing pyramid because I think it's inverted. Let me share some numbers.
+
+I pulled these from the CI dashboard this morning, so they're current as of today.
+
+Current test distribution:
+- Unit tests: 247
+- Integration tests: 412
+- End-to-end (e2e) tests: 86
+
+Total: 745 tests.
+
+The test pyramid says we should have many unit tests, fewer integration tests, and fewest e2e tests. We have it backwards — more integration tests than unit tests.
+
+Why this matters: our CI pipeline takes 4 minutes 50 seconds. Of that, unit tests take 30 seconds, integration tests take 2 minutes 40 seconds, and e2e tests take 1 minute 40 seconds. The integration tests are the bottleneck.
+
+More importantly, integration tests are flaky. Of the 14 flaky tests we fixed this sprint, 12 were integration tests. They depend on database state, network calls, and timing — all sources of non-determinism.
+
+[Priti Sharma — 3:35 PM]
+That CI time is also per-push, right? If someone pushes 3 times during code review, that's 15 minutes of CI just for one PR.
+
+[Rita Espinoza — 3:35 PM]
+Correct. And we average about 4 pushes per PR across the team. So the effective CI cost per merged PR is closer to 20 minutes.
+
+[Derek Lane — 3:36 PM]
+This is a fair critique. We got into the habit of writing integration tests because they were easier to reason about — set up the whole system, hit the endpoint, check the response. But that laziness is now costing us in CI time and reliability.
+
+I'll own that as tech lead. Early on, I didn't push back on the integration-heavy approach because getting tests written at all felt like a win. But now that we have good test coverage, the composition matters.
+
+[Angela Fong — 3:37 PM]
+The payment reconciliation matching engine is a good example. It has 4 unit tests and 18 integration tests. Most of the integration tests are testing pure business logic (matching algorithms) through the HTTP layer. Those should be unit tests — test the matching function directly, no HTTP, no database.
+
+I actually looked at this during the tech debt work this sprint. The 18 integration tests exercise maybe 6 distinct code paths. The rest are redundant — testing the same matching logic with different input data but going through the full stack each time.
+
+[Marcus Webb — 3:38 PM]
+When I wrote those tests, I was thinking about what to test, not how to test it. The integration test was the path of least resistance because the test fixtures were already set up.
+
+Honestly, extracting the matching logic into a standalone function that can be unit-tested would also improve the code design. Right now the matching logic is buried inside the HTTP handler, which is why you can only test it via HTTP.
+
+[Rita Espinoza — 3:39 PM]
+That's a common pattern. My proposal:
+
+1. **Set a target test ratio:** For every new feature, aim for 5:2:1 ratio of unit:integration:e2e tests.
+2. **Gradually refactor existing tests:** Each sprint, convert 10 integration tests that test pure logic into unit tests. In 5 sprints, we'd have a properly shaped pyramid.
+3. **Add a CI step that reports test type distribution.** Not a gate — just visibility. Team reviews in retro.
+
+[Derek Lane — 3:40 PM]
+I want to emphasize — converting an integration test to a unit test isn't just deleting the integration test and writing a unit test. Often it requires refactoring the production code to make the logic unit-testable. That's the real investment. The test conversion is the forcing function for better code architecture.
+
+[Priti Sharma — 3:41 PM]
+The 5:2:1 ratio — is that a hard rule or a guideline?
+
+[Rita Espinoza — 3:42 PM]
+Guideline. Some features are inherently more integration-heavy (data pipeline connections, for example). The point is to default to unit tests and justify integration tests when needed.
+
+In code review, the question should shift from "does this have tests?" to "are these the right type of tests?" If someone submits a PR with 0 unit tests and 8 integration tests, the reviewer should ask why.
+
+[Yuto Hayashi — 3:43 PM]
+I like the refactoring approach. Converting integration tests to unit tests also makes them faster and more reliable. It's a win-win.
+
+The infrastructure monitoring service I built has the opposite problem, actually — it's almost all unit tests because the external dependencies are heavily mocked. But I've discovered that the mocks drift from reality. So maybe the 5:2:1 ratio also helps by ensuring we have some integration tests to validate our mocks.
+
+[Simone Osei — 3:44 PM]
+Quick logistical question — where do contract tests fit? We have a few Pact tests for the partner API that aren't unit, integration, or e2e.
+
+[Rita Espinoza — 3:44 PM]
+Good question. I'd count contract tests as a subset of integration tests for the ratio. They test the interaction between two services, even though the mechanism is different from a traditional integration test.
+
+[5 minutes elapsed — vote to extend: 5/7 yes]
+
+[Derek Lane — 3:45 PM]
+One more thing — our e2e tests are valuable but they run in a Docker Compose environment that takes 45 seconds to spin up. Can we share that environment across test runs instead of creating/destroying it each time?
+
+Right now every CI run does: docker-compose up, run tests, docker-compose down. If we kept the environment warm between runs and just reset the database state, we'd save most of that 45 seconds.
+
+[Rita Espinoza — 3:46 PM]
+Yes. I've been working on a persistent test environment that resets state between runs instead of rebuilding. Estimated savings: 30 seconds per e2e run.
+
+The approach is to use a test database that gets truncated between runs rather than dropped and recreated. The Docker containers stay up. I have a prototype branch that I'll clean up and share this sprint.
+
+[Marcus Webb — 3:47 PM]
+Would that persistent environment be shared across PRs? Because if two PRs run e2e tests at the same time, they might step on each other.
+
+[Rita Espinoza — 3:47 PM]
+No, each CI runner gets its own environment. The persistence is per-runner, not global. So there's no contention between parallel PR builds.
+
+[Kai Nakamura — 3:47 PM]
+**Decisions:**
+1. **We decided to adopt a 5:2:1 unit:integration:e2e test ratio guideline for new features.**
+2. **We decided to allocate effort each sprint to convert integration tests to unit tests.** Target: 10 conversions per sprint.
+3. **We decided to add a CI step reporting test type distribution.** Non-blocking, reviewed in retros.
+4. Rita will implement persistent e2e test environment to reduce spin-up time.
+
+[Rita Espinoza — 3:48 PM]
+I'll have the persistent environment PR ready for review by end of next week. I'll tag Derek for the review since it touches CI configuration.
+
+---
+
+TOPIC 3: SPRINT LENGTH — 1-WEEK SPRINTS? (3:52 PM — 4:07 PM)
+
+[Priti Sharma — 3:52 PM]
+I wrote this topic. We've been doing 2-week sprints since the team was formed. I want to propose switching to 1-week sprints. Here's why:
+
+1. **Faster feedback loops.** With 2-week sprints, we plan on Day 1 and get retro feedback on Day 10. That's 10 working days of potential drift before we course-correct. With 1-week sprints, the feedback loop is 5 days.
+
+2. **Smaller batch sizes.** 1-week sprints naturally force smaller tickets. We'd be less likely to have 13-point monsters like the reconciliation retry logic. Smaller tickets are easier to estimate, review, and deploy.
+
+3. **More frequent delivery.** Shipping every week keeps momentum high and gives stakeholders more frequent touchpoints.
+
+I know this is a big change, so I'm not saying we have to decide today. But I want to get the team's read on it.
+
+[Derek Lane — 3:55 PM]
+Counter-argument: 1-week sprints double the ceremony overhead. We'd have planning, standup, review, and retro every single week instead of every other week. That's 3-4 hours per week in meetings instead of the current 3-4 hours per two weeks.
+
+For a 7-person team, that's 21-28 person-hours of ceremony per week. Currently it's 21-28 person-hours per two weeks. That's a meaningful difference.
+
+[Marcus Webb — 3:56 PM]
+Also, some work genuinely takes more than a week. The reconciliation retry logic took 6 days of implementation after the design review. In a 1-week sprint, that's the entire sprint — no room for anything else.
+
+And that's 6 days of focused work. If we add the ceremony overhead from a mid-work sprint boundary, it could stretch to 7 or 8 days because of context switching.
+
+[Angela Fong — 3:57 PM]
+We could do 1-week sprints with multi-sprint epics for larger work. The sprint commitment would be "make progress on the epic" rather than "complete the epic."
+
+[Simone Osei — 3:58 PM]
+That feels like we'd be doing kanban with weekly checkpoints, not really sprint planning.
+
+[Yuto Hayashi — 3:58 PM]
+Simone makes a good point. If we're committing to "make progress" instead of "complete this deliverable," we've lost the core value of sprint planning, which is predictable delivery of specific outcomes.
+
+[Priti Sharma — 3:59 PM]
+That might not be a bad thing? We're already doing async standups. Maybe we should consider kanban with weekly retros instead of sprints with biweekly retros.
+
+[Marcus Webb — 4:00 PM]
+I'd be careful about switching to kanban. We tried kanban on the Atlas team two years ago and it turned into "work on whatever feels important this week" with no prioritization discipline. Sprint commitments, for all their overhead, create accountability.
+
+[Kai Nakamura — 4:00 PM]
+OK, this is a bigger conversation. The question isn't just sprint length — it's our process model. Let me reframe: what problem are we solving?
+
+[Priti Sharma — 4:01 PM]
+The 2-week estimation is unreliable. We hit 100% last sprint but historically we average 85%. With 1-week sprints, each estimate covers less time, so the estimation error is smaller.
+
+[Derek Lane — 4:02 PM]
+I think the root cause isn't sprint length — it's estimation technique. We could improve estimation within 2-week sprints by breaking tickets down more aggressively. The design review policy is already helping with this.
+
+Look at the data: Sprint 14 was 81%, Sprint 15 was 100%, Sprint 16 was 96%. The upward trend started when we introduced mandatory design reviews and the pairing policy. If we keep improving the process within 2-week sprints, we might solve the estimation problem without the ceremony overhead of weekly sprints.
+
+[Priti Sharma — 4:03 PM]
+That's fair, but the 81% in Sprint 14 was partly because we had a 13-point ticket that turned out to be much harder than estimated. If we'd broken it down, we might have caught that earlier.
+
+[Derek Lane — 4:04 PM]
+Which is exactly the argument for ticket splitting, not shorter sprints. If the 13-pointer had been three 4-5 point tickets, we would have finished two of them and carried one — still better velocity than what happened.
+
+[5 minutes elapsed — vote to extend: 4/7, needs 5 — no extension]
+
+[Kai Nakamura — 4:04 PM]
+Not enough votes to continue. Let me propose a middle ground: **we decided to keep 2-week sprints but start breaking tickets larger than 5 points into sub-tickets.** This gives us better estimation granularity without doubling our ceremony overhead. We'll revisit the sprint length question in 3 sprints based on our velocity trend.
+
+If our velocity consistently stays above 95% with the ticket-splitting approach, it means estimation accuracy is the issue and we've addressed it. If velocity stays below 90% despite ticket splitting, that's evidence that sprint length might actually be the problem, and we can revisit.
+
+[Priti Sharma — 4:05 PM]
+Fair. I'll accept the compromise. If velocity stabilizes above 95% with the ticket-splitting approach, I'll drop the 1-week sprint proposal.
+
+[Derek Lane — 4:06 PM]
+For practical implementation — ticket splitting should happen during sprint planning or during design review, whichever comes first. If someone brings a ticket to planning that's over 5 points, we split it on the spot before committing.
+
+[Kai Nakamura — 4:06 PM]
+Agreed. I'll add that as a planning checklist item.
+
+---
+
+TOPIC 4: KNOWLEDGE SILOS AND BUS FACTOR (4:07 PM — 4:22 PM)
+
+[Yuto Hayashi — 4:07 PM]
+I wrote this one. Our bus factor for several systems is 1. If Derek is unavailable, nobody can debug the payment processing core. If Simone is unavailable, nobody understands the partner API internals. If I'm unavailable, the infrastructure monitoring is a black box.
+
+The pairing policy from Sprint 14 helps, but it only applies to new work. The existing systems still have knowledge concentrated in one person.
+
+I think about this every time I go on PTO. I spend a day before vacation writing up "if X breaks while I'm out, do Y" docs. That's a band-aid, not a solution.
+
+[Derek Lane — 4:09 PM]
+This is a real risk. I've been at Crescendo for 3 years and some of the early systems are architecturally familiar only to me. If I left, the team would lose months of context.
+
+Not just "how does it work" context, but "why does it work this way" context. There are design decisions in the payment processing core that look wrong if you don't know the constraints that existed when we built it. Without that context, a new maintainer might "fix" something that isn't broken and introduce real problems.
+
+[Simone Osei — 4:10 PM]
+The runbook policy helps for operational knowledge — how to keep the system running. But it doesn't transfer design knowledge — why was it built this way? What are the tradeoffs? What did we try and reject?
+
+Runbooks are great for "production is broken, what do I do." They don't help with "I need to add a feature to this system and I don't understand the architecture."
+
+[Marcus Webb — 4:11 PM]
+At my last company, we did "system tours" — every quarter, each system owner gave a 1-hour deep-dive presentation to the team. Design decisions, code walkthrough, known issues, data flows. It was recorded so new hires could watch it.
+
+The format was roughly: 20 minutes of architecture overview with diagrams, 20 minutes of live code walkthrough, 20 minutes of Q&A. The Q&A was usually the most valuable part because people asked questions the presenter hadn't thought to cover.
+
+[Angela Fong — 4:12 PM]
+I love that idea. It's also a forcing function for documentation — you naturally document the system when preparing the presentation.
+
+When I prepare for presentations, I always find things I'd forgotten about or assumed were obvious. The act of preparing is itself valuable, even before the presentation happens.
+
+[Priti Sharma — 4:13 PM]
+How do we schedule this without adding more meeting overhead? We're already pushing ceremony limits.
+
+[Yuto Hayashi — 4:13 PM]
+Right, especially after the sprint length discussion. We just argued that ceremony overhead matters. Adding another hour per month needs to come from somewhere.
+
+[Kai Nakamura — 4:14 PM]
+Replace one Friday sprint demo per month with a system tour. Sprint demos are valuable but we do them every two weeks — we can skip one per month for knowledge sharing. Stakeholders still get a demo every other sprint.
+
+That means in any given month, we have two sprint boundaries. One gets a normal demo, the other gets replaced with a system tour. Net new meeting time: zero.
+
+[Derek Lane — 4:15 PM]
+That's smart. The system tours also create re-usable artifacts — the recording and any diagrams produced during the presentation.
+
+We should standardize the format so the artifacts are consistent. I'd suggest: (1) architecture diagram updated in Confluence, (2) recording posted to the team wiki, (3) a "known issues and gotchas" section added to the system's wiki page.
+
+[Simone Osei — 4:16 PM]
+Can the system tour also include a walkthrough of the test suite? Understanding what's tested (and what isn't) is a huge part of feeling confident enough to make changes to a system you didn't build.
+
+[Derek Lane — 4:16 PM]
+Good idea. I'll include that in the standard format.
+
+[5 minutes elapsed — vote to extend: 5/7 yes]
+
+[Yuto Hayashi — 4:17 PM]
+Which systems should we cover first? I'd prioritize by bus factor.
+
+[Derek Lane — 4:18 PM]
+Bus factor 1 systems:
+1. Payment processing core (me)
+2. Partner API (Simone)
+3. Infrastructure monitoring (Yuto)
+4. Event processing pipeline (Angela)
+
+Let's do one per month. I'll go first in July.
+
+[Marcus Webb — 4:19 PM]
+After we get through the bus factor 1 systems, should we continue? There might be systems with bus factor 2 that would benefit from broader knowledge sharing.
+
+[Derek Lane — 4:19 PM]
+Let's get through the first four and evaluate. By then we'll have feedback on whether the format is working and whether we should continue, modify, or stop.
+
+[Angela Fong — 4:20 PM]
+I'll go in October. That gives me time to prepare and also to watch how Derek, Simone, and Yuto structure theirs. Learning from their presentations before I do mine.
+
+[Kai Nakamura — 4:19 PM]
+**Decisions:**
+1. **We decided to implement monthly "system tours" — 1-hour deep-dive presentations on bus factor 1 systems.** Replaces one sprint demo per month.
+2. **We decided on the tour schedule:** July — payment processing (Derek), August — partner API (Simone), September — infrastructure monitoring (Yuto), October — event pipeline (Angela).
+3. Presentations will be recorded and stored in the team wiki.
+
+[Kai Nakamura — 4:21 PM]
+We have about 7 minutes left. Topics 5 and 6 didn't get enough votes for a full discussion. I'll create Jira tickets for "Documentation standards" and "Cross-team dependencies" so they carry forward to the next retro if people still want to discuss them.
+
+---
+
+DECISIONS SUMMARY — SPRINT 16 RETRO
+
+1. **We decided to implement comp days after on-call weeks with overnight pages.** Monday off after on-call weeks with 10pm-7am pages.
+
+2. **We decided to allocate 2 story points per sprint for alert tuning.** Outgoing on-call engineer reviews and tunes alerts. Target: 0-1 false positives per week within 3 sprints.
+
+3. **We decided to adopt a 5:2:1 test ratio guideline** (unit:integration:e2e) for new features. Convert 10 integration tests to unit tests per sprint.
+
+4. **We decided to keep 2-week sprints** but split tickets larger than 5 points into sub-tickets for better estimation.
+
+5. **We decided to implement monthly system tours** to address knowledge silos and bus factor. Replaces one sprint demo per month.
+
+6. Derek to review and propose alert routing matrix.
+7. Rita to implement persistent e2e test environment.
+
+---
+
+ACTION ITEMS
+
+| # | Owner | Action | Due |
+|---|-------|--------|-----|
+| 1 | Kai Nakamura | Draft comp day policy doc and share with engineering management | Sprint 17 Day 3 |
+| 2 | Derek Lane | Review all alert routes and propose routing matrix (include "has runbook" column) | Sprint 17 planning |
+| 3 | Derek Lane | Set up alert tracking spreadsheet for on-call engineers | Sprint 17 Day 1 |
+| 4 | Angela Fong | Log on-call alerts and perform alert tuning during Sprint 17 rotation | Sprint 17 |
+| 5 | Rita Espinoza | Implement persistent e2e test environment PR | End of next week |
+| 6 | Derek Lane | Prepare and deliver payment processing core system tour | July (Sprint 17 or 18) |
+| 7 | Kai Nakamura | Add "split tickets > 5 points" to sprint planning checklist | Sprint 17 planning |
+| 8 | Kai Nakamura | Create Jira tickets for deferred topics (documentation standards, cross-team dependencies) | End of day |
+
+---
+
+METRICS REVIEW (3 SPRINTS)
+
+| Metric | Sprint 14 | Sprint 15 | Sprint 16 | Trend |
+|--------|-----------|-----------|-----------|-------|
+| Velocity | 81% | 100% | 96% | Up |
+| Unplanned scope additions | 2 | 0 | 1 (with policy) | Down |
+| Incidents | 2 | 0 | 1 (P3) | Down |
+| False positive alerts | N/A | N/A | 3/week | Baseline |
+| Tests added | 34 | 52 | 41 | Stable |
+| Integration:Unit test ratio | 1.67 | 1.67 | 1.52 | Improving |
+
+[Kai Nakamura — 4:25 PM]
+Let me walk through the metrics briefly. We started tracking these three sprints ago.
+
+Velocity: 81, 100, 96. The dip from 100 to 96 was the unplanned API key rotation fix, which is exactly the kind of disruption the trade-off policy is designed to handle. We traded a 1-point styling fix for a critical production bug fix. That's the policy working as intended.
+
+Unplanned scope: 2 in Sprint 14 (before the trade-off policy), 0 in Sprint 15, 1 in Sprint 16 (handled through policy). The policy didn't prevent unplanned work from arriving — it gave us a structured way to handle it without blowing up the sprint.
+
+Incidents: 2 in Sprint 14, 0 in Sprint 15, 1 in Sprint 16. All P3 or lower. No P1 or P2 incidents in the last 3 sprints.
+
+False positive alerts: this is a new metric as of today. We're setting the Sprint 16 baseline at 3 per week and targeting 0-1 within 3 sprints.
+
+Tests: 34, 52, 41. Stable. We're consistently adding tests, which is good.
+
+Integration:Unit ratio: 1.67, 1.67, 1.52. Moving in the right direction. With the new 5:2:1 guideline and the conversion effort, this should drop below 1.0 within a few sprints.
+
+[Kai Nakamura — 4:28 PM]
+Three sprints of data now. The trend is positive — velocity up, incidents down, test quality improving. Marcus was right to say one sprint isn't a trend, but three sprints is starting to look like one. Good work, team.
+
+[Derek Lane — 4:28 PM]
+Good retro. The Lean Coffee format worked well — we got through four topics in 75 minutes and every topic had clear decisions and owners. Much better than the last retro where we spent 45 minutes on one topic and rushed through everything else.
+
+[Priti Sharma — 4:29 PM]
+Agreed. I liked the voting mechanism. It surfaces what the team actually cares about rather than what the loudest person wants to talk about.
+
+[Kai Nakamura — 4:29 PM]
+I'll use Lean Coffee again next retro unless someone objects. Angela, can you clean up the notes and post them in #horizon-squad?
+
+[Angela Fong — 4:29 PM]
+Will do. I'll have them posted by end of day.
+
+[Kai Nakamura — 4:30 PM]
+Sprint 17 planning is Friday morning at 10 AM. Come prepared with your ticket estimates. See everyone then.
+
+---
+
+END OF EPISODE

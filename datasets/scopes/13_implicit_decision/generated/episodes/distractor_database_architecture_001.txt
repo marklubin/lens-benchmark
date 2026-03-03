@@ -1,0 +1,498 @@
+MERIDIAN SYSTEMS — ARCHITECTURE REVIEW: PRIMARY DATABASE SELECTION
+Date: 2025-06-06 (Friday)
+Time: 2:00–3:30 PM ET
+Location: Conference Room 4A + Zoom (hybrid)
+Attendees: Omar Zafar (Engineering Director), Leah Kim (Staff Engineer), Ben Torres (Senior Backend), Nadia Okonkwo (Data Engineer), Jake Petrov (Senior Backend), Fatima Al-Said (DevOps Lead), Greg Holloway (QA Lead, remote), Sarah Chen (Product Manager, joined late)
+Context: Greenfield service — InventoryHub v2. Replacing legacy monolith inventory system with a microservice architecture. Need to select the primary data store for the inventory service.
+ADR: ADR-042
+Agenda: (1) Requirements recap, (2) Database proposals, (3) Decision, (4) Schema design walkthrough
+
+---
+
+PRE-MEETING — SLACK #inventoryhub-v2 — 1:47 PM
+
+[Leah Kim]
+Reminder — database selection meeting at 2:00 in 4A. Omar asked everyone to come prepared with a recommendation. I dropped my PostgreSQL evaluation doc in the shared folder last night if anyone wants to skim it before we start.
+
+[Ben Torres]
+Got it. I have the CockroachDB benchmarks ready too. Ran them on a 3-node cluster yesterday evening.
+
+[Jake Petrov]
+I'll be there. I poked at DynamoDB briefly but probably won't pitch it — spoiler, the multi-table transaction story is rough.
+
+[Fatima Al-Said]
+Joining from the server room — just finishing up the quarterly network audit. Will be on Zoom.
+
+[Greg Holloway]
+I'll be on Zoom too. Not planning to pitch a DB, just want to understand the testing implications of whatever you all land on.
+
+---
+
+MEETING NOTES
+
+[Omar Zafar — 2:02 PM]
+Alright everyone, thanks for making time on a Friday. I know there's a happy hour at 4, so let's be efficient. This is the database selection discussion for InventoryHub v2. The legacy system uses Oracle 12c and we are NOT bringing Oracle into the new architecture. That's already decided. Legal is done with that licensing contract as of end of year and we are not renewing. The question is: what replaces it?
+
+Let me frame the requirements for anyone who hasn't seen the requirements doc. InventoryHub v2 is our core inventory management service. It handles:
+- Product catalog: 2.4 million SKUs across 340 warehouses
+- Real-time stock levels: updated on every inbound/outbound transaction, ~18,000 transactions per minute at peak
+- Reservation system: holds stock for orders in progress (must be ACID)
+- Reporting: daily/weekly/monthly inventory reports, ad-hoc queries from the analytics team
+- Multi-warehouse transfers: moving stock between locations with audit trail
+
+Just to give everyone the full picture — the data model is relational. Products belong to categories, stock levels are per-warehouse, reservations reference both products and orders. Lots of foreign keys and constraints. This isn't a flexible-schema situation. The entities and their relationships are well-understood.
+
+Non-functional requirements, and I want to be precise here because these will drive the evaluation:
+- Write throughput: 18K writes/minute sustained, 30K burst
+- Read throughput: 45K reads/minute sustained
+- Latency: P99 < 50ms for stock level lookups
+- Availability: 99.95% (we can tolerate ~22 minutes of downtime per month)
+- Durability: zero data loss — inventory discrepancies cost real money
+- Data volume: 500GB current, growing ~20% annually
+
+Greg, from the QA side, anything you'd add to the requirements?
+
+[Greg Holloway — 2:06 PM]
+Just one thing — testability. Whatever we pick, I need to be able to spin up a local instance for integration tests without licensing headaches. That's part of why Oracle was painful. We burned two sprints last year just getting Oracle XE containers working in CI.
+
+[Omar Zafar — 2:07 PM]
+Good point, I'll add that as a soft requirement. Alright, I asked everyone to come prepared with a recommendation. Let's hear them. Leah, you want to go first?
+
+[Leah Kim — 2:08 PM]
+Sure. My recommendation is **PostgreSQL 16**.
+
+I sent out a detailed write-up last night, but I'll summarize the key points here.
+
+Rationale:
+
+1. **Relational model fit.** The inventory data model is inherently relational — products, categories, warehouses, stock levels, reservations, transfers. PostgreSQL's relational model maps directly to the domain. No impedance mismatch. We're not trying to squeeze a document model into relational tables or vice versa. The entities and relationships are clean.
+
+2. **ACID compliance.** Reservations require strong consistency. When a customer reserves 5 units, that stock must be immediately unavailable to other orders. PostgreSQL's transaction isolation (Serializable or Repeatable Read) guarantees this without application-level locking. We can also use advisory locks if we need finer-grained control, but for the reservation use case, standard row-level locking via SELECT FOR UPDATE is sufficient and well-understood.
+
+3. **Write performance.** PostgreSQL 16 can sustain 50K TPS on commodity hardware with proper tuning (pg_tune, shared_buffers, WAL configuration). Our requirement is 300 TPS (18K/min). We're at 0.6% of PostgreSQL's capacity. Plenty of headroom. I ran pgbench with a custom workload that simulates our reservation flow — on a db.r6g.xlarge (which is what Fatima would provision), I got 4,200 TPS sustained. That's 14x our peak requirement.
+
+4. **Operational maturity.** We already run PostgreSQL 15 in production for three other services — AuthService, NotificationHub, and the billing ledger. The team has deep expertise. Fatima has the monitoring, backup, and failover infrastructure already built. We're not starting from zero.
+
+5. **Ecosystem.** pg_cron for scheduled reporting queries, pg_partman for table partitioning (we'll want to partition stock_level_history by month), pgvector if we ever do similarity search on product descriptions. There's also excellent tooling — pgAdmin, pg_stat_statements for query analysis, pg_repack for online table reorganization.
+
+6. **Cost.** Open source. Our existing RDS infrastructure supports it. No new licensing costs. And Greg, to your point — the official Docker image is 400MB, starts in 2 seconds, and our CI already has it.
+
+The one concern I'll flag proactively: PostgreSQL's MVCC (Multi-Version Concurrency Control) can lead to table bloat on high-write tables. The stock_levels table will get 18K updates/minute. We'd need autovacuum aggressively tuned, and potentially partition the table by warehouse to limit vacuum scope. I've already drafted the partitioning strategy.
+
+```sql
+-- Proposed stock_levels schema
+CREATE TABLE stock_levels (
+    warehouse_id UUID NOT NULL,
+    product_id UUID NOT NULL,
+    available_qty INT NOT NULL DEFAULT 0,
+    reserved_qty INT NOT NULL DEFAULT 0,
+    in_transit_qty INT NOT NULL DEFAULT 0,
+    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    version INT NOT NULL DEFAULT 1,  -- optimistic locking
+    PRIMARY KEY (warehouse_id, product_id)
+) PARTITION BY HASH (warehouse_id);
+
+-- 16 partitions (one per hash bucket, roughly 21 warehouses each)
+CREATE TABLE stock_levels_p0 PARTITION OF stock_levels FOR VALUES WITH (MODULUS 16, REMAINDER 0);
+CREATE TABLE stock_levels_p1 PARTITION OF stock_levels FOR VALUES WITH (MODULUS 16, REMAINDER 1);
+-- ... etc
+```
+
+The hash partitioning distributes writes evenly across partitions, which means autovacuum can process each partition independently. This prevents the "vacuum can't keep up" problem that plagues large un-partitioned tables. I've seen this exact approach work at my previous company for a table doing 25K updates/minute — vacuum never fell behind once we moved from a single table to 16 hash partitions.
+
+[Omar Zafar — 2:16 PM]
+Quick clarification — why hash on warehouse_id rather than product_id?
+
+[Leah Kim — 2:16 PM]
+Two reasons. First, most of our queries are warehouse-scoped — "show me all stock for warehouse X." Hash on warehouse_id means those queries hit a single partition. Second, warehouse_id has better cardinality distribution for our workload. The top 20 warehouses generate 60% of the transactions, so we get natural load balancing across partitions. If we hashed on product_id, the long-tail products would create uneven partition sizes.
+
+[Omar Zafar — 2:17 PM]
+Makes sense. Ben, you're up.
+
+[Ben Torres — 2:18 PM]
+I also evaluated PostgreSQL — and I agree with everything Leah said about it. It's the safe, proven choice. But I want to present an alternative that I think deserves serious consideration: **CockroachDB**.
+
+CockroachDB gives us everything PostgreSQL gives us (SQL, ACID, relational model) plus:
+
+1. **Distributed by default.** CockroachDB is a distributed SQL database. Data is automatically replicated across 3+ nodes. If a node fails, the cluster continues serving reads and writes. No failover configuration, no replica promotion — it's built in. With PostgreSQL on Aurora, we have a primary and read replicas. If the primary fails, Aurora promotes a replica — that's a 30–60 second failover window. CockroachDB's consensus-based approach has zero failover time because there's no single primary.
+
+2. **Horizontal write scaling.** With PostgreSQL, writes go to the primary. To scale writes, you scale up (bigger instance). With CockroachDB, writes are distributed across nodes. To scale, you add nodes. Our 18K writes/minute today might be 180K in 3 years — CockroachDB scales linearly. PostgreSQL scaling would mean progressively larger and more expensive instances.
+
+3. **Multi-region capability.** If we expand to international warehouses (the 2026 roadmap mentions EMEA expansion), CockroachDB can replicate data to EU nodes with follower reads for low-latency access. PostgreSQL would need a complex replication setup. CockroachDB's locality-aware routing means EU queries read from EU nodes automatically.
+
+4. **Built-in change data capture (CDC).** CockroachDB's changefeed feature streams row-level changes to Kafka. This is perfect for the analytics pipeline — Nadia can consume stock level changes in real-time without polling. You set up a changefeed with a single SQL statement and it just works.
+
+The trade-offs, and I want to be upfront about these:
+- **Cost.** CockroachDB Dedicated (managed cloud) is ~3x the cost of RDS PostgreSQL for equivalent specs. I got a rough quote from their sales team: $5,400/month for a 3-node cluster with our specs versus $1,840 for the Aurora setup Fatima specced.
+- **Latency.** CockroachDB's distributed consensus (Raft) adds ~5ms to each write compared to PostgreSQL. Our P99 requirement is 50ms for reads, so this is fine for writes, but reads through distributed consensus are slower than PostgreSQL's local reads.
+- **Operational unfamiliarity.** Nobody on the team has run CockroachDB in production. The debugging story is different — different monitoring tools, different query plan analysis, different operational runbooks.
+
+Here are benchmark numbers I ran on a 3-node CockroachDB cluster (8 vCPUs, 32GB RAM per node). I used a workload modeled on our reservation flow — mixed reads and writes with the same cardinality as our production data:
+
+| Operation | PostgreSQL 16 (single) | CockroachDB (3-node) |
+|-----------|------------------------|----------------------|
+| INSERT (stock update) | P50: 1.2ms, P99: 4.1ms | P50: 6.8ms, P99: 18ms |
+| SELECT (stock lookup) | P50: 0.4ms, P99: 1.8ms | P50: 2.1ms, P99: 8.4ms |
+| Transaction (reserve + update) | P50: 3.1ms, P99: 12ms | P50: 14ms, P99: 38ms |
+
+PostgreSQL is faster in every category because it's a single-node system — no network round-trips for consensus. But CockroachDB is well within our latency requirements. The P99 for the full reservation transaction is 38ms on CockroachDB, and our budget is 50ms. That's a 12ms margin. Not huge, but sufficient.
+
+[Greg Holloway — 2:26 PM]
+On the testing side, how's CockroachDB for local development? Can I run it in Docker the way we run Postgres?
+
+[Ben Torres — 2:26 PM]
+Yeah, there's an official Docker image. Single-node mode for local development. But the behavioral differences between single-node CockroachDB and a multi-node cluster are meaningful — things like range splits, lease rebalancing, and latency characteristics change. So local tests wouldn't catch certain production behaviors.
+
+[Greg Holloway — 2:27 PM]
+That's a concern. With Postgres, what I test locally is essentially what runs in production, modulo the Aurora wrapper.
+
+[Nadia Okonkwo — 2:28 PM]
+The CDC feature is appealing. I want to drill into that for a second. Currently our analytics pipeline polls the database every 5 minutes for changes — we run a query that finds all stock_transactions since the last watermark, batch them, and load into the data warehouse. With CockroachDB's changefeed, we'd get sub-second change propagation. That's a meaningful improvement for the real-time inventory dashboards the ops team has been asking for.
+
+That said, PostgreSQL has logical replication and tools like Debezium that can do the same thing — it's just not built in. I've set up Debezium before. It's a separate service to manage (Kafka Connect + Debezium connector), but it works and it's well-documented. So the CDC advantage is a convenience factor, not a capability gap.
+
+[Jake Petrov — 2:30 PM]
+I want to raise a practical concern about CockroachDB. The operational unfamiliarity is a real risk. When we have a production issue at 2am, we need to be able to diagnose and fix it quickly. With PostgreSQL, everyone on this team has 5+ years of experience. We know the failure modes, the monitoring queries, the recovery procedures. I can diagnose a slow query in Postgres in my sleep — pg_stat_statements, EXPLAIN ANALYZE, pg_locks. With CockroachDB, we'd be learning on the job.
+
+I was on-call last month when the billing ledger had a lock contention issue. I identified the problem and fixed it in 20 minutes because I knew exactly which system tables to query. If that had been CockroachDB, I'd have been reading documentation at 2am while the outage clock was ticking. That's a tangible risk.
+
+[Ben Torres — 2:31 PM]
+Fair. CockroachDB does have good observability — the DB console shows hot ranges, slow queries, and contention issues. But yeah, knowing what to look for takes experience we don't have.
+
+[Fatima Al-Said — 2:32 PM]
+From the infrastructure side, I strongly prefer PostgreSQL. I have RDS Aurora PostgreSQL provisioned, monitored, backed up, and automated. Failover is tested monthly — I actually triggered a failover two weeks ago during the maintenance window and it completed in 34 seconds. Monitoring is in Datadog with alerts for connection count, replication lag, WAL growth, and disk usage. Automated snapshots every 6 hours, cross-region backup daily. CockroachDB would require me to build all of that from scratch — or pay for CockroachDB Dedicated which is 3x the cost.
+
+The provisioning timeline matters too. I can have an Aurora PostgreSQL cluster ready by Wednesday next week — I'll clone the config from the billing ledger cluster and adjust the instance size. CockroachDB Dedicated would take 2-3 weeks including vendor onboarding, security review, and VPC peering setup. That's real schedule impact.
+
+Also, the multi-region argument: the 2026 EMEA expansion is still speculative. If it happens, we can cross that bridge then. PostgreSQL read replicas in EU would handle the read latency concern, and we'd only need distributed writes if EU warehouses need to modify US inventory, which is unlikely. Each region will manage its own inventory — the cross-region use case is reporting aggregation, which is a batch job, not a real-time requirement.
+
+[Omar Zafar — 2:35 PM]
+Good arguments on both sides. Let me see where we are.
+
+PostgreSQL pros: faster, cheaper, familiar, proven infrastructure already in place, faster provisioning timeline.
+CockroachDB pros: distributed, horizontally scalable, built-in CDC, future-proofs multi-region.
+
+Key question: do we need distributed writes today or in the next 12 months?
+
+[Leah Kim — 2:37 PM]
+No. Our 18K writes/minute is trivial for PostgreSQL. Even at 10x growth, PostgreSQL handles it. I showed the pgbench numbers — 4,200 TPS sustained on the instance size Fatima specced. Our peak burst is 500 TPS (30K/min). We have 8x headroom before we even think about scaling. We'd need distributed writes only if we need multi-master in multiple geographic regions, which the EMEA plan doesn't require — warehouses will be managed regionally with eventual consistency across regions for reporting.
+
+[Ben Torres — 2:38 PM]
+I'll concede the point. The numbers are clear. CockroachDB is the right choice if we know we'll need multi-region distributed writes. If we don't, it's paying a complexity and cost premium for a capability we might not use. I'd rather we invest the delta — the roughly $3,500/month cost difference — into better monitoring and tooling for PostgreSQL.
+
+[Omar Zafar — 2:40 PM]
+I appreciate the thorough analysis, Ben. Seriously, the benchmark data was exactly what we needed to make an informed decision. CockroachDB goes in the ADR as a considered alternative with clear criteria for when we'd reconsider (multi-region write requirement). If the EMEA expansion materializes and the architecture requires distributed writes, we revisit.
+
+Does anyone have another database to propose? I know Jake was looking at something.
+
+[Jake Petrov — 2:41 PM]
+I briefly considered DynamoDB for the stock_levels table specifically — it's a key-value lookup pattern and DynamoDB is purpose-built for that. The access pattern is almost always "get stock for warehouse X, product Y" or "get all stock for warehouse X." DynamoDB would crush those queries.
+
+But the reservation system needs multi-table transactions (reserve stock + create reservation + update order status), and DynamoDB's TransactWriteItems is limited to 100 items per transaction. That's probably fine for a single reservation, but batch operations — like when a warehouse receives a shipment and updates 500 SKUs — would require splitting across multiple transaction calls. Plus, we'd end up with PostgreSQL for the relational data AND DynamoDB for stock levels — two databases to manage, two backup strategies, two monitoring setups, two sets of operational runbooks. Not worth the complexity for a marginal latency improvement.
+
+[Omar Zafar — 2:43 PM]
+Agreed, polyglot persistence should be a last resort, not a first choice. Nadia, you had something?
+
+[Nadia Okonkwo — 2:43 PM]
+Yeah, I want to raise a consideration for the analytics side. I looked at TimescaleDB for the stock_level_history table — specifically the stock_transactions table, which is time-series data by nature. Every transaction has a timestamp and we query it by time ranges for reporting. TimescaleDB is a PostgreSQL extension, so we get time-series superpowers without leaving the PostgreSQL ecosystem. Hypertables, continuous aggregates, compression. The history table will grow fast — 18K rows/minute × 60 × 24 × 365 = ~9.5 billion rows per year. TimescaleDB's chunk-based storage and automatic compression would keep that manageable. I've seen 10:1 compression ratios on similar time-series inventory data.
+
+Without TimescaleDB, we'd need to manually manage partition rotation, archive old partitions to S3, and rebuild aggregations with custom cron jobs. TimescaleDB's continuous aggregates handle that natively — you define a materialized view over a time window and it updates incrementally as new data arrives.
+
+[Leah Kim — 2:45 PM]
+TimescaleDB is interesting. We could use PostgreSQL for the core inventory tables and TimescaleDB for the history/analytics tables. Since TimescaleDB is a PostgreSQL extension, it runs in the same database instance. Single operational surface. Single connection pool. Single backup. You just run `CREATE EXTENSION timescaledb;` and convert the table to a hypertable. From the application's perspective, it's still just a PostgreSQL table — you query it with normal SQL.
+
+[Fatima Al-Said — 2:46 PM]
+RDS doesn't support TimescaleDB as an extension. We'd need to self-manage the database instance or use Timescale Cloud. That adds operational complexity — I'd need to set up the server, manage patching, handle failover, configure backups. All the things Aurora gives us for free. Or we pay for Timescale Cloud, which is another vendor, another bill, another security review.
+
+[Nadia Okonkwo — 2:47 PM]
+Fair point. I didn't realize RDS didn't support it. Let's keep it as a future optimization. For v2 launch, we can use PostgreSQL's native table partitioning for history (partition by month, drop partitions older than retention period). If the history table becomes unwieldy — and by my math, that's about 18 months out when we hit 15+ billion rows — we migrate to TimescaleDB or offload to a data warehouse. Either way, we have time.
+
+[Leah Kim — 2:48 PM]
+Agreed. The native partitioning approach is well-tested. I'll set up the stock_transactions table with monthly range partitions and a retention policy to detach partitions older than 24 months. We can archive those to S3 via pg_dump.
+
+[Omar Zafar — 2:49 PM]
+Good. So the proposal is PostgreSQL 16 for all InventoryHub v2 data, with native partitioning for high-write and history tables. TimescaleDB as a future optimization path documented in the ADR.
+
+Any objections? Speak now or hold your peace until the retro.
+
+[All — 2:50 PM]
+[No objections]
+
+[Sarah Chen — 2:50 PM]
+Sorry I'm late — got pulled into the pricing meeting. I caught the tail end. PostgreSQL it is? That aligns with what I expected. The product team's main concern is the stock level accuracy — as long as reservations are consistent and we don't oversell, the choice of database is an engineering decision.
+
+[Omar Zafar — 2:51 PM]
+Perfect timing, Sarah. Yes.
+
+**Decision: We're going with PostgreSQL 16 for InventoryHub v2.** Leah will own the schema design. Fatima will provision the RDS Aurora PostgreSQL cluster. Ben will document the CockroachDB evaluation in the ADR as the considered alternative.
+
+Let me note the decision criteria for the ADR record:
+- Operational familiarity: team has deep PostgreSQL expertise
+- Performance: exceeds requirements by 10x+ on a single node
+- Cost: leverages existing RDS infrastructure, no new licensing
+- ACID compliance: native, proven
+- Future path: TimescaleDB for history tables, CockroachDB if multi-region writes become necessary
+- Testability: Docker image, same behavior in dev and production (minus Aurora-specific wrapper)
+
+Action items from this decision:
+- [ ] Leah: schema design PR by Monday
+- [ ] Fatima: provision Aurora PostgreSQL cluster by Wednesday
+- [ ] Ben: CockroachDB evaluation section in ADR-042 by Monday
+- [ ] Nadia: document Debezium CDC setup as alternative to polling (for future sprint)
+- [ ] Omar: update the InventoryHub v2 architecture diagram in Confluence
+
+Let's take a 5-minute break and then do the schema walkthrough. If anyone needs to drop off, the schema discussion is optional but recommended for anyone writing code against this database.
+
+---
+
+SCHEMA DESIGN DISCUSSION (2:55 PM — 3:25 PM)
+
+[Leah Kim — 2:55 PM]
+Alright, for those of you still here. While we're all together, let me walk through the proposed schema. I want to validate the data model before I start coding the migration scripts this weekend.
+
+I'll go table by table. Stop me if anything looks wrong or if I'm missing a use case.
+
+**Core tables:**
+
+```sql
+-- Product catalog (2.4M rows, read-heavy)
+CREATE TABLE products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    sku VARCHAR(50) UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    category_id UUID REFERENCES categories(id),
+    unit_of_measure VARCHAR(20) NOT NULL,
+    weight_grams INT,
+    dimensions_cm JSONB,  -- {length, width, height}
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Warehouse locations (340 rows, rarely changes)
+CREATE TABLE warehouses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code VARCHAR(10) UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    region VARCHAR(50) NOT NULL,
+    address JSONB NOT NULL,
+    capacity_cubic_meters INT,
+    is_active BOOLEAN DEFAULT true
+);
+
+-- Stock levels (2.4M × 340 = ~816M potential rows, but sparse — avg 12 warehouses per product)
+-- Actual rows: ~28.8M
+-- Write-heavy: 18K updates/minute
+CREATE TABLE stock_levels (
+    warehouse_id UUID NOT NULL REFERENCES warehouses(id),
+    product_id UUID NOT NULL REFERENCES products(id),
+    available_qty INT NOT NULL DEFAULT 0 CHECK (available_qty >= 0),
+    reserved_qty INT NOT NULL DEFAULT 0 CHECK (reserved_qty >= 0),
+    in_transit_qty INT NOT NULL DEFAULT 0 CHECK (in_transit_qty >= 0),
+    last_transaction_id UUID,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    version INT NOT NULL DEFAULT 1,
+    PRIMARY KEY (warehouse_id, product_id)
+) PARTITION BY HASH (warehouse_id);
+
+-- Reservations (ACID-critical, moderate write rate)
+CREATE TABLE reservations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL,
+    warehouse_id UUID NOT NULL,
+    product_id UUID NOT NULL,
+    quantity INT NOT NULL CHECK (quantity > 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- active, fulfilled, cancelled, expired
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    FOREIGN KEY (warehouse_id, product_id) REFERENCES stock_levels(warehouse_id, product_id)
+);
+
+-- Stock transactions (append-only audit trail)
+CREATE TABLE stock_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    warehouse_id UUID NOT NULL,
+    product_id UUID NOT NULL,
+    transaction_type VARCHAR(30) NOT NULL,  -- inbound, outbound, transfer_in, transfer_out, adjustment, reservation, release
+    quantity INT NOT NULL,
+    reference_id UUID,  -- order_id, transfer_id, or adjustment_id
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_by UUID NOT NULL
+) PARTITION BY RANGE (created_at);
+```
+
+[Jake Petrov — 3:00 PM]
+Question on the products table. The dimensions_cm column is JSONB. Is there a reason not to use separate columns for length, width, height? JSONB means we can't put constraints on individual dimensions.
+
+[Leah Kim — 3:01 PM]
+Pragmatism. The dimensions are used for shipping calculations in a downstream service — they get serialized as a bundle and passed to the shipping API. We never query "find all products wider than 30cm." If we did, we'd want separate columns. But for our use case, JSONB is simpler and avoids three nullable columns that always travel together. I can add a CHECK constraint on the JSONB shape if we want validation:
+
+```sql
+CHECK (dimensions_cm IS NULL OR (
+    dimensions_cm ? 'length' AND
+    dimensions_cm ? 'width' AND
+    dimensions_cm ? 'height'
+))
+```
+
+[Jake Petrov — 3:02 PM]
+That works. I'd include the CHECK constraint — otherwise someone will insert `{"l": 5, "w": 3}` and the shipping service will blow up.
+
+[Leah Kim — 3:02 PM]
+Agreed, I'll add it.
+
+[Greg Holloway — 3:03 PM]
+On the stock_levels table — the CHECK constraints on available_qty, reserved_qty, and in_transit_qty prevent negative values. That's good. But what about the case where the sum of reserved_qty and available_qty exceeds total inventory? Is there a constraint for that?
+
+[Leah Kim — 3:04 PM]
+Not a database constraint, no. The total physical inventory is `available_qty + reserved_qty + in_transit_qty`, and that's maintained by the application logic. We could add a trigger-based constraint, but triggers on a table doing 18K updates/minute add latency. I'd rather enforce the invariant in the application layer and catch violations via monitoring. We'll have an alert if any stock_level row has negative quantities or if `available_qty + reserved_qty` exceeds the last known physical count by more than 5%.
+
+[Greg Holloway — 3:05 PM]
+Makes sense. I'll add a test case for that invariant in the integration suite.
+
+[Jake Petrov — 3:05 PM]
+The reservation flow — walk me through the transaction. Customer places an order, we need to reserve stock. What's the SQL?
+
+[Leah Kim — 3:06 PM]
+Sure. Here's the full reservation flow as a single transaction:
+
+```sql
+BEGIN;
+
+-- Lock the stock row (SELECT FOR UPDATE prevents concurrent modifications)
+SELECT available_qty, version
+FROM stock_levels
+WHERE warehouse_id = $1 AND product_id = $2
+FOR UPDATE;
+
+-- Check availability (application logic)
+-- If available_qty < requested_qty: ROLLBACK
+
+-- Reserve stock
+UPDATE stock_levels
+SET available_qty = available_qty - $3,
+    reserved_qty = reserved_qty + $3,
+    version = version + 1,
+    updated_at = NOW()
+WHERE warehouse_id = $1 AND product_id = $2 AND version = $4;
+
+-- Create reservation record
+INSERT INTO reservations (order_id, warehouse_id, product_id, quantity, expires_at)
+VALUES ($5, $1, $2, $3, NOW() + INTERVAL '30 minutes');
+
+-- Create audit transaction
+INSERT INTO stock_transactions (warehouse_id, product_id, transaction_type, quantity, reference_id, created_by)
+VALUES ($1, $2, 'reservation', $3, $5, $6);
+
+COMMIT;
+```
+
+The `SELECT FOR UPDATE` locks the specific stock row, preventing other transactions from modifying it until we commit. The `version` check provides optimistic locking as a safety net — if the version doesn't match, someone else modified the row between our SELECT and UPDATE (shouldn't happen with `FOR UPDATE`, but defense in depth). If the UPDATE affects 0 rows because the version changed, the application retries the whole transaction.
+
+[Jake Petrov — 3:09 PM]
+What's the lock scope? Does the `FOR UPDATE` lock only the one row, or the whole partition?
+
+[Leah Kim — 3:09 PM]
+Just the one row. PostgreSQL's row-level locking is granular — `FOR UPDATE` acquires a row-level exclusive lock on the matching rows only. Other transactions can read and write other rows in the same partition concurrently. The only contention is when two transactions try to reserve the same product in the same warehouse simultaneously, which is the exact case where we need serialization.
+
+[Ben Torres — 3:10 PM]
+What about reservation expiry? If a customer doesn't complete their order in 30 minutes, the reserved stock needs to be released. We can't have phantom reservations eating up available inventory.
+
+[Leah Kim — 3:11 PM]
+Two approaches. Option A: background job that runs every minute, finds expired reservations, releases stock. Option B: use pg_cron to run a stored procedure.
+
+I prefer Option A because the business logic (release stock, update reservation status, create audit transaction) belongs in the application layer, not in a database procedure. Stored procedures are harder to test, harder to version control, and harder to debug in production. The job is simple and runs in the application's existing task scheduler:
+
+```python
+async def release_expired_reservations():
+    expired = await Reservation.filter(
+        status='active',
+        expires_at__lt=now()
+    ).select_for_update()
+
+    for reservation in expired:
+        async with transaction.atomic():
+            await StockLevel.filter(
+                warehouse_id=reservation.warehouse_id,
+                product_id=reservation.product_id
+            ).update(
+                available_qty=F('available_qty') + reservation.quantity,
+                reserved_qty=F('reserved_qty') - reservation.quantity,
+                version=F('version') + 1
+            )
+            reservation.status = 'expired'
+            await reservation.save()
+            await StockTransaction.create(
+                warehouse_id=reservation.warehouse_id,
+                product_id=reservation.product_id,
+                transaction_type='release',
+                quantity=reservation.quantity,
+                reference_id=reservation.order_id,
+                created_by=SYSTEM_USER_ID
+            )
+```
+
+[Ben Torres — 3:14 PM]
+Looks clean. One edge case — what if the job is running and a customer completes their order at the same time? The `select_for_update` should prevent a race condition, but we should test it.
+
+[Leah Kim — 3:14 PM]
+Right. The `select_for_update` on the reservation row means the job can't process a reservation that the order-fulfillment path is simultaneously trying to fulfill. One of them will wait for the other's transaction to commit. If the fulfillment path commits first, the reservation status will be 'fulfilled', and the job's query won't match it. If the job commits first, the fulfillment path will see status='expired' and return an error to the customer, who would need to re-reserve. That's the correct behavior.
+
+[Greg Holloway — 3:15 PM]
+I'll add that race condition to the test matrix. Concurrent reservation expiry and order fulfillment — that's a good one.
+
+[Omar Zafar — 3:15 PM]
+This looks solid. The partitioning strategy for stock_levels and stock_transactions makes sense. Leah, go ahead with this schema. Let's review the indexing strategy in the next architecture meeting — Tuesday works?
+
+[Leah Kim — 3:16 PM]
+Tuesday works. I'll have the index proposals ready — covering indexes for the reservation lookup, partial indexes for active reservations, and the GIN index on the JSONB columns. I'll also have the migration scripts in a PR by Monday so people can review the DDL before we talk indexing.
+
+[Fatima Al-Said — 3:17 PM]
+One more thing — connection pooling. The legacy Oracle system uses 400 persistent connections. We're moving to microservices, so we'll have multiple service instances connecting. I'll set up PgBouncer in transaction mode between the application and Aurora. That way, even if we have 50 service instances, the database sees a bounded connection count.
+
+[Leah Kim — 3:18 PM]
+Good call. Transaction mode is the right choice for this workload. Session mode would tie a connection to a service instance for the lifetime of the process, which wastes connections. Transaction mode releases the connection back to the pool after each transaction, so we can serve many more concurrent requests with fewer database connections.
+
+[Omar Zafar — 3:20 PM]
+Great. We're at time. Let me summarize:
+1. PostgreSQL 16, decided and documented in ADR-042
+2. Schema design reviewed — Leah is owner, PR Monday
+3. Indexing strategy review Tuesday
+4. Fatima provisioning Aurora cluster and PgBouncer by Wednesday
+5. Ben documenting CockroachDB evaluation in the ADR
+
+Thanks everyone. Enjoy the weekend.
+
+---
+
+POST-MEETING — SLACK #inventoryhub-v2 — 3:45 PM
+
+[Omar Zafar]
+ADR-042 decision is in: **PostgreSQL 16 for InventoryHub v2.** Meeting notes and schema design are in the shared doc. Key points:
+- We chose PostgreSQL over CockroachDB due to operational familiarity, performance headroom, and cost
+- CockroachDB documented as the reconsideration path if multi-region writes become necessary
+- TimescaleDB as future optimization for the transactions history table
+- Schema design reviewed and approved — Leah is the owner
+- Fatima provisioning the RDS Aurora cluster next week
+- Indexing strategy review Tuesday afternoon
+
+Thanks to everyone who prepared thorough evaluations. This was a well-informed decision. Ben's CockroachDB benchmarks were especially valuable — good to have the data instead of relying on gut feel.
+
+[Leah Kim]
+Schema migration scripts drafted. PR coming Monday. Will include the hash partitioning setup for stock_levels and range partitioning for stock_transactions. Also adding the JSONB check constraint Jake flagged and the index stubs for the Tuesday discussion.
+
+[Ben Torres]
+CockroachDB ADR section will be done Monday. Including the benchmark methodology and raw numbers so we have a reference if the EMEA question comes back.
+
+[Fatima Al-Said]
+Aurora cluster specs drafted: db.r6g.xlarge (4 vCPU, 32 GB RAM), 1 primary + 2 read replicas in different AZs. Estimated monthly cost: $1,840. Provisioning Monday. Will also set up PgBouncer on a t3.medium — transaction mode, max 200 database connections, max 2000 client connections. Monitoring dashboards in Datadog will be cloned from the billing ledger setup and adapted for the InventoryHub workload patterns.
+
+[Greg Holloway]
+I've started the integration test plan for the reservation flow. Will have the concurrency test cases ready for review alongside Leah's schema PR.
+
+[Nadia Okonkwo]
+I'll spec out the Debezium CDC setup as a separate ticket. Not blocking for v2 launch — we can keep polling for now — but I want to have the design ready so we can swap in CDC once the core service is stable.
+
+---
+
+END OF EPISODE

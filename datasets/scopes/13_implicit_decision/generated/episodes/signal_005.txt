@@ -1,0 +1,623 @@
+GITHUB — PULL REQUEST #1871
+Repository: rivulet-io/rivulet-api
+Branch: feature/redis-session-store → main
+Author: Mike Torres (@mtorres)
+Created: 2025-06-11 (Wednesday), 10:47 AM PT
+Status: Open — Review requested from @sarahkim, @dokafor
+CI: All checks passing (187 tests, lint, type check)
+Labels: auth, infrastructure, sprint-25
+Milestone: Q2 Auth Hardening
+Linked Issues: SUP-4398, SUP-4402, SUP-4421, SUP-4423
+
+---
+
+## Set up Redis session store with token rotation
+
+### Summary
+
+Implements a Redis-backed session store to replace the current PostgreSQL `django_session` backend. Sessions are stored as Redis keys with built-in TTL for automatic expiry. Includes token rotation on each request for security hardening.
+
+### Background
+
+Our PostgreSQL session store is causing user-facing issues (SUP-4398–4402, SUP-4421, SUP-4423):
+- Connection pool contention during peak load causes session lookup timeouts
+- Session cleanup cron job had a timezone bug (fixed in #1858) but the cron-based approach is fragile
+- Session table (15K+ rows) competing with application queries for pool connections
+
+See ADR-017 for full analysis.
+
+### What This PR Does
+
+**New session middleware** (`rivulet/auth/session_middleware.py`):
+- Replaces `django.contrib.sessions.middleware.SessionMiddleware`
+- On each request: reads session token from cookie, performs Redis GET to retrieve session data
+- If session is valid: deserializes session data, attaches `user_id` and `tenant_id` to request, rotates token
+- If session is invalid/expired: returns 401 (API) or redirects to login (browser)
+- Token rotation: generates new 256-bit token, SET with TTL, DEL old token — atomic via Lua script
+- Exempted paths configurable via `SESSION_EXEMPT_PATHS` (defaults to `/api/health`, `/api/auth/login`, `/api/auth/signup`)
+- Middleware ordering: runs after `CorsMiddleware`, before `TenantContextMiddleware`
+
+**Session manager** (`rivulet/auth/session_manager.py`):
+- `create_session(user_id, tenant_id, metadata)` → creates Redis entry, returns session token
+- `get_session(token)` → retrieves session data, returns None if expired/missing
+- `rotate_token(old_token)` → atomic rotate: generate new token, copy data, set TTL, delete old
+- `revoke_session(token)` → DEL the key. Immediate invalidation.
+- `revoke_all_user_sessions(user_id)` → scans for all sessions for a user, DELs them all
+- `get_active_session_count(user_id)` → returns number of active sessions for a user
+- All public methods log structured events via `structlog` with `action`, `user_id`, `session_token_prefix` (first 8 chars only)
+
+**Redis connection management** (`rivulet/auth/redis_pool.py`):
+- Dedicated connection pool for session operations (separate from rate limiter pool)
+- Pool size: 20 connections (configurable via `SESSION_REDIS_POOL_SIZE`)
+- Connection timeout: 100ms (fast-fail if Redis is unresponsive)
+- Retry: 1 retry with 50ms backoff
+- Health check interval: 30 seconds (`health_check_interval=30` on the pool)
+- Socket keepalive enabled to prevent idle connection drops behind NAT/firewalls
+
+**Token format**:
+- 256-bit random bytes, base64url-encoded → 43 characters
+- Prefix: `rsess_` for easy identification in logs
+- Example: `rsess_a7Kx9mP2qL4nR8vT1wB5yC3dF6hJ0sU2eG4iM7o`
+- Redis key format: `session:{token}` with configurable key prefix
+- Token generation uses `secrets.token_urlsafe(32)` — cryptographically secure
+
+**Session data structure** (stored as JSON in Redis):
+```json
+{
+  "user_id": "usr_a1b2c3d4",
+  "tenant_id": "tnt_x9y8z7w6",
+  "created_at": "2025-06-11T10:30:00Z",
+  "last_rotated_at": "2025-06-11T10:45:00Z",
+  "ip_address": "192.168.1.100",
+  "user_agent": "Mozilla/5.0...",
+  "metadata": {}
+}
+```
+
+**Session lifecycle**:
+- Default TTL: 24 hours (configurable via `SESSION_TTL_SECONDS`)
+- Token rotation resets TTL → active users never expire
+- Idle sessions expire naturally via Redis TTL
+- Max sessions per user: 10 (configurable via `SESSION_MAX_PER_USER`) — creating an 11th revokes the oldest
+
+**Security features**:
+- Token rotation on every request (stolen tokens are single-use)
+- Duplicate token detection: if a rotated-out token is used, all sessions for that user are revoked (indicates possible token theft)
+- Session binding: IP address and user agent are stored and optionally validated (strict mode for enterprise)
+- Rate limiting on login endpoint: 5 attempts per minute per IP (uses existing rate limiter)
+- Tokens never appear in logs — only the first 8 characters are logged (e.g., `rsess_a7K*****`)
+
+### Configuration
+
+```python
+# settings.py additions
+SESSION_BACKEND = "rivulet.auth.session_middleware.RedisSessionMiddleware"
+SESSION_REDIS_URL = env("SESSION_REDIS_URL", default="redis://localhost:6379/1")
+SESSION_REDIS_POOL_SIZE = env.int("SESSION_REDIS_POOL_SIZE", default=20)
+SESSION_TTL_SECONDS = env.int("SESSION_TTL_SECONDS", default=86400)  # 24 hours
+SESSION_MAX_PER_USER = env.int("SESSION_MAX_PER_USER", default=10)
+SESSION_ROTATE_TOKENS = env.bool("SESSION_ROTATE_TOKENS", default=True)
+SESSION_STRICT_BINDING = env.bool("SESSION_STRICT_BINDING", default=False)
+SESSION_EXEMPT_PATHS = env.list("SESSION_EXEMPT_PATHS", default=[
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/signup",
+    "/api/auth/forgot-password",
+])
+```
+
+### Migration Plan
+
+Phase 1 (this PR): Deploy the Redis session middleware behind a feature flag. New logins get Redis sessions. Existing PostgreSQL sessions continue to work via the fallback path in the middleware.
+
+Phase 2 (follow-up PR): After 14 days (max existing session age), remove the PostgreSQL session fallback. Delete the `django_session` table. Remove the `clearsessions` cron job.
+
+Phase 3 (follow-up PR): Add admin API for session management — list active sessions, force revoke, session audit log. This is needed for the SOC 2 audit trail.
+
+### Files Changed
+
+```
+rivulet/auth/session_middleware.py     | 247 +++++++++++++++
+rivulet/auth/session_manager.py        | 189 ++++++++++++
+rivulet/auth/redis_pool.py             |  67 ++++
+rivulet/auth/token_utils.py            |  43 +++
+rivulet/auth/lua_scripts.py            |  38 +++
+rivulet/settings/base.py               |  12 +-
+rivulet/settings/test.py               |   4 +
+tests/auth/test_session_middleware.py   | 312 ++++++++++++++++++++
+tests/auth/test_session_manager.py     | 198 +++++++++++++
+tests/auth/test_token_rotation.py      | 156 ++++++++++
+tests/auth/conftest.py                 |  45 +++
+requirements/base.txt                  |   1 +
+docker-compose.yml                     |  11 +
+```
+
+13 files changed, 1323 insertions(+), 5 deletions(-)
+
+### Testing
+
+**Unit tests** (38 new tests):
+- Session creation, retrieval, expiry
+- Token rotation (happy path, concurrent rotation, stale token detection)
+- Revocation (single session, all user sessions)
+- Max session enforcement
+- Middleware integration (authenticated request, expired session, missing token)
+- Redis connection failure handling (fast-fail, no hanging requests)
+- Feature flag off → Django session fallback path
+
+**Load test** (not in CI, run manually):
+```bash
+# Results from local testing against Redis 7.2 (M1 MacBook Pro, Docker Desktop)
+$ python -m rivulet.auth.loadtest --concurrent 500 --duration 60
+
+Requests:      30,000
+Concurrency:   500
+Duration:      60s
+
+Session create:  P50=0.12ms  P95=0.28ms  P99=0.41ms
+Session lookup:  P50=0.08ms  P95=0.19ms  P99=0.31ms
+Token rotation:  P50=0.15ms  P95=0.34ms  P99=0.52ms
+Session revoke:  P50=0.06ms  P95=0.14ms  P99=0.22ms
+
+Throughput: 85,200 ops/sec
+Errors:     0
+Memory (Redis): 2.3MB peak (500 concurrent sessions × ~4.6KB per session w/ overhead)
+```
+
+For comparison, our current PostgreSQL session lookups under the same concurrency:
+```bash
+$ python -m rivulet.auth.loadtest --backend=postgresql --concurrent 500 --duration 60
+
+Session lookup:  P50=3.2ms  P95=18.7ms  P99=45.1ms
+Throughput: 12,400 ops/sec
+Errors:     23 (connection pool timeout)
+```
+
+### Infrastructure Requirements
+
+- Redis 7.x instance for sessions (separate from rate limiter Redis)
+- Recommended: ElastiCache Multi-AZ with automatic failover
+- Memory estimate: 1KB per session × 15K active sessions = ~15MB (well within t3.medium)
+- Carlos has confirmed he can provision the ElastiCache cluster this week
+
+### Lua Scripts
+
+Token rotation is implemented as an atomic Lua script to prevent race conditions:
+
+```lua
+-- rotate_token.lua
+-- Atomically rotate a session token
+-- KEYS[1] = old session key
+-- KEYS[2] = new session key
+-- ARGV[1] = TTL in seconds
+
+local data = redis.call('GET', KEYS[1])
+if not data then
+    return nil  -- old token already expired/revoked
+end
+
+-- Set new key with data and TTL
+redis.call('SET', KEYS[2], data, 'EX', ARGV[1])
+-- Delete old key
+redis.call('DEL', KEYS[1])
+-- Track rotation for duplicate detection
+redis.call('SET', KEYS[1] .. ':rotated', KEYS[2], 'EX', 300)
+
+return data
+```
+
+The `:rotated` suffix key is used for duplicate detection. If a request comes in with a token that has been rotated out, we check if the `:rotated` key exists. If it does, someone is using an old token — possible session theft. We revoke all sessions for that user as a precaution.
+
+**Duplicate detection script** (`duplicate_check.lua`):
+```lua
+-- duplicate_check.lua
+-- Check if a token was previously rotated out
+-- KEYS[1] = old session key + ':rotated'
+-- Returns: the new token key if rotated, nil otherwise
+
+local rotated_to = redis.call('GET', KEYS[1])
+if rotated_to then
+    -- Extract user_id from the new session to revoke all
+    local new_data = redis.call('GET', rotated_to)
+    return new_data
+end
+return nil
+```
+
+### Rollback Plan
+
+If Redis sessions cause issues in staging or production:
+1. Set feature flag `redis_sessions` to OFF — all new logins go back to Django sessions
+2. Existing Redis sessions will still work until they expire (24h max)
+3. No data migration needed — PostgreSQL session table is untouched during Phase 1
+
+### Docker Compose Changes
+
+Added a `session-redis` service for local development:
+
+```yaml
+# docker-compose.yml additions
+session-redis:
+  image: redis:7.2-alpine
+  ports:
+    - "6380:6379"  # 6380 to avoid conflict with rate-limiter redis on 6379
+  volumes:
+    - session-redis-data:/data
+  command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy volatile-lru
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+```
+
+Note: local dev uses port 6380 mapped to container 6379. The default `SESSION_REDIS_URL` in `settings/local.py` is `redis://localhost:6380/1`.
+
+### Related Work
+
+- ADR-017: Session management architecture decision (JWT vs Redis vs DB)
+- PR #1858: Fixed timezone bug in session cleanup cron (merged last week)
+- JIRA SUP-4398–4402, SUP-4421, SUP-4423: User-reported session timeout issues
+- Upcoming PR #1872: User→sessions sorted set index (follow-up from review feedback)
+
+---
+
+REVIEW COMMENTS
+
+[Sarah Kim — @sarahkim — 11:23 AM]
+This is clean. A few comments:
+
+**rivulet/auth/session_middleware.py, line 47:**
+The fallback to PostgreSQL sessions — is this synchronous? If Redis is down and we fall back to PostgreSQL, we're back to the connection pool problem for those requests.
+
+**rivulet/auth/session_middleware.py, line 83:**
+Minor: the `_is_exempt_path` check does a linear scan through the exempt paths list. That's fine for 4 entries, but since this runs on every request, a set would be more appropriate if the list grows. Not blocking.
+
+**rivulet/auth/session_manager.py, line 112:**
+`revoke_all_user_sessions` uses SCAN to find all sessions for a user. SCAN is O(N) over the keyspace. At 15K sessions this is fine, but at 100K+ it could be slow. Should we maintain a user→sessions index?
+
+**rivulet/auth/session_manager.py, line 45:**
+The `create_session` method — I like that you're using `SET ... NX` to prevent token collisions. The probability of a collision with 256-bit tokens is astronomically low, but defense in depth is always good.
+
+**General:**
+The code quality is high. Tests are thorough. The Lua script for atomic rotation is the right approach. I'm approving with the two comments above as non-blocking suggestions.
+
+I also ran through the test suite locally on my machine — all 225 tests pass (including the 38 new ones). The `conftest.py` fixtures for spinning up a local Redis instance via `fakeredis` are well done. Easy to run without Docker.
+
+Approval: **Approved** :white_check_mark:
+
+[David Okafor — @dokafor — 12:05 PM]
+Reviewed. This matches the Redis session pattern we used at DataScale almost exactly (which makes sense since we discussed it). The duplicate token detection via `:rotated` keys is clever — we didn't have that at DataScale and it would have caught the session theft incident we had in 2023.
+
+**rivulet/auth/redis_pool.py, line 23:**
+The 100ms connection timeout is aggressive. If there's a brief Redis hiccup (GC pause, failover), we'll fast-fail and return 401s. Consider 250ms with 1 retry. In my experience, Redis GC pauses are typically 50-150ms.
+
+**rivulet/auth/redis_pool.py, line 38:**
+On the retry logic — the 50ms backoff is fine for a single retry, but if we ever bump this to 2 retries, we should switch to exponential backoff. Just a note for future-proofing.
+
+**rivulet/auth/session_manager.py, line 112:**
+Agree with Sarah on the SCAN concern. A sorted set `user_sessions:{user_id}` with session tokens as members and creation time as score would make `revoke_all_user_sessions` O(M) where M is the number of sessions for that user, not O(N) over all sessions. Add it now or as a follow-up?
+
+**rivulet/auth/session_middleware.py, line 102:**
+I notice the middleware logs the full user agent string. That's fine for debugging but those strings can be 200+ characters. Consider truncating to 128 chars in the log output to keep structured log entries from getting too wide. The full string is still stored in the session data for auditing.
+
+**rivulet/auth/token_utils.py, line 15:**
+The `generate_token` function — worth adding a brief docstring explaining why we use `secrets.token_urlsafe` instead of `uuid4`. (Answer: `uuid4` is only 122 bits of randomness, `secrets.token_urlsafe(32)` gives 256 bits.)
+
+**tests/auth/test_token_rotation.py, line 89:**
+The concurrent rotation test is good. I especially like the `test_concurrent_rotation_same_token` test that verifies exactly one rotation wins and the other gets a clean `None` response. Edge case that's easy to miss.
+
+Approval: **Approved** :white_check_mark:
+
+[Rachel Wu — @rwu — 12:18 PM]
+Not a required reviewer, but I read through since I touched the auth middleware last quarter. This is solid work. One thing I wanted to flag:
+
+**rivulet/auth/session_middleware.py, line 129:**
+The `process_response` hook sets the `Set-Cookie` header with the new token after rotation. The `SameSite` attribute is set to `Lax` — just confirming that's intentional? Our current Django session cookie uses `Lax` too, so it's consistent. But worth calling out since some enterprise customers have asked about `Strict` mode.
+
+**rivulet/auth/session_middleware.py, line 134:**
+The `Secure` flag is only set when `DEBUG=False`. That's standard Django behavior. Just double checking — our staging environment has `DEBUG=False`, right? I've been burned before by staging using debug mode and then cookies not being set correctly.
+
+[Mike Torres — @mtorres — 12:30 PM]
+Thanks both. And thanks Rachel for the extra eyes.
+
+@sarahkim — The PostgreSQL fallback is synchronous, yes. But it's only active during the 14-day transition period. After that, Redis is the only path. I'll add a log line when the fallback fires so we can monitor how often it happens. If it's more than 1% of requests, we can investigate. Good catch on the exempt path check — I'll convert to a `frozenset` in a follow-up since it's not blocking.
+
+@dokafor — Good call on the timeout. Bumped to 200ms. And I'll add the user→sessions sorted set as a follow-up PR (#1872). It's not blocking for the initial deployment since we have 15K sessions max, but it's the right pattern for scale. I'll also add the docstring to `generate_token` — good point about documenting the 256-bit vs 122-bit rationale.
+
+@rwu — Good catch. `SameSite=Lax` is intentional for now. `Strict` would break OAuth callback flows since those are cross-origin redirects. We could make it configurable per tenant for the enterprise customers who want it. I'll add that to the Phase 3 scope. And yes, staging has `DEBUG=False` — I double-checked the ECS task definition.
+
+Updated the PR with both changes (200ms timeout, fallback logging). Ready to merge when CI passes.
+
+**Commit: f8c29a1** — "Bump Redis connection timeout to 200ms, add fallback logging"
+CI re-running...
+
+[Sarah Kim — @sarahkim — 12:42 PM]
+Looks good. The fallback logging is a nice touch — `logger.warning("session.postgresql_fallback", user_id=..., reason=...)` is exactly what I'd want to see in the dashboards.
+
+[David Okafor — @dokafor — 12:48 PM]
+200ms is a good compromise. Approved the new commit too. For what it's worth, at DataScale we ran with 300ms and never had issues, but 200ms gives us tighter latency bounds. If ElastiCache failover takes longer than 200ms (it can take 10-15 seconds in rare cases), the fast-fail behavior is actually what we want — return 401, let the client retry, and the retry hits the new primary.
+
+[Mike Torres — @mtorres — 12:52 PM]
+Exactly. During a failover, returning 401 is better than holding the request open for 10 seconds. The frontend already handles 401 by redirecting to login, and by the time the user logs in again, the failover is complete. It's a brief disruption rather than a cascading timeout.
+
+---
+
+SLACK THREAD — #engineering — 12:45 PM
+
+[Mike Torres]
+PR #1871 is up — Redis session store with token rotation. Two approvals (Sarah, David). CI is green. Planning to merge after the current test run completes. Carlos, how's the ElastiCache provisioning going?
+
+[Carlos Rivera]
+Cluster is provisioned. 3-node setup (1 primary, 2 replicas) in us-east-1a/b/c. Automatic failover enabled. Endpoint is in the secrets manager under `session-redis-url`. I'll add it to the ECS task definitions when you're ready to deploy.
+
+Specs for the record:
+- Instance type: cache.t3.medium (3.09 GB memory, 2 vCPUs)
+- Redis engine: 7.2.4
+- Encryption at rest: enabled (AWS managed key)
+- Encryption in transit: enabled (TLS, minimum TLS 1.2)
+- Parameter group: custom `rivulet-session-redis` — `maxmemory-policy` set to `volatile-lru`, `tcp-keepalive` 60
+- Backup: daily snapshot at 03:00 UTC, 7 day retention
+- Maintenance window: Sun 04:00-05:00 UTC
+- Subnet group: `rivulet-private-cache` (same as rate limiter cluster)
+- Cost estimate: ~$48/month for 3-node t3.medium cluster in us-east-1
+
+[Mike Torres]
+Nice, thanks. I'll merge today and we can deploy to staging tomorrow morning.
+
+[Tomasz Wojcik]
+Quick question — are we using Redis db 0 or a different database number? Just want to make sure there's no collision with the rate limiter if they ever end up on the same instance.
+
+[Mike Torres]
+Good question. Sessions use db 1 (set via the URL: `redis://...6379/1`). Rate limiter is on db 0. They're on separate ElastiCache clusters in prod, but on the same local Redis instance in dev. The db separation keeps them isolated either way.
+
+[Tomasz Wojcik]
+Got it, thanks.
+
+[Lin Zhang]
+Does the frontend need any changes? Different cookie name?
+
+[Mike Torres]
+Cookie name stays the same — `rivulet_session`. The cookie value format changes (from Django's session ID to our `rsess_` prefixed token) but the frontend doesn't read the cookie value directly, it just sends it with requests. So no frontend changes needed.
+
+[Lin Zhang]
+:thumbsup: Easy migration. I'll let the mobile team know too — they handle cookies the same way through the WebView, so should be fine on their end as well.
+
+[Mike Torres]
+Good idea. The React Native app uses the same cookie-based auth, so yeah, no changes needed there either. The `rsess_` prefix is just for our internal identification — the cookie spec doesn't care about the value format.
+
+[Anika Patel]
+Does this affect the onboarding flow? The post-signup login creates a session — does that need updating?
+
+[Mike Torres]
+The login endpoint (`/api/auth/login`) is updated in this PR to create a Redis session instead of a Django session when the feature flag is on. The response format is identical. Onboarding flow should work without changes.
+
+[Anika Patel]
+Perfect. I'll run through the full onboarding flow on staging once it's deployed, just to be safe. I'll check the standard signup, email verification, and first-login sequence. Also the SSO flow for enterprise tenants — that creates a session through a different code path (`/api/auth/saml/callback`).
+
+[Mike Torres]
+Good call on SSO. The SAML callback handler calls the same `create_session()` function internally, so it should pick up the Redis backend automatically when the flag is on. But worth verifying end-to-end. I added the SSO flow to my staging test plan.
+
+[Anika Patel]
+That'd be great. Let me know if anything looks off and I'll do the same.
+
+[Ben Crawford]
+Hey Mike, I see you added `redis[hiredis]` to `requirements/base.txt`. Just a heads up — we had a build issue with the `hiredis` C extension on our ARM-based CI runners a few months ago. It was fixed in hiredis 2.3.0+. Can you confirm we're pulling that version or later?
+
+[Mike Torres]
+Good catch. We're pulling `redis[hiredis]>=5.0.0` which bundles hiredis 3.0+. The ARM build issue should be well resolved. But I'll double-check the CI build logs when the run finishes to make sure the wheel installs cleanly.
+
+[Ben Crawford]
+Cool, thanks. Just wanted to flag it since it bit us before.
+
+[David Okafor]
+Just jumping in here too — I wanted to highlight the load test numbers Mike included in the PR description. Sub-millisecond P99 for all operations at 500 concurrent connections. That's basically what you'd expect from Redis, but it's good to have the numbers documented. Our PostgreSQL session lookups were hitting 12-45ms P99 during peak, and that's what was causing the connection pool backup.
+
+[Mike Torres]
+Yeah, the comparison is stark. Redis session lookup P99 is 0.31ms vs PostgreSQL P99 of 45ms under load. That's a 145x improvement on the tail latency. Even accounting for network hops to ElastiCache in prod (vs local Redis in the load test), we should see single-digit millisecond P99s.
+
+[Sarah Kim]
+The other benefit people might miss: we eliminate the session cleanup cron entirely. Redis TTL handles expiry automatically. No more timezone bugs, no more cleanup jobs competing with the connection pool. It's one fewer moving part.
+
+[Mike Torres]
+Exactly. That was actually one of the strongest arguments in ADR-017 — operational simplicity. The cron-based cleanup was a maintenance burden and a reliability risk.
+
+---
+
+SLACK THREAD — #arch-discussions — 1:15 PM
+
+[James Holden]
+Catching up on the auth PR. Looks solid. One question — the session audit log in Phase 3, will it track which IP addresses had active sessions? For the SOC 2 audit, we need to be able to answer "which IPs accessed tenant X's data in the last 90 days."
+
+[Mike Torres]
+Yes. The session data already stores IP address and user agent (see the data structure in the PR description). Phase 3 will add an API to query that data. For the SOC 2 audit, we'd also want to persist session events (create, rotate, revoke) to a durable store — Redis is ephemeral so we'd write session lifecycle events to PostgreSQL or an audit log service. I'll scope that in the Phase 3 PR.
+
+[James Holden]
+Sounds good. That covers the SOC 2 requirement. One more thought — for the audit log persistence, we should probably use a separate table rather than mixing it into the existing audit log. The session event volume will be much higher than other audit events because of the per-request token rotation. A dedicated `session_audit_events` table with its own retention policy would keep things clean.
+
+[Mike Torres]
+Agreed. The rotation events alone would be millions of rows per month. Separate table with aggressive partitioning (by month) and a 90-day retention policy. I'll include that in the Phase 3 design doc.
+
+[James Holden]
+Perfect.
+
+[Carlos Rivera]
+Speaking of SOC 2, the audit logging gap I mentioned is getting narrower. Between Mike's session audit trail, the export pipeline audit log Sarah added, and my admin action logging, we're covering most of the surface area. I'll do a gap analysis this week.
+
+[Rachel Wu]
+Can you share the gap analysis in #security when it's ready? I want to cross-reference it with the penetration test findings from last month. There were a few items in the pentest report about session handling that this PR likely addresses.
+
+[Carlos Rivera]
+Sure, I'll post it there. The pentest items around session fixation and session timeout should be fully addressed by this PR's token rotation and TTL-based expiry. I'll call that out explicitly in the gap analysis.
+
+[James Holden]
+That's great. We're in much better shape for the SOC 2 Type II audit than we were six months ago. Priya is going to be happy about that.
+
+[Tomasz Wojcik]
+One more thing on the audit trail — should we also log failed session lookups (invalid/expired tokens)? That could be useful for detecting brute force attempts against the session store, even though the 256-bit token space makes it practically infeasible.
+
+[James Holden]
+Good point. Even if brute force is infeasible, the SOC 2 auditor will ask whether we log failed authentication attempts. Failed session lookups count as failed auth.
+
+[Mike Torres]
+I do log those — `logger.info("session.lookup_failed", token_prefix=..., reason="expired|missing")` in the middleware. It's an INFO level log, not WARNING, since expired sessions are expected behavior. But the log exists and is queryable. I can bump it to WARNING if we want it to trigger alerts.
+
+[James Holden]
+INFO is fine. As long as it's in the structured logs and queryable, we're covered.
+
+---
+
+SLACK DM — Sarah Kim → Mike Torres — 2:30 PM
+
+[Sarah Kim]
+Hey, good PR. I know I was pushing JWT pretty hard but your revocation analysis changed my thinking. Redis sessions are the right call for our use case.
+
+[Mike Torres]
+Thanks. Honestly, JWT would have been fine for a consumer product. It's the enterprise revocation requirement that tips the balance. Your JWT analysis was really thorough — I learned a lot from it even though we're going a different direction.
+
+[Sarah Kim]
+Ha, well, at least the analysis is documented in ADR-017 for posterity. The trade-off table comparing JWT, Redis sessions, and database sessions was useful to write — helped me think through the edge cases. Should I update the ADR status to "decided"?
+
+[Mike Torres]
+Let's wait until the PR is merged and deployed. I want to make sure it works in staging before we formalize the decision.
+
+[Sarah Kim]
+Makes sense. I'll update it after staging validation.
+
+[Mike Torres]
+One thing I've been thinking about — the duplicate token detection. If a user has a flaky network connection and their browser retries a request with the pre-rotation token, we'd revoke all their sessions. That seems harsh for a legitimate retry.
+
+[Sarah Kim]
+Yeah, that's the classic trade-off with aggressive rotation. At DataScale, David mentioned they didn't have duplicate detection at all and still got by. We could add a grace period — keep the old token valid for 5 seconds after rotation in addition to the `:rotated` tracking. That way legitimate retries work, but an attacker who tries to use a stolen token minutes later still gets caught.
+
+[Mike Torres]
+That's a good idea. Let me think about it. Might add it in the Phase 2 follow-up rather than holding up this PR. For now, the 5-minute `:rotated` window gives us detection without immediate user impact — we only revoke all sessions if the old token is actually used by a *different* request, not a retry of the same request (the middleware deduplicates by request ID).
+
+[Sarah Kim]
+Oh right, I missed the request ID dedup in the middleware. That handles the retry case then. Nice.
+
+[Mike Torres]
+Yeah, line 91 — `if request_id == session_data.get('last_request_id'): skip rotation`. Prevents double-rotation on retries and idempotent requests.
+
+[Sarah Kim]
+Smart. Alright, looks like the PR is in good shape. Good luck with staging tomorrow.
+
+[Mike Torres]
+Thanks!
+
+---
+
+GITHUB — PR #1871 — CI STATUS UPDATE — 2:55 PM
+
+All checks passed (re-run after commit f8c29a1):
+- pytest: 225 tests passed (187 existing + 38 new) — 48.2s
+- ruff lint: clean (0 errors, 0 warnings)
+- mypy type check: clean (0 errors)
+- coverage: 89.2% (+2.1% from baseline)
+- dependency audit: no new vulnerabilities
+- docker build: success (image size: 412MB, +2MB from redis dependency)
+
+---
+
+GITHUB — PR #1871 — MERGE
+
+Merged by Mike Torres at 3:15 PM PT
+Merge commit: a4e2f71
+Branch `feature/redis-session-store` deleted
+
+CI Summary:
+- 225 tests passed (187 existing + 38 new)
+- Lint: clean
+- Type check: clean
+- Coverage: 89.2% (+2.1%)
+
+---
+
+SLACK — #deploys — 3:20 PM
+
+[Mike Torres]
+PR #1871 merged — Redis session store. Will deploy to staging tomorrow morning. Feature flag `redis_sessions` controls the rollout. Default: OFF. I'll enable it on staging after verifying the ElastiCache connectivity.
+
+Deploy plan for staging:
+1. Deploy the new build (includes the middleware but flag is OFF)
+2. Verify ElastiCache connectivity from ECS tasks (I have a health check endpoint)
+3. Enable the feature flag via LaunchDarkly
+4. Monitor error rates and session creation latency for 30 minutes
+5. Run through login/logout/session-expiry flows manually
+6. If clean, leave it on staging for 48 hours before we talk about prod rollout
+
+[Carlos Rivera]
+ElastiCache security groups are configured to allow connections from the staging ECS tasks. You're good to go when ready. I also set up a CloudWatch dashboard for the new cluster — CPU, memory, connections, cache hits/misses. Dashboard name is `SessionRedis-Staging`. I'll share the link in #infrastructure.
+
+[Mike Torres]
+Awesome, that'll be helpful for monitoring. Thanks Carlos.
+
+[Ben Crawford]
+I added the `session-redis-url` secret to the staging ECS task definition in Terraform. PR #412 in the infra repo. It'll be applied on the next Terraform plan, which runs at 4 PM daily. Or I can trigger it manually.
+
+[Mike Torres]
+Let's wait for the daily plan. No rush since we're deploying tomorrow morning anyway.
+
+[Ben Crawford]
+Sounds good.
+
+[Priya Chandrasekaran]
+Great progress. Let's plan to review staging behavior in Thursday's standup. Mike, can you have a summary of staging metrics (latency, error rate, fallback frequency) ready by then?
+
+[Mike Torres]
+Will do. I'll pull the numbers from CloudWatch and the structured logs. Should have a clear picture after 48 hours on staging.
+
+[Priya Chandrasekaran]
+Thanks. Good work on this one, team. This has been a long time coming.
+
+[Anika Patel]
+I'll block out time Thursday afternoon to run the onboarding flow on staging. I'll post results in #qa.
+
+[Priya Chandrasekaran]
+Great, thanks Anika.
+
+[Lin Zhang]
+Quick FYI for anyone tracking — the mobile team (cc @nwilliams) confirmed the React Native WebView handles the cookie change transparently. No mobile release needed. They tested locally with the `rsess_` prefixed tokens and everything works.
+
+[Mike Torres]
+Great, thanks for following up on that Lin.
+
+---
+
+JIRA — SUP-4398 — Comment — 3:45 PM
+
+[Mike Torres]
+The Redis session store has been merged (PR #1871). Deploying to staging tomorrow. This should resolve the session timeout issues reported in this ticket and related tickets (SUP-4402, SUP-4421, SUP-4423). Session lookups will no longer compete with application queries for the PostgreSQL connection pool. Will update this ticket after staging validation and prod rollout.
+
+---
+
+SLACK — #engineering — 4:10 PM
+
+[Tomasz Wojcik]
+Unrelated to the session PR, but while we're talking about Redis — does anyone know the current memory usage on the rate limiter Redis instance? I was looking at adding request-level caching for the tenant config lookups and wanted to make sure we have headroom.
+
+[Carlos Rivera]
+Rate limiter Redis is at 47MB out of 3GB on the t3.medium. Plenty of headroom. But I'd still recommend a separate instance for request caching — keep the blast radius small. Happy to provision another ElastiCache cluster if you need it.
+
+[Tomasz Wojcik]
+Makes sense. I'll put together a short proposal. Not urgent, just been on my mind since the tenant config lookups are the second-hottest PostgreSQL query after session lookups — and Mike just solved the session problem.
+
+[Mike Torres]
+Ha, happy to consult if you want to chat through the design. The Redis pool setup in this PR is pretty reusable.
+
+[Tomasz Wojcik]
+Will do, thanks.
+
+---
+
+CALENDAR — Mike Torres — 4:30 PM
+
+Created event: "Redis Session Store — Staging Deploy"
+Date: Thursday 2025-06-12, 9:00 AM - 10:00 AM PT
+Attendees: Mike Torres, Carlos Rivera
+Location: Virtual (Zoom)
+Notes: Deploy new build to staging, verify ElastiCache connectivity, enable feature flag, monitor for 30 min.
+
+---
+
+END OF EPISODE

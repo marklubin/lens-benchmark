@@ -1,0 +1,533 @@
+RIVULET ENGINEERING — WEEKLY ARCHITECTURE REVIEW
+Date: 2025-06-09 (Monday)
+Time: 2:00–3:45 PM PT
+Location: Conference Room B + Zoom (hybrid)
+Facilitator: Priya Chandrasekaran
+Note-taker: Anika Patel
+Attendees (in-person): Sarah Kim, Mike Torres, David Okafor, Priya Chandrasekaran, James Holden, Anika Patel
+Attendees (remote): Lin Zhang, Rachel Fernandez, Carlos Rivera, Tomás Herrera, Nadia Volkov
+
+Agenda:
+1. Export pipeline review (Sarah) — 20 min
+2. WebSocket migration update (Rachel) — 15 min
+3. Auth architecture update (Sarah/Mike) — 15 min
+4. CI/CD pipeline improvements (Carlos) — 15 min
+5. Multi-workspace scoping discussion — 20 min
+
+Pre-read materials:
+- PR #1863 — Export pipeline v2 (Sarah)
+- ADR-017 v3 — Auth architecture comparison (Sarah/Mike)
+- CI profiling report — Build time analysis (Carlos)
+- RFC-042 — Multi-workspace data model (David, draft)
+
+---
+
+ITEM 1: EXPORT PIPELINE REVIEW (2:00–2:22 PM)
+
+[Priya Chandrasekaran — 2:00 PM]
+Alright, let's get started. We've got a packed agenda today so I want to keep us on track. Sarah, you're up first with the export pipeline.
+
+[Sarah Kim — 2:01 PM]
+Thanks Priya. Export pipeline v2 is feature-complete. PR #1863 has the full implementation — it's a big PR, about 2,400 lines across 18 files, but most of that is test coverage. Quick rundown of what shipped:
+
+- Streaming S3 multipart upload — tested up to 6GB exports with flat memory usage (~190MB peak)
+- Retry logic: exponential backoff with jitter, max 3 retries per chunk, dead-letter queue for permanently failed exports
+- Progress tracking via WebSocket push (thanks Rachel for the WS infrastructure)
+- Per-tenant size limits: Free tier 100MB, Pro tier 1GB, Enterprise tier 10GB
+- Email notification on completion with a signed download link (24-hour expiry)
+- CSV format for v1, with a clean interface for adding Parquet later
+
+The worker runs as a separate ECS task with its own autoscaling group. It scales based on the export job queue depth — 1 worker per 5 pending jobs, max 10 workers.
+
+[Tomás Herrera — 2:04 PM]
+Sarah, quick clarification on the multipart upload — what chunk size are you using for the S3 parts? And are you doing the checksums on each part or just the final object?
+
+[Sarah Kim — 2:04 PM]
+Good question. Chunk size is 8MB, which is the sweet spot between memory usage and upload parallelism. Each part gets a SHA-256 checksum via the `ChecksumSHA256` parameter in the `upload_part` call — S3 validates it server-side. The final `complete_multipart_upload` also gets a composite checksum. So we get end-to-end integrity verification.
+
+[Tomás Herrera — 2:05 PM]
+Nice. That's cleaner than the approach I used on the data import pipeline. I might borrow that pattern.
+
+[David Okafor — 2:05 PM]
+I reviewed the PR. The streaming implementation is solid. One question about the signed download links — are they tenant-scoped? Meaning, can a user from Tenant A use a download link generated for Tenant B?
+
+[Sarah Kim — 2:06 PM]
+No. The signed URL is generated with the tenant_id in the path prefix, and the S3 bucket policy requires the IAM role to match the tenant. Even if someone gets the URL, the IAM validation would fail. Defense in depth.
+
+The S3 key structure is: `exports/{tenant_id}/{export_id}/{filename}.csv`. The bucket policy restricts the `exports/{tenant_id}/*` prefix to the IAM role associated with that tenant. So even with a valid presigned URL, the request would fail at the IAM level if the calling role doesn't match.
+
+[Nadia Volkov — 2:07 PM]
+Do we log when download links are generated and when they're actually used? For the audit trail.
+
+[Sarah Kim — 2:07 PM]
+Yes — link generation is logged in the `export_events` table with the user_id, tenant_id, export_id, and timestamp. The download itself is tracked via S3 access logs, which we ship to CloudWatch. I added a CloudWatch Insights query in the runbook for correlating the two.
+
+[Priya Chandrasekaran — 2:07 PM]
+Good. What's the rollout plan?
+
+[Sarah Kim — 2:08 PM]
+I want to do a staged rollout. First, deploy to staging and have the QA team run the test matrix — small exports (1MB), medium (100MB), large (2GB), and an edge case with empty datasets. Then deploy to production behind a feature flag for internal tenants only. After 48 hours of monitoring, open it to Pro and Enterprise tiers. Free tier gets it the following week.
+
+I've already drafted the test matrix. The edge cases include: empty dataset (0 rows), single row, dataset with NULL values in every column, dataset with Unicode characters in column names, and a dataset that hits exactly the per-tier size limit.
+
+[Mike Torres — 2:09 PM]
+What happens when a Free tier user tries to export something that's 150MB? Do they get an error at the start or does it fail partway through?
+
+[Sarah Kim — 2:09 PM]
+It checks the estimated size before starting the export. The estimate is based on the row count and average row size from `pg_stats`. If the estimate exceeds the tier limit, the user gets a 413 with a clear message: "Export size (~150MB) exceeds your plan limit (100MB). Upgrade to Pro for up to 1GB exports." If the estimate is under but the actual export goes over — which can happen if the stats are stale — it aborts the export and returns a similar error. No partial files left behind.
+
+[James Holden — 2:10 PM]
+What about the interaction with data retention? We discussed this last week.
+
+[Sarah Kim — 2:10 PM]
+Added a section to the export docs — export files have a 30-day lifecycle policy independent of source data retention. Also added a warning banner in the UI: "Export files are available for 30 days." It's documented in the API docs too.
+
+[Anika Patel — 2:11 PM]
+Is the 30-day lifecycle managed by an S3 lifecycle rule, or do we have our own cleanup job?
+
+[Sarah Kim — 2:11 PM]
+S3 lifecycle rule. It's the simplest approach and it's infrastructure-level — no code to maintain, no cron job to monitor. The rule is defined in the Terraform config for the exports bucket. Objects in the `exports/` prefix get `Expiration: Days=30`. S3 handles the rest.
+
+[Priya Chandrasekaran — 2:12 PM]
+Looks good. Let's get it on staging this week and target production next sprint. Sarah, can you coordinate with QA on the test matrix by Wednesday?
+
+[Sarah Kim — 2:12 PM]
+Already sent it to them this morning. They said they can start Thursday.
+
+[Priya Chandrasekaran — 2:13 PM]
+Great. Moving on.
+
+---
+
+ITEM 2: WEBSOCKET MIGRATION UPDATE (2:22–2:38 PM)
+
+[Rachel Fernandez — 2:22 PM]
+WebSocket migration is making progress but I hit a couple snags. Let me update.
+
+Good news: the core WebSocket connection is working end-to-end in staging. Clients connect, subscribe to channels, receive real-time updates. The export progress tracking that Sarah mentioned is the first consumer and it works great.
+
+The ALB issue I mentioned last week — Carlos and I dug into it. The problem was that our ALB was configured with the default idle timeout of 60 seconds, which was killing WebSocket connections during quiet periods. We bumped it to 3600 seconds and the drops stopped. Also switched from round-robin to least-connections for the WS target group.
+
+[Tomás Herrera — 2:25 PM]
+Rachel, what library are you using for the WS server? And are you handling the ping/pong frames for keepalive?
+
+[Rachel Fernandez — 2:25 PM]
+We're using `websockets` (the Python library) behind uvicorn. For keepalive, the server sends a ping frame every 30 seconds. If it doesn't get a pong within 10 seconds, it considers the connection dead and cleans up. On the client side, the JS reconnection logic uses exponential backoff — 1s, 2s, 4s, 8s, max 30s between attempts.
+
+[Lin Zhang — 2:26 PM]
+The client-side reconnection is already in the frontend PR I put up last week — `useWebSocket` hook with automatic reconnect and an `onReconnect` callback so components can refresh their state after a dropped connection.
+
+[Rachel Fernandez — 2:27 PM]
+Yeah, Lin's hook has been great for the frontend integration. We tested the reconnection flow by killing WS processes on staging and the clients reconnected within 2-3 seconds consistently.
+
+The snags:
+1. **Connection auth** — currently the WS handshake uses the session cookie for auth, same as HTTP requests. This works but it means the WS connection lifetime is tied to the session lifetime. If the session expires while a WS connection is open, we need to either (a) close the connection and force re-auth, or (b) extend the session. Right now we do nothing and the connection stays open but unauthenticated. That's a security gap.
+
+2. **Scale concern** — each WS connection holds a server-side state (the socket, the subscriptions). At 500 concurrent users with an average of 2 WS connections each, that's 1000 persistent connections across our 3 API servers. Current memory overhead is about 2KB per connection, so ~2MB total. That's fine now but if we get to 5000 users it's 10K connections and 20MB. Still manageable but we'd want a dedicated WS tier at that point.
+
+[Nadia Volkov — 2:29 PM]
+On the scale concern — are the subscriptions stored in memory or in Redis? If a WS server crashes, do clients need to re-subscribe?
+
+[Rachel Fernandez — 2:29 PM]
+In memory currently. If the server crashes, clients reconnect (Lin's hook handles that) and re-subscribe. The subscribe message is idempotent. For pub/sub between servers, I'm using Redis PUB/SUB so that a message published by one server reaches all connected clients regardless of which server they're connected to. But the subscription state itself is per-process.
+
+[Mike Torres — 2:30 PM]
+Point 1 is interesting. It ties back to the auth architecture discussion. If we go with JWT, the WS handshake would validate a token and the connection would be independent of any server-side session. The token could expire and the connection would still be valid (or not — your choice). If we go with server-side sessions, we'd want to keep the session alive as long as the WS connection is alive, which means the WS server needs to be able to touch the session store.
+
+[Rachel Fernandez — 2:31 PM]
+Yeah, I was thinking about that. For now I'm going to implement the "close and re-auth" approach — when the session nears expiry, send a WS message telling the client to re-authenticate. That works regardless of the session backend.
+
+The message format will be something like:
+
+```json
+{
+  "type": "auth_expiring",
+  "expires_in_seconds": 60,
+  "action": "re_authenticate"
+}
+```
+
+The client gets 60 seconds to refresh its auth and re-establish the WS connection. If it doesn't, the server closes the connection with close code 4001 (auth expired).
+
+[Sarah Kim — 2:32 PM]
+Smart. Keep it backend-agnostic until the ADR is resolved.
+
+[Carlos Rivera — 2:33 PM]
+On the infrastructure side, I've set up a separate target group for WS connections on port 8001. The API servers run both HTTP (8000) and WS (8001) but the ALB routes them separately. This gives us the option to split WS to dedicated instances later without changing the client.
+
+The ALB listener rules are:
+- `/ws/*` → target group `rivulet-ws-tg` (port 8001, sticky sessions disabled)
+- `/*` → target group `rivulet-api-tg` (port 8000)
+
+Health checks for the WS target group hit a dedicated `/ws/health` endpoint that verifies the WS server is accepting connections.
+
+[Priya Chandrasekaran — 2:34 PM]
+Good forward-thinking. Rachel, what's left for the WS migration?
+
+[Rachel Fernandez — 2:35 PM]
+Three more consumers to migrate: real-time dashboard updates, notification inbox, and the collaborative editing presence indicators. Dashboard updates are next — probably 2-3 days. The notification inbox migration depends on the notification service rewrite which is still in progress.
+
+[James Holden — 2:36 PM]
+Who's doing the notification service rewrite? I thought that was Tomás.
+
+[Tomás Herrera — 2:36 PM]
+Yeah, that's me. I'm about a week out from having the core service ready. The notification routing logic is done — it's the delivery providers (email via SES, in-app via WS, push via FCM) that still need work. I'll sync with Rachel on the WS delivery path once the interface stabilizes.
+
+[Priya Chandrasekaran — 2:37 PM]
+OK, sounds like WS migration is on track. Let's keep it moving. Next up, auth.
+
+---
+
+ITEM 3: AUTH ARCHITECTURE UPDATE (2:38–2:55 PM)
+
+[Priya Chandrasekaran — 2:38 PM]
+OK, auth update. Sarah and Mike, where are we on ADR-017?
+
+[Sarah Kim — 2:39 PM]
+I've refined the JWT proposal based on Mike's feedback. The main change is I'm now proposing 10-minute access tokens instead of 15, with the refresh token stored in Redis (not PostgreSQL) so the refresh endpoint doesn't hit the main database. This addresses the connection pool concern for the refresh flow.
+
+The access token payload would look like:
+
+```json
+{
+  "sub": "user_abc123",
+  "tid": "tenant_xyz",
+  "role": "admin",
+  "exp": 1718000000,
+  "iat": 1717999400,
+  "jti": "unique-token-id"
+}
+```
+
+The `jti` is stored in a Redis-backed revocation set. On each request, the middleware checks if the `jti` is in the revocation set. If it is, the token is rejected. The revocation set entries have a TTL matching the token expiry, so they auto-clean.
+
+But honestly, after Mike's revocation analysis, I think there's merit to exploring a pure session-token approach. Mike, did you get the benchmark done?
+
+[Mike Torres — 2:40 PM]
+I did. David and I looked at this over the weekend. Short version: a dedicated session store with token-based lookup solves all four of our requirements without the JWT revocation complexity.
+
+I'm not going to do a full presentation because we're short on time, but here's the gist: What about session tokens in Redis? You issue an opaque session token — just a random string, say 256 bits — and store the session data in Redis keyed by that token. SET with an EXPIRE for automatic TTL-based cleanup. Lookup is GET — single key lookup, sub-millisecond. Revocation is DEL — delete the key, session is immediately invalid.
+
+The session data structure in Redis:
+
+```
+Key:   session:{token_hash}
+Value: {"user_id": "abc123", "tenant_id": "xyz", "role": "admin", "created_at": "2025-06-09T14:00:00Z"}
+TTL:   3600 (1 hour)
+```
+
+I hash the token before using it as the key so that even if someone dumps the Redis keyspace, they can't use the keys as session tokens.
+
+[Sarah Kim — 2:42 PM]
+That handles revocation natively. No blacklist, no dual-system problem.
+
+[Mike Torres — 2:42 PM]
+Exactly. And the TTL handles cleanup. No cron job, no timezone bugs. Redis does it internally. When the TTL expires, the key vanishes. The session is gone.
+
+Here are the benchmark numbers from Saturday — I spun up a single Redis 7.2 instance (t3.medium equivalent) and ran a load test:
+- SET (create session): P50 0.08ms, P99 0.22ms
+- GET (lookup session): P50 0.06ms, P99 0.18ms
+- DEL (revoke session): P50 0.05ms, P99 0.15ms
+- Throughput: 85,000 ops/sec sustained
+
+For comparison, our PostgreSQL session lookup was P50 2.1ms, P99 47ms. Redis is 35x faster at the median and 260x faster at P99. And that's on a single instance — Redis Cluster scales horizontally if we ever need it.
+
+[David Okafor — 2:44 PM]
+I can add some context from the database side. The PostgreSQL session table has about 120,000 rows right now, and the lookup query is a simple primary key select. But the P99 spikes happen when the connection pool is saturated — we've got 20 connections in the pool and during peak traffic every connection is busy serving API queries. The session lookup has to wait in the queue. Moving sessions to Redis eliminates that contention entirely because it's a separate connection pool to a separate store.
+
+[Priya Chandrasekaran — 2:45 PM]
+Those numbers are compelling. Sarah, thoughts?
+
+[Sarah Kim — 2:46 PM]
+The numbers are great. My concern with Redis is operational — it's another piece of infrastructure to manage. We don't run Redis in production today. We'd need to set up the cluster, monitoring, backups, failover... Carlos, what's the effort there?
+
+[Carlos Rivera — 2:47 PM]
+Actually, we DO run Redis — ElastiCache, us-east-1. Mike's rate limiter uses it. The rate limiter Redis is a single-node r6g.medium. For sessions, I'd want a multi-AZ cluster with automatic failover — probably a 3-node setup with 1 primary and 2 replicas. ElastiCache makes that pretty straightforward. I could have it provisioned in a day.
+
+The Terraform module for ElastiCache is already set up — I'd just add a second replication group for sessions. The monitoring is also already in place — we've got CloudWatch alarms on memory usage, CPU, replication lag, and eviction count for the rate limiter Redis. I'd clone those for the session cluster.
+
+Cost-wise, three r6g.medium nodes in us-east-1 run about $0.134/hr each, so roughly $290/month total for the session cluster. That's less than what we spend on the PostgreSQL connection pool overhead during peak traffic.
+
+[Sarah Kim — 2:48 PM]
+Oh, I forgot about the rate limiter Redis. OK, so we already have the operational muscle for Redis. That addresses my concern.
+
+[Mike Torres — 2:48 PM]
+One more thing — token rotation. I'm proposing that every time the session is validated, we issue a new session token and invalidate the old one. This is called token rotation. If someone intercepts a token, it's only valid until the next request from the legitimate user. The old token gets DEL'd and the new one gets SET with a fresh TTL.
+
+The flow looks like:
+
+1. Client sends request with token A
+2. Server validates token A (GET session:{hash(A)})
+3. Server generates new token B
+4. Server creates session:{hash(B)} with same session data and fresh TTL
+5. Server deletes session:{hash(A)}
+6. Server returns response with new token B in the Set-Cookie header
+
+This is atomic via a Redis MULTI/EXEC transaction so there's no window where both tokens are valid or neither is.
+
+[David Okafor — 2:49 PM]
+That's what we did at DataScale. It makes session theft much harder — the attacker and the legitimate user would race, and the first one to use the token invalidates it for the other. If the server sees an already-rotated token, it can flag the session as potentially compromised and force re-authentication.
+
+[Nadia Volkov — 2:50 PM]
+Does token rotation play nicely with concurrent requests? If I have two browser tabs open and they both send a request at the same time with token A, one of them would invalidate it before the other completes.
+
+[Mike Torres — 2:50 PM]
+Good catch. The standard approach is a grace period — when you rotate from A to B, you keep A valid for an additional 5-10 seconds to handle in-flight requests. After the grace period, A is hard-deleted. I'll spec that out in the ADR.
+
+[Priya Chandrasekaran — 2:51 PM]
+OK. We're almost out of time on this item. It sounds like we have two well-understood options. Sarah, Mike — is there a path to convergence here, or do we need to formally vote?
+
+[Mike Torres — 2:51 PM]
+I think the tradeoffs are clear. JWT is more elegant architecturally but the revocation problem is real for our enterprise use case. Redis sessions are simpler operationally but require a dedicated store.
+
+[Sarah Kim — 2:52 PM]
+I agree the tradeoffs are clear. I'm not going to die on the JWT hill — Mike's revocation analysis is solid. Let's think about it and decide.
+
+[Priya Chandrasekaran — 2:53 PM]
+Fair enough. Let's both update ADR-017 with the final versions of each proposal and plan to decide this week. I'd like to have this settled before Sprint 25 planning on Monday. Moving on.
+
+---
+
+ITEM 4: CI/CD PIPELINE IMPROVEMENTS (2:55–3:12 PM)
+
+[Carlos Rivera — 2:55 PM]
+Build times. We're at 14 minutes for a full CI run. I've been profiling the pipeline and found three main bottlenecks:
+
+1. **Docker layer caching** — we're not caching intermediate layers between runs. Every build starts from scratch. Fix: use BuildKit with registry-based caching. Estimated savings: 4 minutes.
+
+2. **Test parallelization** — we're running all 847 tests in a single pytest process. Fix: split into 4 parallel shards using pytest-xdist. Estimated savings: 3 minutes.
+
+3. **Dependency installation** — `pip install` runs on every build because the virtual environment isn't cached. Fix: cache the venv directory keyed on requirements.txt hash. Estimated savings: 2 minutes.
+
+Total estimated reduction: 14 minutes → 5 minutes. I've got PRs for all three — #1860 (Docker caching), #1861 (test sharding), #1862 (dependency caching).
+
+Let me walk through each one briefly.
+
+For the Docker caching, the key change is adding `--cache-from` and `--cache-to` flags to our `docker build` command:
+
+```
+docker buildx build \
+  --cache-from type=registry,ref=our-ecr/rivulet:cache \
+  --cache-to type=registry,ref=our-ecr/rivulet:cache,mode=max \
+  -t our-ecr/rivulet:$COMMIT_SHA .
+```
+
+The `mode=max` ensures all layers are cached, not just the final image layers. This means even if we change the application code, the dependency installation layers are still cached.
+
+[Mike Torres — 2:58 PM]
+Nice. The test sharding — does it handle test database fixtures correctly? We have some tests that share database state.
+
+[Carlos Rivera — 2:59 PM]
+Good question. I'm using pytest-xdist with `--dist loadgroup`. Tests in the same file run in the same worker, so file-level database fixtures are preserved. Cross-file state sharing doesn't work, but we shouldn't have that anyway. I found 3 tests that were accidentally depending on cross-file state and fixed them in #1861.
+
+Specifically, `test_dashboard_sharing.py` was depending on a user created in `test_user_management.py`, `test_export_cleanup.py` was reading export records created by `test_export_creation.py`, and `test_notification_prefs.py` was depending on a tenant created in `test_tenant_setup.py`. All three now create their own fixtures.
+
+[Tomás Herrera — 3:00 PM]
+Were those tests passing before by accident? Like, they relied on test execution order?
+
+[Carlos Rivera — 3:00 PM]
+Exactly. pytest happens to run files in alphabetical order by default, so `test_tenant_setup.py` always ran before `test_notification_prefs.py`. But with xdist, the execution order is nondeterministic. That's actually a benefit — it surfaced these hidden dependencies.
+
+[James Holden — 3:00 PM]
+What about flaky tests? If we're running in parallel, flaky tests become harder to debug because the failure might be timing-dependent.
+
+[Carlos Rivera — 3:01 PM]
+I added pytest-rerunfailures with `--reruns 2`. Flaky tests get retried twice before failing. Not ideal — we should fix flaky tests — but it prevents them from blocking the pipeline.
+
+I also added a flaky test report to the CI output. After each run, it lists any tests that passed on retry. Right now we have 7 tests that have been flaky in the last 30 days. I'll file tickets for each of them.
+
+[Nadia Volkov — 3:02 PM]
+For the dependency caching — are you caching the entire venv or just the pip download cache?
+
+[Carlos Rivera — 3:02 PM]
+The entire venv. The cache key is the SHA-256 of `requirements.txt` + `requirements-dev.txt` + the Python version. If any of those change, the cache misses and we do a full install. Otherwise, we restore the cached venv and skip the install entirely. In practice, we change dependencies maybe once a sprint, so 90%+ of builds will hit the cache.
+
+[Priya Chandrasekaran — 3:03 PM]
+Good. Let's review and merge those this week. 5-minute builds would be a big quality-of-life improvement. Carlos, can you tag Tomás and Nadia as reviewers on those PRs?
+
+[Carlos Rivera — 3:03 PM]
+Already done. Tomás has #1860, Nadia has #1862, and James has #1861.
+
+---
+
+ITEM 5: MULTI-WORKSPACE SCOPING (3:12–3:42 PM)
+
+[Priya Chandrasekaran — 3:12 PM]
+Last item. Product confirmed multi-workspace is the top Q3 priority. The Meridian Health deal depends on it — they need separate workspaces for each hospital by August. I want to start the technical scoping now.
+
+The basic requirement: a single tenant (Meridian Health) can have multiple workspaces (Hospital A, Hospital B, etc.). Each workspace has:
+- Its own set of data sources and datasets
+- Its own dashboards and reports
+- Its own user permissions (a user can have admin in Workspace A but viewer in Workspace B)
+- Data isolation — queries in Workspace A cannot see Workspace B's data
+
+I circulated RFC-042 last week with the product requirements. David, I know you've been looking at the data model — can you walk us through the impact?
+
+[David Okafor — 3:15 PM]
+This is a significant data model change. Every major table needs a workspace_id column. Let me list the impact:
+- `events` table — 48M rows, needs workspace_id + index rebuild
+- `dashboards` — needs workspace_id
+- `data_sources` — needs workspace_id
+- `export_jobs` — needs workspace_id (Sarah, your export pipeline will need this)
+- `permissions` — needs to become workspace-scoped
+- All API endpoints need workspace context (either URL prefix or header)
+
+The events table migration is the scary one. 48M rows, adding a non-nullable column with a foreign key. We'd need to do it as a multi-step migration: add nullable column, backfill, add NOT NULL constraint, add index. Probably 2-3 hours of migration time on production.
+
+I've sketched out the migration sequence:
+
+Step 1 (instant): `ALTER TABLE events ADD COLUMN workspace_id UUID;` — nullable, no default, no lock
+Step 2 (hours): Batched UPDATE in a background job — 10,000 rows per batch, 100ms sleep between batches. All existing rows get the default workspace ID for their tenant.
+Step 3 (seconds): `ALTER TABLE events ALTER COLUMN workspace_id SET NOT NULL;` with `NOT VALID` — deferred validation
+Step 4 (minutes): `ALTER TABLE events VALIDATE CONSTRAINT events_workspace_id_not_null;` — full scan, but no lock
+Step 5 (minutes): `CREATE INDEX CONCURRENTLY idx_events_workspace_id ON events (workspace_id);`
+
+[Sarah Kim — 3:18 PM]
+Can we do the migration online with zero downtime? pg_repack or something similar?
+
+[David Okafor — 3:19 PM]
+For the column addition, yes — PostgreSQL can add a nullable column without locking. The backfill can run as a batched UPDATE in a background job. The NOT NULL constraint needs a full table scan to validate but with the `NOT VALID` option we can defer that. The index creation can use `CONCURRENTLY`. So yes, zero downtime is achievable but it's a multi-day rollout.
+
+The risk is the backfill step. At 10K rows per batch with a 100ms pause, 48M rows takes about 80 minutes. During that time, we need the application to handle rows that have workspace_id and rows that don't. The API layer would need to coalesce NULL workspace_id to the default workspace for the tenant.
+
+[Tomás Herrera — 3:20 PM]
+Have you considered doing the backfill at the read layer instead? Like, a database view that returns the default workspace_id for NULL rows? That way the application doesn't need the coalescing logic.
+
+[David Okafor — 3:20 PM]
+I considered that but views add a query planning overhead. For 48M rows, I'd rather do the backfill once and be done. The coalescing logic is a single COALESCE in the query, and we'd remove it once the backfill is complete.
+
+[Lin Zhang — 3:21 PM]
+The frontend impact is also significant. Every page that shows data needs to be workspace-aware. The sidebar navigation needs a workspace switcher. The URL structure changes — probably `/workspaces/{id}/dashboards` instead of just `/dashboards`.
+
+The workspace switcher would be a dropdown in the top nav, next to the user avatar. When you switch workspaces, the entire page context reloads — new dashboards, new data sources, new permissions. I'd implement it as a React context provider at the app root, and all data-fetching hooks would include the workspace_id from context.
+
+[Anika Patel — 3:22 PM]
+The onboarding flow I just rewrote needs to handle workspace creation too. Right now it creates a tenant and you're done. With workspaces, we'd need a step to create the first workspace, or auto-create a default workspace.
+
+[Priya Chandrasekaran — 3:23 PM]
+I think the default workspace approach is right. When a new tenant signs up, we auto-create a "Default" workspace. They can create additional workspaces later. This way the migration is also simpler — all existing data goes into the default workspace.
+
+[Nadia Volkov — 3:24 PM]
+For the data isolation — are we doing row-level security in PostgreSQL, or is it purely application-enforced?
+
+[David Okafor — 3:24 PM]
+Application-enforced for now. Every query includes a `WHERE workspace_id = :workspace_id` clause. We already do this for tenant_id, so it's the same pattern — just one more filter. Row-level security is an option for the future but it adds complexity to the migration and to debugging queries.
+
+[Mike Torres — 3:25 PM]
+What about the session model? Currently a session is tenant-scoped. With workspaces, does a session need to carry workspace context? Like, when I'm logged in, am I "in" a specific workspace?
+
+[Rachel Fernandez — 3:26 PM]
+I'd argue the session is still tenant-scoped. The workspace is a client-side context — you switch workspaces in the UI, and the client sends the workspace_id with each request. The server validates that the user has permission in that workspace but the session itself is just "this user is authenticated for this tenant."
+
+[Mike Torres — 3:27 PM]
+That works. The session stores user_id and tenant_id. The workspace context is per-request, not per-session. Keeps the auth layer clean.
+
+[James Holden — 3:27 PM]
+What about API keys? Some of our Enterprise customers use API keys for automation. Are API keys workspace-scoped or tenant-scoped?
+
+[Priya Chandrasekaran — 3:28 PM]
+Good question. I'd say workspace-scoped. An API key should only have access to one workspace. If you need to automate across workspaces, you create separate keys. That's more secure and it's consistent with how our competitors handle it.
+
+[Priya Chandrasekaran — 3:28 PM]
+Good. So the auth changes for multi-workspace are minimal — just adding workspace-level permission checks on top of the existing tenant-level auth. That's a separate concern from the session backend discussion.
+
+Let me summarize the scoping:
+- **Database**: Multi-step migration, 2-3 weeks including the events table backfill
+- **Backend API**: Workspace-aware endpoints, permission middleware, ~40 endpoints affected
+- **Frontend**: Workspace switcher, URL restructure, workspace-scoped views
+- **Infrastructure**: No new infrastructure needed (workspace is a logical partition, not physical)
+
+Estimated total effort: 6-8 weeks. Which means we need to start Sprint 25 at the latest.
+
+[David Okafor — 3:30 PM]
+I'll start drafting the database migration plan this week. I want to validate the zero-downtime approach on staging first.
+
+[Lin Zhang — 3:31 PM]
+I'll start on the frontend workspace context provider and the URL restructure. I can have a proof-of-concept by end of next week.
+
+[Priya Chandrasekaran — 3:31 PM]
+Perfect. Let's make multi-workspace the primary focus for Sprint 25 and 26. I'll work with product on the phased delivery plan.
+
+[Anika Patel — 3:32 PM]
+Quick question — should I hold off on any more onboarding flow changes until the workspace model is finalized? I don't want to build something that gets reworked in two weeks.
+
+[Priya Chandrasekaran — 3:32 PM]
+Good instinct. Yes, freeze the onboarding flow after the current sprint. We'll integrate workspace creation into onboarding as part of the multi-workspace work.
+
+---
+
+ACTION ITEMS (captured by Anika Patel)
+
+1. Sarah Kim — Coordinate with QA on export pipeline test matrix (by Wed 6/11)
+2. Sarah Kim — Deploy export pipeline v2 to staging (by Fri 6/13)
+3. Rachel Fernandez — Implement WS "close and re-auth" flow for expiring sessions
+4. Rachel Fernandez — Migrate dashboard real-time updates to WebSocket (2-3 days)
+5. Tomás Herrera — Sync with Rachel on notification service WS delivery path
+6. Sarah Kim & Mike Torres — Update ADR-017 with final proposals (by Wed 6/11)
+7. Priya Chandrasekaran — Auth decision by Wednesday for Sprint 25 planning
+8. Carlos Rivera — Merge CI/CD PRs #1860, #1861, #1862 after reviews
+9. Carlos Rivera — File tickets for 7 flaky tests
+10. David Okafor — Draft database migration plan for multi-workspace (by Fri 6/13)
+11. David Okafor — Validate zero-downtime migration on staging
+12. Lin Zhang — Start frontend workspace context provider POC
+13. Anika Patel — Freeze onboarding flow changes after current sprint
+14. Priya Chandrasekaran — Work with product on multi-workspace phased delivery plan
+
+---
+
+SLACK THREAD — #arch-discussions — 4:15 PM
+
+[Sarah Kim]
+ADR-017 updated with refined JWT proposal (10-min tokens, Redis refresh store). Mike's Redis session proposal is also in there now. Both options are well-documented. Let's decide this week.
+
+[Mike Torres]
+Thanks Sarah. I think we're in good shape for a decision. Both proposals address the core problems. The question is whether we value statelessness (JWT) or operational simplicity (sessions).
+
+[David Okafor]
+I added the PostgreSQL connection pool data to the ADR as an appendix. The P99 spikes during peak traffic make a pretty clear case for moving session lookups out of the main database, regardless of which approach we pick.
+
+[Rachel Fernandez]
+For what it's worth, from the WebSocket perspective, either approach works. I've designed the WS auth to be backend-agnostic.
+
+[Nadia Volkov]
+Read through both proposals. The token rotation mechanism in Mike's proposal is clever. The grace period for concurrent requests is a nice detail.
+
+[Carlos Rivera]
+From an infra perspective, the Redis session cluster adds about $290/month. If it eliminates the P99 spikes David mentioned, it pays for itself in reduced incident response time.
+
+[Tomás Herrera]
+For the notification service, I need to know which auth approach we pick so I can implement the delivery auth correctly. Either works for me but I need the interface settled.
+
+[Priya Chandrasekaran]
+Good discussion today everyone. Let's make a call on auth by Wednesday so we can include it in Sprint 25 planning.
+
+[Sarah Kim]
+Sounds good. I'll have my final recommendation in the ADR by tomorrow EOD.
+
+[Mike Torres]
+Same. I'll add the grace period spec and the concurrent request handling to my section tonight.
+
+---
+
+SLACK THREAD — #backend — 4:45 PM
+
+[Carlos Rivera]
+PRs are up for review. Quick summary:
+- #1860 (Docker caching) → Tomás
+- #1861 (test sharding) → James
+- #1862 (dependency caching) → Nadia
+
+If we can get these reviewed by Thursday, I'll merge Friday and we should see the 14 → 5 min improvement starting next week.
+
+[Tomás Herrera]
+I'll take a look at #1860 tomorrow morning.
+
+[James Holden]
+#1861 — already reading through it. The cross-file dependency fixes look clean. Should have comments by tomorrow.
+
+[Nadia Volkov]
+Will review #1862 Wednesday.
+
+---
+
+END OF EPISODE

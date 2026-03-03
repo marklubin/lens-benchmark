@@ -1,0 +1,570 @@
+MERIDIAN SYSTEMS — ARCHITECTURE REVIEW: TIME-SERIES DATA STORE FOR IOT TELEMETRY
+Date: 2025-06-13 (Friday)
+Time: 10:00–11:45 AM ET
+Location: Zoom (fully remote)
+Attendees: Omar Zafar (Engineering Director), Leah Kim (Staff Engineer), Nadia Okonkwo (Data Engineer), Jake Petrov (Senior Backend), Fatima Al-Said (DevOps Lead), Hannah Choi (IoT Platform Lead), Tomás Reyes (SRE), Priya Narayanan (Analytics Lead), Wei Zhang (Security Engineer)
+Context: The WarehouseIQ IoT platform collects sensor telemetry from 340 warehouses. Current storage is Elasticsearch, which is expensive and operationally complex. Evaluating purpose-built time-series databases.
+ADR: ADR-045
+
+---
+
+PRE-MEETING CONTEXT — EMAIL THREAD (2025-06-11)
+
+From: Hannah Choi <hchoi@meridiansystems.com>
+To: warehouseiq-eng@meridiansystems.com
+Subject: Architecture Review Prep — Time-Series Database Selection (ADR-045)
+
+Team,
+
+Quick note before Friday's review. I've attached the benchmark report and the evaluation matrix for the three candidates we'll be discussing. If you have time, please skim it — I'll walk through the results live, but it'll help if everyone has baseline context.
+
+The benchmarks were run on a c5.2xlarge (8 vCPU, 16 GB RAM) with 500GB gp3 EBS. I used a synthetic dataset generated from a week of production sensor telemetry exported from our Elasticsearch cluster (June 2–8). The dataset contains 847 million rows across all sensor types.
+
+Zoom link is in the calendar invite. I'll share my screen for the schema discussion in the second half.
+
+— Hannah
+
+From: Jake Petrov <jpetrov@meridiansystems.com>
+Re: Architecture Review Prep — Time-Series Database Selection (ADR-045)
+
+Hannah — read through the report. Quick question: did you test with concurrent readers during write load? Our dashboards are polling every 30 seconds while sensors are continuously writing.
+
+From: Hannah Choi <hchoi@meridiansystems.com>
+Re: Re: Architecture Review Prep — Time-Series Database Selection (ADR-045)
+
+Jake — good call. Yes, the benchmarks included a mixed workload: sustained writes at target throughput + 50 concurrent dashboard-style read queries cycling every 5 seconds. The numbers in the report reflect that mixed scenario. Pure read performance is roughly 20-30% better across all three candidates, but mixed is the realistic test.
+
+From: Priya Narayanan <pnarayanan@meridiansystems.com>
+Re: Architecture Review Prep — Time-Series Database Selection (ADR-045)
+
+Hannah — from the analytics side, can you also cover how each option handles ad-hoc exploratory queries? Our team does a lot of one-off analysis and sometimes the queries are not well-optimized. Want to make sure we don't pick something that falls over on a bad GROUP BY.
+
+From: Hannah Choi <hchoi@meridiansystems.com>
+Re: Re: Architecture Review Prep — Time-Series Database Selection (ADR-045)
+
+Priya — noted. I'll cover query planning and how each engine handles unoptimized queries. Short version: PostgreSQL-based solutions are the most forgiving, columnar stores can be surprisingly fast even on bad queries.
+
+---
+
+MEETING NOTES
+
+[Omar Zafar — 10:02 AM]
+Morning everyone. Looks like we have the full team plus a few extras today. Priya, Tomás, Wei — thanks for joining. This is the database selection review for WarehouseIQ telemetry storage. ADR-045. Hannah has done the evaluation and she'll walk us through the candidates. Hannah, can you set the context?
+
+[Hannah Choi — 10:03 AM]
+Sure. Let me share my screen — everyone see the slides? OK. So WarehouseIQ is our IoT platform. We have sensors in 340 warehouses monitoring temperature, humidity, door open/close events, forklift movement, and energy consumption. The sensors emit telemetry every 10 seconds.
+
+Scale:
+- 14,000 sensors across 340 warehouses
+- Each sensor emits ~8,640 data points per day (every 10 seconds)
+- Total: ~121 million data points per day
+- Retention: 90 days of raw data, 2 years of hourly aggregates, 5 years of daily aggregates
+- Raw data volume: 90 days × 121M points × ~200 bytes = ~2.2TB
+- Query patterns: dashboard queries (time-range aggregations), alert evaluation (last-N-minutes checks), historical analysis (multi-month trends)
+
+[Tomás Reyes — 10:06 AM]
+Quick clarification on the 200 bytes per data point — is that the on-wire size or the storage size?
+
+[Hannah Choi — 10:06 AM]
+Storage size. The on-wire payload from the sensors is about 140 bytes, but with indexing overhead, metadata, and the JSON envelope that Elasticsearch wraps around each document, we end up at roughly 200 bytes stored per data point. That's the Elasticsearch number. The actual storage per row will vary by engine — TimescaleDB rows are denser, ClickHouse even more so after columnar compression.
+
+[Tomás Reyes — 10:07 AM]
+Got it. Makes sense.
+
+[Hannah Choi — 10:07 AM]
+We're currently storing this in Elasticsearch. It works but it's expensive — we're running a 9-node Elasticsearch cluster that costs $14,000/month. The cluster is overprovisioned for the write pattern (Elasticsearch is optimized for full-text search, not time-series aggregation) and underperforming on time-range queries (our P95 for a 24-hour temperature aggregation query is 3.2 seconds).
+
+[Priya Narayanan — 10:08 AM]
+And from the analytics perspective, that 3.2 seconds is the good case. When we run multi-week trends or cross-warehouse comparisons, it can take 15-20 seconds. Kibana dashboards time out regularly. My team has basically stopped using the Elasticsearch dashboards for historical analysis and started exporting CSVs instead, which is terrible for reproducibility.
+
+[Hannah Choi — 10:09 AM]
+Right. And that's exactly why we're here. I want to move to a purpose-built time-series database. I've evaluated three options and I want to present them.
+
+[Omar Zafar — 10:10 AM]
+Go ahead.
+
+[Hannah Choi — 10:10 AM]
+**Option 1: TimescaleDB**
+
+TimescaleDB is a PostgreSQL extension for time-series data. It adds "hypertables" — automatically partitioned tables where each partition (called a "chunk") covers a time range. Queries that specify a time range only scan the relevant chunks.
+
+Pros:
+- Full SQL support — our team knows SQL, our dashboards use SQL queries, no new query language
+- PostgreSQL ecosystem — works with all PostgreSQL tools, extensions, and drivers
+- Continuous aggregates — materialized views that auto-update as new data arrives. Perfect for our hourly/daily aggregation tiers
+- Compression — 10-20x compression on historical chunks. Our 2.2TB raw data would compress to ~150GB
+- We already chose PostgreSQL for InventoryHub v2 (ADR-042), so we have the operational muscle
+
+Cons:
+- Single-node performance ceiling. TimescaleDB's multi-node (distributed) was deprecated in favor of their cloud product. For our self-managed deployment, we're limited to what a single large instance can handle.
+- Write throughput: benchmarked at 380K rows/sec on our test hardware. Our requirement is 14K rows/sec (121M points / 86,400 seconds). That's 27x headroom. Sufficient.
+- Query performance: 24-hour temperature aggregation across 100 sensors — 180ms on compressed data. That's 17x faster than Elasticsearch's 3.2 seconds.
+
+Cost estimate: Single db.r6g.2xlarge (8 vCPU, 64GB RAM) with 500GB gp3 EBS. Monthly cost: ~$1,200. That's $12,800/month savings versus Elasticsearch.
+
+[Wei Zhang — 10:18 AM]
+On the security side — since this is a PostgreSQL extension, we get standard PostgreSQL authentication, SSL/TLS, and row-level security if we ever need it. The sensor data isn't PII but some of the warehouse operational metrics could be commercially sensitive. PostgreSQL's permission model is well-understood and auditable.
+
+[Hannah Choi — 10:19 AM]
+Good point. That's another pro for TimescaleDB — no new security surface to evaluate.
+
+[Hannah Choi — 10:19 AM]
+**Option 2: InfluxDB 3.0**
+
+InfluxDB is a dedicated time-series database. Version 3.0 is a ground-up rewrite using Apache Arrow and DataFusion for columnar storage and query execution.
+
+Pros:
+- Purpose-built for time-series — ingestion, storage, and query are all optimized for temporal data
+- Columnar storage — extremely efficient for aggregation queries (only reads the columns needed)
+- InfluxQL and SQL support — familiar query languages
+- Built-in retention policies and downsampling — define rules to automatically aggregate and delete old data
+
+Cons:
+- InfluxDB 3.0 is relatively new (GA in early 2025). Fewer production deployments than TimescaleDB
+- Operational unfamiliarity — nobody on the team has run InfluxDB in production
+- Separate system — doesn't share infrastructure with our PostgreSQL stack
+- Clustering requires InfluxDB Enterprise (paid) for high availability
+
+[Tomás Reyes — 10:23 AM]
+On the maturity point — I've been following the InfluxDB 3.0 release cycle. They had some rough edges in the early builds around WAL durability under heavy write load. Their changelog shows a fix in 3.0.3, but I haven't seen many production war stories yet. The InfluxDB 2.x community was solid, but 3.0 is architecturally different enough that prior operational experience doesn't fully transfer.
+
+[Hannah Choi — 10:24 AM]
+That's consistent with what I found. Their documentation is good but the community knowledge base is thin for 3.0 specifically.
+
+[Hannah Choi — 10:24 AM]
+Benchmark results on equivalent hardware:
+- Write throughput: 520K rows/sec (higher than TimescaleDB due to columnar storage)
+- 24-hour aggregation query: 95ms (faster than TimescaleDB for pure aggregation)
+- Ad-hoc analytical query (multi-month trend with grouping): 340ms (comparable to TimescaleDB)
+
+[Priya Narayanan — 10:25 AM]
+What was the behavior like on unoptimized queries? Like, if someone does a SELECT * without a time range filter?
+
+[Hannah Choi — 10:26 AM]
+InfluxDB 3.0 handles it reasonably — it'll scan the full dataset but the columnar storage means it only reads the requested columns. A SELECT * without time range on 90 days of data took about 8 seconds for InfluxDB. TimescaleDB was similar at 9.5 seconds. ClickHouse was fastest at 3.2 seconds. But in all cases, the query planner warns you if you're doing a full table scan, so it's not silent.
+
+[Priya Narayanan — 10:27 AM]
+OK, that's acceptable. I'll make sure our team uses time range filters, but it's good to know the floor.
+
+[Hannah Choi — 10:27 AM]
+Cost estimate: 3-node InfluxDB Enterprise cluster with 500GB per node. InfluxDB Enterprise license: ~$3,000/month. Infrastructure: ~$1,800/month. Total: ~$4,800/month. Still $9,200 cheaper than Elasticsearch, but 4x more expensive than TimescaleDB.
+
+[Jake Petrov — 10:28 AM]
+Is there a community edition of InfluxDB 3.0 that supports clustering, or is Enterprise the only option for HA?
+
+[Hannah Choi — 10:28 AM]
+Enterprise is the only option for native clustering. The open-source edition is single-node only. You could theoretically build your own replication layer using write duplication at the application level, but that's custom infrastructure we'd have to build and maintain ourselves. Not worth it when TimescaleDB gives us HA through standard PostgreSQL streaming replication.
+
+[Hannah Choi — 10:29 AM]
+**Option 3: ClickHouse**
+
+ClickHouse is a columnar analytics database. Not purpose-built for time-series but excellent at it due to columnar storage and vectorized query execution.
+
+Pros:
+- Extreme query performance — the fastest analytical query engine available. Our benchmark: 24-hour aggregation in 12ms. Multi-month trend in 85ms.
+- Excellent compression — 15-30x on time-series data
+- SQL support with extensions for time-series patterns (tumble, hop, session windows)
+- Active open-source community, large company deployments (Uber, Cloudflare, eBay)
+
+Cons:
+- Not designed for high-frequency small writes. ClickHouse prefers batched inserts (1000+ rows per insert). Our sensors emit every 10 seconds — we'd need a write buffer (Kafka or in-memory) to batch writes.
+- No built-in retention policies — we'd implement them as scheduled DROP PARTITION operations
+- Updates and deletes are expensive (ClickHouse is append-optimized)
+- Operational complexity — ClickHouse cluster management is non-trivial. ZooKeeper dependency for replication.
+
+[Tomás Reyes — 10:33 AM]
+I want to emphasize the ZooKeeper point. We deprecated our last ZooKeeper dependency when we moved off the old Kafka cluster in Q1. Bringing ZooKeeper back means we need to maintain a 3-node ZooKeeper ensemble plus the ClickHouse cluster itself. That's 6 nodes minimum for HA, plus the Kafka brokers for write buffering. We're looking at 9-10 nodes total versus 2 nodes for TimescaleDB with streaming replication.
+
+[Fatima Al-Said — 10:34 AM]
+Exactly. And each of those components has its own failure modes, its own monitoring, its own runbooks. The operational surface area is significantly larger.
+
+[Hannah Choi — 10:34 AM]
+Benchmark results:
+- Write throughput: 1.2M rows/sec (with batch inserts of 10K rows)
+- Single-row insert: 2ms (poor — not designed for this)
+- 24-hour aggregation: 12ms (fastest by far)
+- Multi-month trend: 85ms (fastest by far)
+
+Cost estimate: 3-node ClickHouse cluster with Kafka write buffer. Infrastructure: ~$2,400/month. No licensing cost (open source). But operational cost is higher due to Kafka + ZooKeeper dependencies.
+
+[Priya Narayanan — 10:35 AM]
+The 12ms aggregation is stunning. But I want to ask — would we ever actually notice the difference between 12ms and 180ms in a dashboard context? Our dashboard polls every 30 seconds. Both are essentially instantaneous from the user's perspective.
+
+[Hannah Choi — 10:36 AM]
+For dashboards, no. You'd never notice. Where it matters is if we were running thousands of concurrent analytical queries — like a data science workload with hundreds of simultaneous notebook cells hitting the database. We're not doing that. Our concurrent query load peaks at about 50-60 dashboard panels refreshing simultaneously, plus maybe 5-10 ad-hoc queries from the analytics team.
+
+[Omar Zafar — 10:37 AM]
+Good analysis. Let me summarize the comparison:
+
+| Criteria | TimescaleDB | InfluxDB 3.0 | ClickHouse |
+|----------|-------------|--------------|------------|
+| Monthly cost | $1,200 | $4,800 | $2,400 |
+| Write throughput | 380K/s | 520K/s | 1.2M/s (batched) |
+| Aggregation query | 180ms | 95ms | 12ms |
+| SQL support | Full | Partial | Full |
+| Team familiarity | High (PostgreSQL) | None | Low |
+| Operational complexity | Low (single node) | Medium (cluster) | High (cluster + Kafka) |
+| HA built-in | No (use RDS) | Yes (Enterprise) | Yes (with ZooKeeper) |
+
+[Leah Kim — 10:39 AM]
+From the InventoryHub perspective, using TimescaleDB has a strategic advantage: the IoT telemetry and the inventory data could potentially live in the same PostgreSQL instance. If a warehouse's temperature sensor shows a spike, we could join that data with the inventory table to identify which products are affected — all in one query.
+
+[Nadia Okonkwo — 10:40 AM]
+That's a compelling use case. The analytics team has been asking for exactly this — correlating environmental conditions with inventory quality metrics. Today it requires exporting data from Elasticsearch and joining it with PostgreSQL exports in a Python script. If both datasets are in PostgreSQL, it's a SQL JOIN.
+
+[Priya Narayanan — 10:41 AM]
+Nadia's right. The temperature-to-spoilage correlation analysis that the warehousing ops team wants — right now it takes my team about 4 hours to run because of the data export and reconciliation steps. If it's a single SQL query against a unified PostgreSQL instance, it's a 30-second Jupyter cell. That's a massive productivity gain for us. We've had that request sitting in our backlog for almost a year because the effort-to-value ratio was too high with the current architecture.
+
+[Leah Kim — 10:42 AM]
+And the InventoryHub PostgreSQL instance is already set up with the schema and access controls. Adding TimescaleDB hypertables alongside the inventory tables is architecturally clean — they're just tables with automatic partitioning. Same connection strings, same auth, same backup pipeline.
+
+[Jake Petrov — 10:43 AM]
+The ClickHouse query performance is impressive but the operational complexity is a deal-breaker for me. We'd be adding Kafka, ZooKeeper, and ClickHouse to our infrastructure stack. That's three new systems to manage, monitor, and maintain. For 14K writes/second, it's massive overkill.
+
+[Hannah Choi — 10:44 AM]
+Agreed. ClickHouse is designed for log analytics at massive scale — billions of events per day. We're at 121 million per day, which is large but not ClickHouse-large. It's like using a semi truck to deliver groceries.
+
+[Tomás Reyes — 10:44 AM]
+Also worth noting that ClickHouse's operational tooling has improved but it's still rough compared to PostgreSQL. Things like online schema migrations, point-in-time recovery, logical replication — PostgreSQL has mature, battle-tested solutions for all of these. ClickHouse has equivalents but they're less polished and less documented.
+
+[Fatima Al-Said — 10:45 AM]
+From infrastructure perspective, TimescaleDB is the clear winner. I can add the TimescaleDB extension to our existing RDS PostgreSQL infrastructure. Same monitoring, same backup procedures, same failover. The other two options require entirely new infrastructure stacks.
+
+Wait — actually, RDS doesn't support TimescaleDB extension. We'd need to self-manage the PostgreSQL instance or use Timescale Cloud.
+
+[Leah Kim — 10:47 AM]
+Timescale Cloud is an option. Managed service, same as RDS but with TimescaleDB built in. Pricing is comparable — they charge by compute and storage.
+
+[Wei Zhang — 10:47 AM]
+If we go with Timescale Cloud, what's the data residency situation? Our warehouse data has to stay in US-East per the data processing agreements with two of our larger clients.
+
+[Fatima Al-Said — 10:48 AM]
+Timescale Cloud supports AWS us-east-1 as a deployment region, so that's fine. But my preference is still self-managed.
+
+[Fatima Al-Said — 10:48 AM]
+I'd prefer self-managed on EC2. We get more control over the instance configuration and it's cheaper than Timescale Cloud. I'll use our existing Ansible playbooks for PostgreSQL with the TimescaleDB extension added. The operational overhead is minimal since it's still PostgreSQL under the hood.
+
+[Tomás Reyes — 10:49 AM]
+I agree with self-managed. We have the Ansible roles, we have the monitoring templates in Grafana, we have the alerting rules in PagerDuty. Adding TimescaleDB-specific metrics is a small incremental effort. Going to Timescale Cloud or InfluxDB Cloud means setting up entirely new monitoring integrations.
+
+[Omar Zafar — 10:50 AM]
+What about the single-node limitation? If we outgrow one machine, what's the path?
+
+[Hannah Choi — 10:51 AM]
+We have 27x write headroom on a single node. Even if we triple our sensor count (which would require a major warehouse expansion program), we'd still have 9x headroom. If we somehow need to go beyond that — say, adding video analytics or sub-second sensor polling — we'd re-evaluate. But that's a different product, not an evolution of the current one.
+
+[Jake Petrov — 10:52 AM]
+And realistically, the warehouse expansion roadmap from the business side shows 500 warehouses by end of 2026. That's about a 47% increase in sensor volume. Still well within the single-node envelope.
+
+[Hannah Choi — 10:52 AM]
+Right. Going from 14K to about 20K writes per second. Still 19x headroom.
+
+[Nadia Okonkwo — 10:53 AM]
+For the analytics use case, query performance matters more than write throughput. TimescaleDB's 180ms for 24-hour aggregations is excellent — our dashboard refresh rate is 30 seconds, so any query under 1 second is invisible to the user.
+
+[Priya Narayanan — 10:54 AM]
+And for the longer-running analytical queries — multi-month trends, cross-warehouse comparisons — the continuous aggregates effectively pre-compute the answer. The hourly and daily materialized views mean my team's analytical queries will hit pre-aggregated data, not raw sensor readings. That should make even the most complex cross-warehouse analysis sub-second.
+
+[Omar Zafar — 10:55 AM]
+I'm ready to make a call. The analysis is thorough and the conclusion is clear. Any final concerns?
+
+[Jake Petrov — 10:56 AM]
+One thing — can we validate the compression ratio on our actual data? The 10-20x range is wide. If it's on the low end (10x), our storage costs double.
+
+[Hannah Choi — 10:57 AM]
+I tested with a week of real sensor data exported from Elasticsearch. Compression ratio: 14.3x. So in the middle of the range. 2.2TB raw → ~154GB compressed. The db.r6g.2xlarge has 500GB storage — plenty of room.
+
+[Jake Petrov — 10:57 AM]
+And that 14.3x was consistent across sensor types? Temperature data is probably more compressible than door events since it's smooth floating-point values.
+
+[Hannah Choi — 10:58 AM]
+Good question. Temperature: 18.2x. Humidity: 17.5x. Energy: 15.8x. Forklift movement: 9.6x. Door events: 8.1x. The event-based sensors are less compressible because they're sparse and irregular. But the numeric sensors are the bulk of the data — about 78% of total volume — so the weighted average lands at 14.3x.
+
+[Jake Petrov — 10:58 AM]
+That's thorough. I'm satisfied.
+
+[Wei Zhang — 10:59 AM]
+One last thing from the security side — the self-managed EC2 instance needs to be in our private VPC with no public IP. Sensor data comes in through our IoT Gateway which is already in the VPC. Database access from dashboards and analytics tools goes through our bastion host or the VPN. Standard stuff but I want it on the record for the ADR.
+
+[Fatima Al-Said — 10:59 AM]
+Absolutely. Same network topology as the InventoryHub PostgreSQL instance. Private subnet, security group allowing inbound 5432 only from the application subnet and the analytics VPN. No public access.
+
+[Omar Zafar — 11:00 AM]
+**Decision: We're going with TimescaleDB (as a PostgreSQL extension) on a self-managed EC2 instance for WarehouseIQ telemetry storage.**
+
+Decision rationale:
+1. Team familiarity — PostgreSQL expertise transfers directly
+2. Cost — 91% reduction versus Elasticsearch ($1,200 vs $14,000/month)
+3. Performance — 17x faster aggregation queries than Elasticsearch
+4. Strategic alignment — potential for cross-domain SQL joins with InventoryHub data
+5. Operational simplicity — single node, PostgreSQL tooling, no new infrastructure dependencies
+
+Alternatives documented in ADR-045:
+- InfluxDB 3.0: stronger native time-series features but higher cost and operational unfamiliarity
+- ClickHouse: superior query performance but excessive operational complexity for our scale
+
+Migration plan: Hannah owns. Phased approach — migrate 90 days of historical data from Elasticsearch, validate parity, switch ingest pipeline, decommission Elasticsearch cluster.
+
+[Hannah Choi — 11:02 AM]
+Timeline: migration over 3 sprints. Sprint 17: TimescaleDB setup, schema design, continuous aggregates. Sprint 18: data migration and ingest pipeline switch. Sprint 19: validation, dashboard cutover, Elasticsearch decommission.
+
+[Tomás Reyes — 11:03 AM]
+For the migration — are we doing a live cutover or a parallel-run approach? I'd strongly prefer parallel run where we write to both Elasticsearch and TimescaleDB for at least a week, then compare query results for parity before cutting over.
+
+[Hannah Choi — 11:04 AM]
+Parallel run is the plan. During Sprint 18, the ingest pipeline will dual-write to both Elasticsearch and TimescaleDB. We'll run automated parity checks — same queries against both systems, comparing results within a tolerance band. Once we have a full week of parity at 99.9% match, we cut the dashboard queries over to TimescaleDB and stop writing to Elasticsearch.
+
+[Tomás Reyes — 11:04 AM]
+Perfect. I'll set up the parity monitoring dashboard.
+
+[Omar Zafar — 11:05 AM]
+Great. Let's move into the schema design preview.
+
+---
+
+SCHEMA DESIGN PREVIEW (10:55 AM — 11:30 AM)
+
+[Hannah Choi — 11:06 AM]
+Quick preview of the schema. I'll do a full design review next week but I want to validate the hypertable structure. Let me share my screen again — here's the SQL.
+
+```sql
+-- Enable TimescaleDB extension
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+-- Raw telemetry data
+CREATE TABLE sensor_telemetry (
+    time TIMESTAMPTZ NOT NULL,
+    sensor_id UUID NOT NULL,
+    warehouse_id UUID NOT NULL,
+    sensor_type VARCHAR(30) NOT NULL,  -- temperature, humidity, door, forklift, energy
+    value_numeric DOUBLE PRECISION,     -- for temperature, humidity, energy
+    value_text VARCHAR(100),            -- for door (open/close), forklift (zone entry/exit)
+    metadata JSONB                      -- sensor-specific additional data
+);
+
+-- Convert to hypertable with 1-day chunks
+SELECT create_hypertable('sensor_telemetry', 'time',
+    chunk_time_interval => INTERVAL '1 day'
+);
+
+-- Indexes
+CREATE INDEX idx_telemetry_sensor_time ON sensor_telemetry (sensor_id, time DESC);
+CREATE INDEX idx_telemetry_warehouse_type_time ON sensor_telemetry (warehouse_id, sensor_type, time DESC);
+
+-- Compression policy: compress chunks older than 7 days
+ALTER TABLE sensor_telemetry SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'sensor_id, sensor_type',
+    timescaledb.compress_orderby = 'time DESC'
+);
+SELECT add_compression_policy('sensor_telemetry', INTERVAL '7 days');
+
+-- Retention policy: drop raw data older than 90 days
+SELECT add_retention_policy('sensor_telemetry', INTERVAL '90 days');
+
+-- Continuous aggregate: hourly averages (retained 2 years)
+CREATE MATERIALIZED VIEW sensor_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', time) AS bucket,
+    sensor_id,
+    warehouse_id,
+    sensor_type,
+    AVG(value_numeric) AS avg_value,
+    MIN(value_numeric) AS min_value,
+    MAX(value_numeric) AS max_value,
+    COUNT(*) AS sample_count
+FROM sensor_telemetry
+WHERE value_numeric IS NOT NULL
+GROUP BY bucket, sensor_id, warehouse_id, sensor_type;
+
+-- Refresh policy: refresh hourly aggregates every hour
+SELECT add_continuous_aggregate_policy('sensor_hourly',
+    start_offset => INTERVAL '3 hours',
+    end_offset => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour'
+);
+
+-- Continuous aggregate: daily averages (retained 5 years)
+CREATE MATERIALIZED VIEW sensor_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 day', bucket) AS bucket,
+    sensor_id,
+    warehouse_id,
+    sensor_type,
+    AVG(avg_value) AS avg_value,
+    MIN(min_value) AS min_value,
+    MAX(max_value) AS max_value,
+    SUM(sample_count) AS sample_count
+FROM sensor_hourly
+GROUP BY time_bucket('1 day', bucket), sensor_id, warehouse_id, sensor_type;
+
+SELECT add_continuous_aggregate_policy('sensor_daily',
+    start_offset => INTERVAL '3 days',
+    end_offset => INTERVAL '1 day',
+    schedule_interval => INTERVAL '1 day'
+);
+```
+
+[Nadia Okonkwo — 11:12 AM]
+The continuous aggregate cascading is elegant — hourly feeds daily, each maintained by its own policy. No custom code for the aggregation tiers.
+
+[Priya Narayanan — 11:12 AM]
+From my team's perspective, the sensor_hourly and sensor_daily views are exactly what we need. Most of our analytical queries are against hourly or daily granularity anyway. Having those pre-computed and automatically maintained means we don't need to build our own ETL rollup jobs, which is what we were planning to do with the Elasticsearch exports.
+
+[Nadia Okonkwo — 11:13 AM]
+Right. And the continuous aggregate refresh policies handle the edge cases — like late-arriving data or backfills. The 3-hour start_offset on the hourly policy means it re-aggregates the last 3 hours every time it runs, catching any late data points within that window.
+
+[Leah Kim — 11:14 AM]
+The compression segmentby on sensor_id and sensor_type is smart — it means queries filtering on a specific sensor or sensor type only decompress the relevant segments. Most dashboard queries are per-warehouse-per-sensor-type, so this aligns with the access pattern.
+
+[Hannah Choi — 11:14 AM]
+Exactly. The segmentby tells the compressor to group rows by sensor_id and sensor_type before compressing. Each compressed segment contains data for one sensor of one type. When you query "give me the temperature for sensor X over the last 24 hours," TimescaleDB only decompresses the segments for sensor X of type temperature. Everything else stays compressed on disk.
+
+[Jake Petrov — 11:15 AM]
+One concern — the value_numeric / value_text split. Can we use a UNION-based approach instead? Like separate tables for numeric sensors and event sensors?
+
+[Hannah Choi — 11:16 AM]
+I considered that. Separate tables mean separate hypertables, separate compression policies, and queries that span both types need UNION. The single-table approach with nullable columns wastes a few bytes per row on NULL values but keeps the query model simple. With 14.3x compression, the wasted bytes disappear.
+
+[Jake Petrov — 11:17 AM]
+Fair point. Simple wins.
+
+[Leah Kim — 11:17 AM]
+And from a developer experience standpoint, a single table is much easier to work with. Our backend engineers writing dashboard queries just need to know one table name. If we split it, every query needs to know which table to hit based on sensor type, and cross-type queries get ugly fast.
+
+[Jake Petrov — 11:18 AM]
+Yeah, I'm convinced. One table is the right call.
+
+[Wei Zhang — 11:18 AM]
+On the metadata JSONB column — what goes in there? I want to make sure we're not accidentally storing anything sensitive.
+
+[Hannah Choi — 11:19 AM]
+Sensor-specific calibration data, hardware version, firmware version, battery level for wireless sensors — that kind of thing. No PII, no credentials. It's metadata about the sensor device itself, not about people or business operations. I'll document the expected keys in the schema design doc.
+
+[Wei Zhang — 11:19 AM]
+OK. As long as we have a documented schema for what goes in the JSONB, I'm fine with it. I don't want it turning into a dumping ground for unstructured data.
+
+[Fatima Al-Said — 11:20 AM]
+The EC2 instance — I'll use an i3.2xlarge (8 vCPU, 61 GB RAM, 1.9TB NVMe SSD). The NVMe local storage gives us much better I/O than EBS for the write-heavy workload. Backups go to S3 via pg_basebackup + WAL archiving.
+
+[Tomás Reyes — 11:21 AM]
+i3.2xlarge is a good choice. The NVMe throughput is about 3x what we'd get from gp3 EBS. For the sustained write workload plus concurrent reads, that I/O headroom matters. And the 1.9TB of local storage is more than enough for our compressed data footprint.
+
+[Hannah Choi — 11:22 AM]
+What about failover? With a single EC2 instance and local storage, if the instance dies, we lose data.
+
+[Fatima Al-Said — 11:23 AM]
+WAL archiving to S3 gives us point-in-time recovery with RPO of ~5 minutes (WAL archive interval). For RTO, I'll have a standby instance in a different AZ using streaming replication. If the primary dies, we promote the standby. Estimated failover time: 2-3 minutes.
+
+[Tomás Reyes — 11:24 AM]
+I'll set up the automated failover using pg_auto_failover or Patroni. We used Patroni for the InventoryHub PostgreSQL instance and it worked well. The failover detection and promotion is automated — PagerDuty gets notified but no manual intervention is required for the promotion itself.
+
+[Fatima Al-Said — 11:24 AM]
+Let's go with Patroni to keep it consistent with InventoryHub. Same runbooks, same operational patterns.
+
+[Omar Zafar — 11:25 AM]
+That meets our 99.95% availability requirement. 22 minutes/month of allowable downtime, and our failover is 2-3 minutes.
+
+[Fatima Al-Said — 11:26 AM]
+One more thing — I'll set up pgBadger for query analysis. We want to monitor which queries are hitting uncompressed chunks (recent data) versus compressed chunks (historical data). If we see slow queries on compressed data, we might need to adjust the compression segmentby or orderby.
+
+[Tomás Reyes — 11:26 AM]
+I'll also add the TimescaleDB-specific Grafana dashboards — chunk count, compression ratio, continuous aggregate lag, hypertable size. The TimescaleDB team publishes a Grafana dashboard template that we can import and customize.
+
+[Nadia Okonkwo — 11:27 AM]
+Can we also expose the continuous aggregate freshness as a metric? I want to make sure the hourly and daily aggregates are being refreshed on schedule. If they fall behind, the analytics dashboards would show stale data without anyone noticing.
+
+[Tomás Reyes — 11:27 AM]
+Good call. I'll add an alert rule: if the most recent bucket in sensor_hourly is more than 2 hours old, fire a warning. If it's more than 4 hours old, fire a critical. Same pattern for sensor_daily with appropriate thresholds.
+
+[Hannah Choi — 11:28 AM]
+Perfect. I'll have the full schema design doc ready for review next Wednesday.
+
+[Omar Zafar — 11:29 AM]
+Great work everyone. Clear analysis, clear decision. Let's execute. Hannah, send the Sprint 17 tasks to Jira and we'll refine them in Monday's sprint planning.
+
+[Hannah Choi — 11:29 AM]
+Will do. I'll have the Jira tickets drafted by end of day today.
+
+---
+
+ACTION ITEMS
+
+| # | Owner | Action | Due |
+|---|-------|--------|-----|
+| 1 | Hannah Choi | Draft full schema design doc for review | 2025-06-18 (Wed) |
+| 2 | Hannah Choi | Create Sprint 17 Jira tickets for TimescaleDB setup | 2025-06-13 (Fri EOD) |
+| 3 | Fatima Al-Said | Provision i3.2xlarge primary + standby instances | 2025-06-16 (Mon) |
+| 4 | Fatima Al-Said | Configure Patroni failover, streaming replication, WAL archiving | 2025-06-18 (Wed) |
+| 5 | Tomás Reyes | Set up TimescaleDB Grafana dashboards + alerting | 2025-06-20 (Fri) |
+| 6 | Tomás Reyes | Build parity monitoring dashboard for migration phase | 2025-06-20 (Fri) |
+| 7 | Nadia Okonkwo | Define continuous aggregate freshness alerting thresholds | 2025-06-18 (Wed) |
+| 8 | Wei Zhang | Review security posture (VPC, SG, access controls) for new instance | 2025-06-18 (Wed) |
+| 9 | Hannah Choi | Document JSONB metadata column expected keys | 2025-06-18 (Wed) |
+
+---
+
+POST-MEETING — SLACK #warehouseiq — 11:35 AM
+
+[Omar Zafar]
+ADR-045 decision: **TimescaleDB on self-managed EC2 for WarehouseIQ telemetry.** Saves $12,800/month versus Elasticsearch with 17x better query performance.
+
+Key points:
+- We chose TimescaleDB over InfluxDB and ClickHouse based on team familiarity, cost, and operational simplicity
+- After benchmarking, we confirmed 14.3x compression and 27x write headroom on single-node
+- Schema design leverages continuous aggregates for automatic hourly/daily rollups
+- Migration plan: 3 sprints. Hannah owns.
+
+Great analysis by Hannah. This was a data-driven decision with clear alternatives documented.
+
+[Hannah Choi]
+Thanks Omar. Schema design review next Wednesday 10am. Calendar invite sent.
+
+[Nadia Okonkwo]
+The cross-domain join capability with InventoryHub is exciting. Once both datasets are in PostgreSQL, I can build the temperature-inventory correlation dashboard the analytics team has been asking for. That's been on the wishlist for a year.
+
+[Priya Narayanan]
+Strongly seconding what Nadia said. My team is thrilled about this. The cross-warehouse temperature-to-spoilage analysis alone will save us about 15 hours per month of manual data wrangling. I'll start drafting the query templates once Hannah's schema is finalized.
+
+[Fatima Al-Said]
+EC2 instance and standby provisioning starting Monday. Streaming replication and WAL archiving tested by Wednesday.
+
+[Tomás Reyes]
+I'll have the Grafana dashboards ready by Friday. Going to fork our existing PostgreSQL monitoring template and add the TimescaleDB-specific panels. Will share a screenshot in this channel once it's up.
+
+[Wei Zhang]
+Security review on my calendar for Wednesday. Will coordinate with Fatima on the VPC and security group configuration. Should be straightforward — same pattern as InventoryHub.
+
+[Jake Petrov]
+Nice work Hannah. Clean analysis, clear recommendation. This is how architecture reviews should go.
+
+[Hannah Choi]
+Thanks Jake. The key was doing the benchmarks on real production data upfront. Hard to argue with numbers.
+
+---
+
+POST-MEETING — SLACK DM: Hannah Choi → Nadia Okonkwo — 11:52 AM
+
+[Hannah Choi]
+Hey Nadia — one thing I didn't bring up in the meeting because I didn't want to complicate the decision. The chunk_time_interval of 1 day means we'll have 90 chunks for the raw data (one per day of retention). TimescaleDB recommends keeping under 1000 chunks per hypertable, so we have plenty of room. But if we ever add more hypertables — like a separate one for derived metrics or alerts — we should keep an eye on total chunk count.
+
+[Nadia Okonkwo]
+Good to know. I'll add a chunk count metric to our monitoring checklist. Won't be an issue at current scale but it's the kind of thing that sneaks up on you.
+
+[Hannah Choi]
+Exactly. Also — for the cross-domain join use case with InventoryHub, I was thinking we should have a lightweight foreign data wrapper or just put both schemas in the same PostgreSQL instance. Since we're self-managing the instance, we have that flexibility. I'll raise it in the schema review next week.
+
+[Nadia Okonkwo]
+Same instance would be simplest. Foreign data wrappers add latency and complexity. If the instance can handle both workloads, let's keep it simple.
+
+[Hannah Choi]
+Agreed. The InventoryHub workload is mostly transactional (low write volume, moderate read volume) and the telemetry workload is mostly time-series (high write volume, moderate aggregation reads). They're complementary — different I/O patterns, unlikely to compete for the same resources.
+
+[Nadia Okonkwo]
+Makes sense. Let's discuss at the schema review.
+
+---
+
+END OF EPISODE

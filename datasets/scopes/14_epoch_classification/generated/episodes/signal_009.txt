@@ -1,0 +1,633 @@
+================================================================================
+FOLDLY ENGINEERING — CI/CD PIPELINE SETUP DOCUMENT
+================================================================================
+Document ID   : DOC-2025-0422-001
+Type          : Technical Setup / Process Document
+Author        : Lina Okafor
+Reviewers     : Priya Kaur, Danny Reeves
+Status        : Approved
+Created       : 2025-04-22
+Last Updated  : 2025-04-22
+Classification: Internal — Engineering
+Distribution  : All engineering team members
+Supersedes    : N/A (no prior pipeline documentation existed)
+Related Docs  : Deployment Process v1.0 (CONTRIBUTING.md), Post-Mortem INC-2025-0413-001
+================================================================================
+
+## Document History
+
+| Version | Date       | Author       | Change Description                              |
+|---------|------------|--------------|------------------------------------------------|
+| 0.1     | 2025-04-20 | Lina Okafor  | Initial draft based on staging build-out        |
+| 0.2     | 2025-04-21 | Lina Okafor  | Incorporated feedback from Priya and Danny      |
+| 1.0     | 2025-04-22 | Lina Okafor  | Approved version — pipeline live in production  |
+
+---
+
+## 1. Overview
+
+This document describes the Continuous Integration and Continuous Deployment (CI/CD) pipeline for the Foldly application. The pipeline enforces automated testing, code review, and staged deployments for all changes to the codebase.
+
+The pipeline was implemented as a direct outcome of the engineering process improvements initiated in mid-April 2025. Its primary goals are:
+
+- Prevent untested code from reaching production
+- Ensure at least one peer review on every change
+- Provide a staging environment that mirrors production for verification
+- Create an auditable record of all deployments
+
+This document is the authoritative reference for how code moves from a developer's branch to production. All engineers are expected to read and follow this document. Questions or proposed changes should be directed to #engineering or raised in the weekly SLO review.
+
+**Effective Date**: 2025-04-22
+
+**Applies To**: All engineers contributing to the `foldly/foldly-api` repository.
+
+**Scope**: This covers the backend API repository only. Frontend changes to `foldly/foldly-web` follow a separate deployment process documented in the frontend team's wiki (not covered here).
+
+---
+
+## 2. Pipeline Architecture
+
+The pipeline is a linear flow from developer branch through to production, with automated gates at each stage. No stage can be bypassed. The design prioritizes correctness over speed — a failed test blocks deployment regardless of urgency.
+
+```
+Developer Branch
+      |
+      v
+  Pull Request
+      |
+      v
+  CI Pipeline (GitHub Actions)
+      |
+      +-- Lint (ruff)
+      +-- Type Check (mypy --strict on billing/, auth/)
+      +-- Unit Tests (pytest)
+      +-- Integration Tests (pytest, stripe test mode)
+      |
+      v
+  Code Review (1 approval minimum, 2 for billing/auth)
+      |
+      v
+  Merge to main
+      |
+      v
+  Auto-Deploy to Staging (staging.foldly.io)
+      |
+      v
+  Manual Verification on Staging
+      |
+      v
+  Manual Promote to Production (api.foldly.io)
+      |
+      v
+  Post-Deploy Monitoring (30 min)
+```
+
+### 2.1 Pipeline Stage Details
+
+**Developer Branch**: Engineers create feature branches from `main`. Branch names should follow the convention `<type>/<description>` (e.g., `fix/webhook-idempotency`, `feat/search-filters`, `chore/upgrade-deps`). No direct commits to `main` are permitted.
+
+**Pull Request**: All changes require a PR. PRs must include a description of the change, any testing notes, and the PR checklist (Section 7). Draft PRs are encouraged for early feedback but do not trigger CI.
+
+**CI Pipeline**: Runs automatically on every PR and on pushes to `main`. All four checks — lint, typecheck, unit tests, and integration tests — must pass. If any check fails, the merge button is disabled. Details in Section 3.
+
+**Code Review**: At minimum one approval is required. For changes touching `src/billing/` or `src/auth/`, two approvals are required and must come from designated code owners. Reviewers verify both correctness and test coverage. See Section 3.3 for CODEOWNERS configuration.
+
+**Merge to main**: Standard merge commit (not squash, not rebase) to preserve PR history. The merge triggers the staging deployment automatically.
+
+**Staging Deployment**: Fully automated. The `deploy-staging` job runs after all CI checks pass on the `main` branch. Staging mirrors production infrastructure (Section 4).
+
+**Manual Verification**: The deploying engineer verifies the change on staging before promoting. This includes running through the affected user flows and checking Sentry for new errors. For billing changes, verification must include a test transaction through Stripe test mode.
+
+**Production Promotion**: A manual step. The engineer runs the deploy script, which performs health checks and smoke tests before and after deployment. See Section 4.4.
+
+**Post-Deploy Monitoring**: The deploying engineer monitors Sentry and Grafana for 30 minutes after production deployment. Any new error types or latency spikes during this window trigger an immediate investigation.
+
+---
+
+## 3. GitHub Actions Configuration
+
+### 3.1 CI Workflow (`ci.yml`)
+
+The CI workflow is defined in `.github/workflows/ci.yml` in the `foldly/foldly-api` repository. It runs on all pull requests targeting `main` and on all pushes to `main`.
+
+```yaml
+name: CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install ruff
+      - run: ruff check src/
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt mypy
+      - run: mypy --strict src/billing/ src/auth/
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: foldly_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest tests/ -v --tb=short --cov=src --cov-report=term-missing
+      - name: Check coverage threshold
+        run: |
+          coverage report --fail-under=60
+```
+
+### 3.1.1 Lint Job Details
+
+The lint job uses `ruff` to check for style violations and common errors across all source files. Ruff is configured via `pyproject.toml` with the following relevant settings:
+
+- Line length: 120 characters
+- Target Python version: 3.11
+- Selected rule sets: E (pycodestyle errors), F (pyflakes), W (pycodestyle warnings), I (isort), B (flake8-bugbear)
+- Ignored rules: E501 (line too long — handled by formatter separately)
+
+The lint job runs in approximately 8 seconds on the current codebase size. It is the fastest CI check and provides immediate feedback on obvious issues.
+
+### 3.1.2 Type Check Job Details
+
+The typecheck job runs `mypy --strict` on `src/billing/` and `src/auth/` only. These two modules were selected for strict typing because they handle financial transactions and user authentication — the highest-risk code paths in the application.
+
+Strict mode enables all optional mypy checks, including:
+- `--disallow-untyped-defs`: All functions must have type annotations
+- `--disallow-any-generics`: Generic types must have explicit parameters
+- `--warn-return-any`: Warns when a function typed as returning a specific type actually returns `Any`
+- `--no-implicit-optional`: `Optional` must be explicit
+
+Other modules (`src/documents/`, `src/search/`, `src/collaboration/`) are not covered by strict typing yet. The plan is to extend strict typing to all modules incrementally as coverage improves.
+
+### 3.1.3 Test Job Details
+
+The test job spins up a PostgreSQL 15 service container to provide a real database for integration tests. Tests are run using `pytest` with verbose output and short tracebacks. Coverage is measured with `pytest-cov` and reported to the terminal.
+
+The `--fail-under=60` threshold on the coverage report means the CI job will fail if overall code coverage drops below 60%. This is a floor, not a target — the goal is to continuously increase coverage (see Section 5.1 for per-module targets).
+
+Integration tests that interact with Stripe use the Stripe test mode API. The `STRIPE_TEST_KEY` secret is configured in the GitHub Actions environment and is not accessible to forks or external contributors.
+
+### 3.2 Branch Protection Rules
+
+The `main` branch has the following protections enabled:
+
+| Rule | Setting |
+|------|---------|
+| Require pull request before merging | Yes |
+| Required approvals | 1 (2 for `src/billing/`, `src/auth/`) |
+| Require status checks to pass | Yes |
+| Required checks | `lint`, `typecheck`, `test` |
+| Require branches to be up to date | Yes |
+| Allow force pushes | No |
+| Allow deletions | No |
+
+These rules are configured in the GitHub repository settings under Settings > Branches > Branch protection rules. Only repository administrators (currently Lina Okafor and Priya Kaur) can modify these settings.
+
+The "Require branches to be up to date" rule means that if `main` has moved since the PR branch was created, the PR must be rebased or merged with `main` before it can be merged. This ensures CI runs against the current state of `main`, not a stale version.
+
+### 3.3 CODEOWNERS
+
+The `CODEOWNERS` file is located at the root of the repository and defines ownership for code review purposes:
+
+```
+# Billing code requires 2 reviewers
+src/billing/    @marcuswebb @jesstanaka
+src/auth/       @linaokafor @priyakaur
+
+# Everything else requires 1 reviewer
+*               @foldly/engineering
+```
+
+When a PR modifies files in `src/billing/` or `src/auth/`, GitHub automatically requests reviews from the designated code owners. The 2-approval requirement for these paths is enforced by a combination of the CODEOWNERS file and the branch protection rule.
+
+Code ownership was assigned based on expertise: Marcus and Jess are the primary contributors to the billing module, while Lina and Priya are the primary contributors to the auth module. The `@foldly/engineering` team is the catch-all for all other files.
+
+---
+
+## 4. Staging Environment
+
+### 4.1 Infrastructure
+
+The staging environment is a full mirror of production, running on the same cloud provider (AWS) in the same region (us-east-1). The key difference is that all third-party integrations are configured in test/development mode.
+
+| Component | Production | Staging |
+|-----------|-----------|---------|
+| Server | api.foldly.io | staging.foldly.io |
+| Database | PostgreSQL 15 (prod) | PostgreSQL 15 (staging) |
+| Stripe | Live mode | Test mode |
+| Auth0 | Production tenant | Development tenant |
+| Sentry | Production DSN | Staging DSN |
+| S3 Bucket | foldly-prod-docs | foldly-staging-docs |
+| Redis | redis-prod.foldly.internal | redis-staging.foldly.internal |
+
+The staging server runs on a smaller instance type than production (t3.medium vs t3.large) to reduce costs. This is acceptable because staging does not handle real user traffic. If performance testing on staging is needed, the instance can be temporarily upgraded.
+
+### 4.2 Staging Data
+
+The staging database is refreshed nightly from a production backup with the following transformations applied:
+
+- Customer PII (names, emails, phone numbers) replaced with fake data
+- Stripe customer IDs replaced with test mode equivalents
+- API keys and secrets rotated to staging-specific values
+- Audit log entries from the last 30 days preserved for testing
+
+The nightly refresh is performed by a scheduled GitHub Actions workflow (`refresh-staging-db.yml`) that runs at 02:00 UTC. The workflow:
+
+1. Takes a snapshot of the production database using `pg_dump`
+2. Runs the PII scrubbing script (`scripts/scrub_pii.py`) on the dump
+3. Replaces Stripe customer IDs using the mapping table in `scripts/stripe_test_mapping.json`
+4. Rotates secrets using staging-specific values from AWS Secrets Manager
+5. Restores the scrubbed dump to the staging database using `pg_restore`
+6. Runs a verification query to confirm row counts match production (within 1% tolerance)
+
+The PII scrubbing script uses the `faker` library to generate replacement data. The mapping between production and fake data is deterministic (seeded by the production row ID) so that staging data is consistent across refreshes.
+
+### 4.3 Deployment to Staging
+
+Merges to `main` trigger automatic deployment to staging via GitHub Actions:
+
+```yaml
+  deploy-staging:
+    needs: [lint, typecheck, test]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to staging
+        run: ./scripts/deploy.sh staging
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_KEY: ${{ secrets.STAGING_SSH_KEY }}
+```
+
+The `deploy.sh` script performs the following steps when targeting staging:
+
+1. SSH into the staging server using the deployment key
+2. Pull the latest `main` branch
+3. Install dependencies via `pip install -r requirements.txt`
+4. Run database migrations via `alembic upgrade head`
+5. Restart the application server (gunicorn with 4 workers)
+6. Run the health check endpoint (`/health`) and verify HTTP 200
+7. Output a deployment summary with the commit SHA, timestamp, and deployer
+
+If any step fails, the script exits with a non-zero status code and the GitHub Actions job is marked as failed. The deploying engineer is notified via the GitHub Actions UI and the #engineering-alerts Slack channel.
+
+### 4.4 Promoting to Production
+
+Production promotion is a manual step performed by the deploying engineer:
+
+```bash
+# After verifying on staging:
+./scripts/deploy.sh production
+
+# This script:
+# 1. Checks that the staging deployment is healthy (HTTP 200 on /health)
+# 2. Runs a smoke test suite against staging
+# 3. Deploys to production
+# 4. Runs smoke tests against production
+# 5. Outputs a deployment summary
+```
+
+The production deploy script has additional safeguards compared to the staging deploy:
+
+- It checks that the commit SHA on staging matches the commit SHA being deployed to production (to ensure the exact code that was verified is what gets deployed)
+- It verifies that all CI checks passed for the commit SHA
+- It records the deployment in `deployments.log` (see Section 8)
+- It sends a notification to #engineering with the deployment details
+
+The production deploy requires SSH access, which is restricted to Lina Okafor (infrastructure) and Priya Kaur (emergency). Other engineers initiate the deploy through the script, which uses the deployment key stored in GitHub Actions secrets.
+
+---
+
+## 5. Test Requirements
+
+### 5.1 Coverage Thresholds
+
+The following table shows per-module coverage targets and current coverage levels as of 2025-04-22:
+
+| Module | Minimum Coverage | Current Coverage |
+|--------|-----------------|-----------------|
+| billing/ | 80% | 72% (in progress) |
+| auth/ | 70% | 65% (in progress) |
+| documents/ | 60% | 48% (in progress) |
+| Overall | 60% | 58% |
+
+Coverage thresholds will increase by 5% each month until we reach 80% overall.
+
+The per-module targets reflect the risk profile of each module. Billing has the highest target because billing errors have direct financial impact. Auth is next because authentication failures affect all users. Documents has a lower target because document operation failures, while disruptive, do not have financial or security consequences.
+
+Current coverage numbers reflect the test suite as of April 22. Danny Reeves is leading the effort to increase coverage, with a focus on billing and auth modules first. The goal is to reach the per-module minimums by end of May and the 80% overall target by end of Q3.
+
+### 5.2 Test Categories
+
+| Category | Count | Run When | Typical Duration |
+|----------|-------|----------|-----------------|
+| Unit tests | 31 | Every PR | ~12 seconds |
+| Integration tests | 8 | Every PR | ~45 seconds |
+| Smoke tests | 5 | Post-deploy (staging + prod) | ~20 seconds |
+| **Total** | **44** | | |
+
+**Unit tests** test individual functions and classes in isolation. They use mocked dependencies (database, Stripe API, Auth0) and are fast to run. Unit tests are located in `tests/unit/`.
+
+**Integration tests** test the interaction between multiple components. They use the PostgreSQL service container and the Stripe test mode API. Integration tests are located in `tests/integration/`. These tests are slower but catch issues that unit tests miss, such as database migration problems, incorrect SQL queries, and API contract violations.
+
+**Smoke tests** are a small set of high-level tests that verify critical user flows end-to-end. They run against a deployed environment (staging or production) and check that the application is functional. Smoke tests are located in `tests/smoke/` and are invoked by the deploy script (Section 4.4).
+
+The smoke test suite covers:
+1. Health check endpoint returns 200
+2. User login flow completes successfully
+3. Document upload and retrieval works
+4. Billing status endpoint returns valid data
+5. Search returns results for a known document
+
+### 5.3 Writing Tests
+
+All new code must include tests. The PR checklist (see Section 7) includes a test requirement checkbox. Reviewers should verify that:
+
+- New features have happy-path and error-path tests
+- Bug fixes include a regression test that fails without the fix
+- Critical paths (billing, auth) have edge case coverage
+
+When writing tests, follow these conventions:
+
+- Test file names mirror the source file: `src/billing/webhooks.py` → `tests/unit/test_billing_webhooks.py`
+- Test function names describe the behavior: `test_webhook_handler_ignores_duplicate_event_id`
+- Use `pytest` fixtures for common setup (database connections, mock clients, test data)
+- Use `pytest.mark.parametrize` for testing multiple inputs against the same logic
+- Integration tests that require external services (Postgres, Stripe) should be marked with `@pytest.mark.integration`
+
+---
+
+## 6. Error Monitoring
+
+### 6.1 Sentry Integration
+
+Sentry is configured for both staging and production:
+
+- **Error alerting**: Sentry alerts to #engineering-alerts on new error types
+- **Performance monitoring**: Transaction tracing enabled for API endpoints
+- **Release tracking**: Each deployment is tagged with a git SHA for error correlation
+
+Sentry is initialized in `src/app.py` using the `sentry-sdk` Python package with the FastAPI integration. The DSN is loaded from environment variables (`SENTRY_DSN`) which differ between staging and production.
+
+Configuration details:
+- `traces_sample_rate`: 0.1 (10% of transactions are traced — sufficient for latency analysis without excessive data volume)
+- `profiles_sample_rate`: 0.05 (5% of transactions are profiled)
+- `send_default_pii`: False (we do not send user PII to Sentry)
+- `environment`: Set to `staging` or `production` based on the `FOLDLY_ENV` environment variable
+- `release`: Set to the git SHA at deploy time
+
+### 6.2 Alert Rules
+
+The following alert rules are configured in both Sentry and PagerDuty:
+
+| Condition | Action | Channel |
+|-----------|--------|---------|
+| New error type | Slack alert | #engineering-alerts |
+| Error rate > 1% of requests | PagerDuty | On-call engineer |
+| P95 latency > 2s | Slack alert | #engineering-alerts |
+| Billing endpoint error | PagerDuty (immediate) | On-call + Priya |
+
+Alert rules are managed in the Sentry web interface. Changes to alert rules require approval from Priya or Lina.
+
+The billing endpoint alert is set to "immediate" priority because billing errors have direct financial impact. All other alerts use standard notification rules (Slack first, PagerDuty if the condition persists for more than 2 minutes).
+
+The on-call rotation is currently informal — Lina handles infrastructure alerts, Marcus handles billing alerts, and Priya is the escalation point for all critical alerts. A formal on-call schedule will be established once the team grows.
+
+---
+
+## 7. PR Review Checklist
+
+Every PR must include the following checklist in its description:
+
+```markdown
+## PR Checklist
+- [ ] Tests added/updated for this change
+- [ ] All existing tests pass
+- [ ] Type hints added for new functions
+- [ ] No new lint warnings
+- [ ] Tested on staging (post-merge)
+- [ ] For billing/auth changes: 2 approvals obtained
+- [ ] Documentation updated (if applicable)
+```
+
+Reviewers are expected to verify each item in the checklist before approving. If an item is not applicable (e.g., "Documentation updated" for a one-line bug fix), the PR author should check it and add a note explaining why.
+
+The checklist is enforced socially, not automatically. GitHub Actions enforces the automated checks (tests, lint, typecheck), but the checklist items about staging verification and documentation are the reviewer's responsibility. Over time, we may add automation to check for these items, but for now the review process is the enforcement mechanism.
+
+### 7.1 Review Guidelines
+
+When reviewing a PR, look for:
+
+- **Correctness**: Does the code do what it claims to do? Are edge cases handled?
+- **Test coverage**: Are there tests for the new behavior? Do the tests cover both success and failure paths?
+- **Type safety**: For billing and auth code, are type annotations complete and correct?
+- **Security**: Are there any new endpoints that need authentication? Any user input that needs validation?
+- **Performance**: Are there any N+1 query patterns, unbounded loops, or missing indexes?
+
+Reviews should be constructive and specific. Instead of "this is wrong," explain what the issue is and suggest a fix. The goal is to catch bugs and share knowledge, not to gatekeep.
+
+---
+
+## 8. Deployment Log
+
+All deployments are recorded in `deployments.log` with the following fields:
+
+| Field | Description |
+|-------|-------------|
+| timestamp | UTC timestamp of deployment |
+| deployer | GitHub username of deploying engineer |
+| sha | Git commit SHA |
+| pr_number | PR number that triggered the deploy |
+| environment | staging or production |
+| status | success, rollback, or failed |
+| notes | Optional notes about the deployment |
+
+The deployment log is appended automatically by `deploy.sh` on each successful deployment. For failed deployments, the engineer should manually add an entry with the failure reason.
+
+The log is stored in the repository root as `deployments.log` and is committed with each deployment. This means the deployment history is version-controlled and auditable.
+
+### Recent Deployments
+
+| Date | Deployer | PR | Environment | Status | Notes |
+|------|----------|----|-------------|--------|-------|
+| 2025-04-22 | lina.okafor | #12 | staging | success | CI/CD pipeline setup |
+| 2025-04-22 | lina.okafor | #12 | production | success | CI/CD pipeline setup |
+| 2025-04-21 | danny.reeves | #11 | staging | success | Test coverage expansion |
+| 2025-04-21 | danny.reeves | #11 | production | success | Test coverage expansion |
+| 2025-04-18 | marcus.webb | #8 | staging | success | Billing audit fixes |
+| 2025-04-18 | marcus.webb | #8 | production | success | Billing audit fixes |
+
+All six recent deployments completed successfully. No rollbacks have been needed since the pipeline was introduced. Prior to the pipeline, deployments were not logged.
+
+---
+
+## 9. Migration from Old Process
+
+### What Changed
+
+| Before (April 1-13) | After (April 22+) |
+|---------------------|-------------------|
+| Deploy from local machine | Deploy via CI/CD pipeline |
+| No code review | Mandatory PR review |
+| No tests | 44 tests, 60% coverage |
+| No staging environment | Full staging mirror |
+| No error monitoring | Sentry + PagerDuty |
+| No deployment records | Deployment log |
+| No branch protection | Branch protection enforced |
+
+### Transition Notes
+
+- All engineers have completed the deployment process walkthrough
+- Legacy direct-to-prod deployment scripts have been removed
+- SSH access to production servers restricted to Lina (infra) and Priya (emergency)
+- The old `deploy_prod.sh` script has been replaced by the pipeline-based `deploy.sh`
+
+### Transition Timeline
+
+| Date | Milestone |
+|------|-----------|
+| 2025-04-13 | Incident triggers process review |
+| 2025-04-14 | Post-mortem identifies systemic issues |
+| 2025-04-15 | Danny begins writing test suite |
+| 2025-04-18 | Marcus completes billing audit, first reviewed PRs merged |
+| 2025-04-19 | Lina demos staging environment, deployment process documented |
+| 2025-04-20 | CI workflow (`ci.yml`) committed to repository |
+| 2025-04-21 | Branch protection rules enabled on `main` |
+| 2025-04-22 | Pipeline fully operational, this document published |
+
+The transition from the old process to the new pipeline took 9 days from the incident to full operation. During the transition period, engineers followed the new process voluntarily while automation was being built. No changes were deployed without review during this period.
+
+### Known Gaps
+
+The following items are recognized as gaps in the current pipeline and are scheduled for future work:
+
+- **No automated staging verification**: Staging verification is currently manual. A future improvement would be to run the smoke test suite automatically against staging after each deploy and require passing before production promotion.
+- **No canary deployments**: Production deploys are all-or-nothing. A canary deployment strategy (deploying to a subset of servers first) would reduce blast radius.
+- **No automated rollback**: Rollback is a manual process (Section 10). Automated rollback based on error rate thresholds is a future goal.
+- **Coverage gaps**: Overall test coverage is 58%, below the 60% threshold. Several modules have significant gaps (see Section 5.1).
+
+These gaps will be addressed incrementally. The current pipeline is a significant improvement over the previous state (no pipeline at all) and provides a foundation for future enhancements.
+
+---
+
+## 10. Appendix: Emergency Procedures
+
+### Rollback Process
+
+If a production deployment causes issues:
+
+1. Identify the problem in Sentry or Grafana
+2. Post in #engineering with `@channel ROLLBACK NEEDED: [description]`
+3. Run `./scripts/deploy.sh production --rollback`
+   - This deploys the previous known-good SHA
+4. Verify rollback resolved the issue
+5. Create an incident report (use template in `docs/templates/incident_report.md`)
+
+The rollback process is designed to be fast. The `--rollback` flag tells the deploy script to look up the previous successful deployment SHA from `deployments.log` and deploy that SHA instead of the current `main`. The entire rollback — from identifying the problem to having the previous version running — should take no more than 10 minutes.
+
+After a rollback, the deploying engineer is responsible for:
+- Confirming the rollback resolved the issue (check Sentry error rates, verify health endpoint)
+- Posting an update in #engineering with the status
+- Creating an incident report within 24 hours
+- Opening a PR to fix the underlying issue
+
+The rolled-back code remains on `main` but is not deployed. The fix should be developed on a branch, reviewed, merged, and deployed through the normal pipeline.
+
+### Hotfix Process
+
+1. Create a branch from `main`
+2. Make the fix
+3. Open a PR with `[HOTFIX]` prefix in the title
+4. Reviewer has 15-minute SLA to review
+5. Merge and deploy to staging
+6. Abbreviated staging verification (smoke tests only)
+7. Promote to production
+8. Extended post-deploy monitoring (1 hour)
+
+The hotfix process is the same pipeline as a normal deployment, with two relaxations:
+
+- **Review SLA**: Reviewers are expected to respond within 15 minutes for hotfix PRs. The `[HOTFIX]` prefix in the title triggers a Slack notification to #engineering-alerts to ensure visibility.
+- **Abbreviated staging verification**: Instead of full manual verification, the deploying engineer runs only the smoke test suite against staging. This reduces the staging verification time from ~15 minutes to ~2 minutes.
+
+All other gates remain in place. Tests must pass. CI must be green. The merge goes through the standard branch protection rules. The hotfix process is faster, not less rigorous.
+
+After a hotfix deployment, the post-deploy monitoring window is extended from 30 minutes to 1 hour. The deploying engineer stays available during this window and monitors Sentry for any new error types or regressions introduced by the fix.
+
+---
+
+## 11. Appendix: Secrets and Environment Variables
+
+The following secrets are configured in the GitHub Actions environment for the CI/CD pipeline:
+
+| Secret Name | Used By | Description |
+|-------------|---------|-------------|
+| `STAGING_HOST` | deploy-staging job | SSH hostname for staging server |
+| `STAGING_SSH_KEY` | deploy-staging job | SSH private key for staging deployment |
+| `PRODUCTION_HOST` | deploy-production (manual) | SSH hostname for production server |
+| `PRODUCTION_SSH_KEY` | deploy-production (manual) | SSH private key for production deployment |
+| `STRIPE_TEST_KEY` | test job | Stripe test mode API key for integration tests |
+| `SENTRY_DSN_STAGING` | deploy-staging job | Sentry DSN for staging environment |
+| `SENTRY_DSN_PRODUCTION` | deploy-production (manual) | Sentry DSN for production environment |
+
+Secrets are managed by Lina Okafor. Adding, rotating, or removing secrets requires approval from Priya Kaur. Secrets are rotated quarterly or immediately after any security incident.
+
+No secrets are stored in the repository, in `.env` files committed to git, or in any location accessible to non-admin team members. All secrets are accessed via GitHub Actions secrets or AWS Secrets Manager at runtime.
+
+---
+
+## 12. Appendix: Troubleshooting
+
+### CI Job Failures
+
+| Symptom | Likely Cause | Resolution |
+|---------|-------------|------------|
+| Lint fails | Code style violation | Run `ruff check src/` locally, fix violations |
+| Typecheck fails | Missing or incorrect type annotations | Run `mypy --strict src/billing/ src/auth/` locally |
+| Test fails | Test regression or flaky test | Run `pytest tests/ -v` locally, investigate failure |
+| Coverage below threshold | New code without tests | Add tests for the new code, re-run CI |
+| Deploy to staging fails | SSH connection issue or migration failure | Check `#engineering-alerts` for error details, contact Lina |
+
+### Common Questions
+
+**Q: Can I bypass the pipeline for a small change?**
+A: No. All changes go through the pipeline. The branch protection rules prevent direct pushes to `main` and require all status checks to pass.
+
+**Q: What if CI is flaky and fails intermittently?**
+A: Re-run the failed job. If the same test fails consistently, it is not flaky — investigate the failure. If a test is genuinely flaky (passes sometimes, fails sometimes with no code change), open an issue and tag it `flaky-test`. Do not disable the test.
+
+**Q: Who can deploy to production?**
+A: Any engineer can initiate a production deploy by running `./scripts/deploy.sh production`. The script uses the deployment key stored in GitHub Actions secrets. SSH access to production servers is restricted to Lina and Priya, but the deploy script handles the SSH connection automatically.
+
+**Q: What if I need to deploy outside business hours?**
+A: Follow the same process. Post in #engineering that you are deploying and monitor for the full post-deploy window. If the deployment fails and you need help with a rollback, escalate via PagerDuty.
+
+================================================================================
+END DOCUMENT — DOC-2025-0422-001
+================================================================================

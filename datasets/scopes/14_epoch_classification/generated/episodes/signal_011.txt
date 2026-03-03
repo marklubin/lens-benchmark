@@ -1,0 +1,617 @@
+================================================================================
+FOLDLY ENGINEERING — INCIDENT REVIEW PROCESS & RUNBOOK
+================================================================================
+Document ID   : DOC-2025-0428-001
+Type          : Process Document / Runbook
+Author        : Priya Kaur, Lina Okafor
+Reviewers     : Marcus Webb, Jess Tanaka, Danny Reeves
+Status        : Approved
+Created       : 2025-04-28
+Last Updated  : 2025-04-28
+Version       : 1.0
+Classification: Internal — Engineering Team Only
+Repository    : foldly-api (docs/processes/incident_review_runbook.md)
+================================================================================
+
+APPROVALS:
+  Priya Kaur (VP Engineering)         — 2025-04-28  APPROVED
+  Lina Okafor (SRE Lead)              — 2025-04-28  APPROVED
+  Marcus Webb (Senior Backend Eng)    — 2025-04-28  REVIEWED
+  Jess Tanaka (Senior Frontend Eng)   — 2025-04-28  REVIEWED
+  Danny Reeves (Platform Engineer)    — 2025-04-28  REVIEWED
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+1. Purpose
+2. Scope & Applicability
+3. Severity Definitions
+4. Incident Response Procedure
+   4.1 Detection
+   4.2 Declaration
+   4.3 Response Roles
+   4.4 Communication Cadence
+   4.5 Escalation Paths
+   4.6 Resolution
+5. Post-Incident Review (PIR)
+   5.1 Requirements
+   5.2 PIR Template
+   5.3 PIR Guidelines
+   5.4 PIR Scheduling & Logistics
+6. On-Call Rotation
+   6.1 Schedule
+   6.2 On-Call Responsibilities
+   6.3 On-Call Expectations
+   6.4 Swap Procedure
+7. Runbooks
+   7.1 Billing Endpoint Not Responding
+   7.2 Database Performance Degradation
+   7.3 Authentication / SSO Failure
+   7.4 Elevated Error Rates (General)
+8. Tooling Reference
+9. Document Control
+================================================================================
+
+## 1. Purpose
+
+This document establishes the formal incident review process for Foldly Engineering. It provides templates, severity definitions, escalation procedures, and post-incident review requirements.
+
+This process was created in response to INC-2025-0413-001 (duplicate billing) and codifies the lessons learned from that incident into a repeatable framework.
+
+During the retrospective for INC-2025-0413-001, the team identified several gaps in our incident handling. Specifically, there was no documented procedure for who should take command of an incident, how frequently to communicate status updates, or what the expectations were for post-incident follow-up. Different engineers had different mental models of what "responding to an incident" meant. Priya Kaur and Lina Okafor were tasked with drafting this document, with input from the full engineering team during two working sessions held on April 23 and April 25, 2025.
+
+The overarching goal is consistency. When an incident occurs at 2am on a Saturday, the on-call engineer should not have to improvise a response plan. This document provides that plan.
+
+---
+
+## 2. Scope & Applicability
+
+This document applies to all incidents affecting the Foldly production environment, including but not limited to:
+
+- **Application layer**: API errors, degraded response times, feature failures, webhook processing failures
+- **Data layer**: Database outages, data corruption, replication lag, backup failures
+- **Infrastructure layer**: Server unreachability, certificate expiration, DNS resolution failures, load balancer issues
+- **Third-party dependencies**: Stripe outages, Auth0 outages, AWS service disruptions, SendGrid delivery failures
+- **Security events**: Unauthorized access attempts, credential exposure, vulnerability disclosure
+
+This document does NOT cover:
+- Staging or development environment issues (these should be tracked in #eng-staging but do not require formal incident response)
+- Feature requests or enhancement work (use the standard sprint planning process)
+- Customer-reported issues that are by-design behavior (route through support with product clarification)
+
+All engineers on the Foldly engineering team are expected to read and understand this document. New hires will review it during their first week onboarding. Lina Okafor will conduct a walkthrough with each new team member and run a tabletop exercise within their first month.
+
+---
+
+## 3. Severity Definitions
+
+| Severity | Definition | Examples | Response Time |
+|----------|-----------|----------|--------------|
+| SEV-1 | Customer financial impact, data loss, or complete service outage | Duplicate charges, data corruption, API fully down | 15 min to acknowledge, all-hands |
+| SEV-2 | Significant feature degradation affecting multiple customers | Search not returning results, uploads failing, SSO broken | 30 min to acknowledge, 2 engineers |
+| SEV-3 | Minor feature issue affecting single customer or non-critical path | Slow dashboard loading, formatting bug, single-customer config issue | 2 hours to acknowledge, 1 engineer |
+| SEV-4 | Cosmetic or low-impact issue | UI alignment, typo, non-blocking warning | Next business day |
+
+### Severity Classification Notes
+
+Severity is determined at declaration time and can be upgraded or downgraded as more information becomes available. The Incident Commander has authority to change severity at any point during the incident.
+
+Some guidelines for borderline cases discussed during the April 23 working session:
+
+- **Financial impact of any magnitude is SEV-1.** Even if only one customer is affected and the dollar amount is small, the reputational and trust impact of billing errors puts these in SEV-1. This was a specific lesson from INC-2025-0413-001 — the initial triage treated it as SEV-2 because only 14 customers were affected, which delayed the all-hands response by approximately 25 minutes.
+
+- **API latency spikes**: If P99 latency exceeds 5x normal for more than 5 minutes and is customer-visible, treat as SEV-2. If P99 exceeds 10x and is affecting core flows (billing, search, upload), treat as SEV-1.
+
+- **Single-customer outages**: If a single enterprise customer's entire account is non-functional, that's SEV-2 even if other customers are unaffected. Enterprise customers have SLA commitments.
+
+- **Partial feature degradation**: If search returns results but relevance is visibly poor, or if upload succeeds but thumbnails don't generate, treat as SEV-3 unless customer reports start arriving, at which point escalate to SEV-2.
+
+- **When in doubt, go one level higher.** It is always better to overclassify and downgrade than to underclassify and delay response. Marcus Webb made this point during the working session and the group agreed it should be an explicit guideline.
+
+---
+
+## 4. Incident Response Procedure
+
+### 4.1 Detection
+
+Incidents can be detected through:
+- **Automated alerts**: Sentry error alerts, PagerDuty triggers, Grafana threshold alerts
+- **Customer reports**: Support emails, Slack messages from customer contacts
+- **Internal observation**: Engineer notices anomalous behavior during work
+- **SLO budget burn**: Error budget consumption triggers per SLO framework
+
+Current alerting thresholds (maintained in `infra/monitoring/alert_rules.yml`):
+
+| Alert | Trigger | Destinations |
+|-------|---------|-------------|
+| API Error Rate High | >1% 5xx responses over 5 min rolling window | PagerDuty (primary on-call), #engineering |
+| Payments Endpoint Down | 3 consecutive health check failures (30 sec interval) | PagerDuty (primary + secondary on-call), #engineering, #billing-alerts |
+| Database Replication Lag | Replica lag >30 seconds for >2 minutes | PagerDuty (primary on-call), #infrastructure |
+| Stripe Webhook Failure | >5 consecutive webhook delivery failures | #billing-alerts, primary on-call via Slack DM |
+| SLO Budget Burn (Fast) | >2% of monthly error budget consumed in 1 hour | PagerDuty (primary on-call), #slo-tracking |
+| SLO Budget Burn (Slow) | >10% of monthly error budget consumed in 6 hours | #slo-tracking |
+| Certificate Expiry | Certificate expiring within 14 days | #infrastructure (weekly digest) |
+| Disk Usage Critical | >85% disk utilization on any production host | PagerDuty (primary on-call), #infrastructure |
+
+Danny Reeves maintains these alert definitions and the PagerDuty routing rules. Changes to alerting thresholds require review from Lina Okafor.
+
+For customer reports: the Support team (currently Nadia Khoury and team) will post in #eng-support-escalations if a customer issue looks like it could be a system-level problem. Any engineer who sees a pattern of similar customer reports should proactively investigate rather than waiting for a formal escalation.
+
+### 4.2 Declaration
+
+Any engineer can declare an incident. To declare:
+
+1. Post in #engineering: `@channel INCIDENT: [brief description] — SEV-[1/2/3/4]`
+2. For SEV-1 or SEV-2: Create a dedicated incident channel: `#incident-YYYYMMDD`
+3. Assign an **Incident Commander** (IC) — defaults to on-call engineer
+4. IC posts initial status update within 15 minutes
+
+Detailed declaration procedure:
+
+**Step 1: Initial notification**
+Post in #engineering with the exact format shown above. This triggers a Slackbot workflow that logs the incident start time. Include the system(s) affected if known, e.g.: `@channel INCIDENT: Billing endpoint returning 500s for Stripe webhook callbacks — SEV-1`
+
+**Step 2: Create incident channel (SEV-1 and SEV-2 only)**
+Use the Slack channel naming convention `#incident-YYYYMMDD` (e.g., `#incident-20250413`). If multiple incidents occur on the same day, append a letter: `#incident-20250413-b`. Set the channel topic to a one-line incident summary. Invite all relevant engineers immediately. For SEV-1, invite the entire engineering team.
+
+**Step 3: Assign Incident Commander**
+The primary on-call engineer is the default IC. If the primary on-call is unavailable or was the one who introduced the issue being investigated, the secondary on-call takes over as IC. If neither is available, the most senior engineer present in the channel takes the role.
+
+**Step 4: Initial status update**
+The IC posts an initial status message within 15 minutes of declaration:
+```
+STATUS UPDATE — [time UTC]
+Incident: [brief description]
+Severity: SEV-[X]
+Impact: [what customers are experiencing]
+Current status: [investigating / mitigating / monitoring]
+Next update: [expected time]
+```
+
+**Step 5: Begin timeline tracking**
+The Scribe (or IC, if no scribe is assigned) opens a Google Doc or thread in the incident channel to track events in real-time. Every significant action or discovery gets a timestamped entry.
+
+### 4.3 Response Roles
+
+| Role | Responsibility |
+|------|---------------|
+| Incident Commander (IC) | Coordinates response, makes decisions, communicates status |
+| Technical Lead | Investigates root cause, develops and deploys fix |
+| Communications Lead | Handles customer communication, internal stakeholder updates |
+| Scribe | Documents timeline, decisions, and actions in real-time |
+
+For SEV-3 and SEV-4, a single engineer can fill all roles.
+
+Additional notes on each role:
+
+**Incident Commander (IC)**: The IC does NOT need to be the most technically knowledgeable person about the affected system. The IC's job is coordination and decision-making. Priya Kaur emphasized this during the April 25 session — during INC-2025-0413-001, Marcus was simultaneously investigating the root cause AND trying to coordinate the response, which slowed both efforts. The IC should delegate the technical investigation to the Technical Lead and focus on the bigger picture: what is the blast radius, who needs to be informed, what is the rollback plan, and when do we escalate further.
+
+**Technical Lead**: The engineer with the deepest knowledge of the affected system. If the affected system spans multiple domains (e.g., billing touches both the API layer and the database), the IC may designate multiple Technical Leads who coordinate with each other.
+
+**Communications Lead**: For SEV-1 incidents, Priya Kaur or her designee handles external communications. For SEV-2, the IC can handle communications or delegate to another engineer. Customer-facing communications should be reviewed by at least one other person before sending. Use the templates in `docs/templates/customer_incident_notification.md`.
+
+**Scribe**: Often overlooked but extremely valuable. During INC-2025-0413-001, the team relied on Slack message history to reconstruct the timeline, which was scattered across multiple channels and DMs. Having a dedicated scribe who maintains a single chronological log makes the post-incident review dramatically easier. Jess Tanaka volunteered to create a Scribe template document that can be copied at incident start.
+
+### 4.4 Communication Cadence
+
+| Severity | Internal Updates | Customer Updates |
+|----------|-----------------|-----------------|
+| SEV-1 | Every 15 minutes in incident channel | Every 30 minutes via email |
+| SEV-2 | Every 30 minutes in incident channel | Every hour if customer-facing |
+| SEV-3 | As needed | On resolution |
+| SEV-4 | Async in #engineering | N/A |
+
+Internal updates should follow the format:
+```
+STATUS UPDATE — [time UTC]
+What we know: [current understanding]
+What we're doing: [current actions]
+Impact: [current customer impact, any changes]
+Next update: [expected time]
+```
+
+Customer updates are sent via the support team's email system (Intercom). For SEV-1 events with broad customer impact, also update the public status page at status.foldly.io. Danny Reeves has admin credentials for the status page. If Danny is unavailable, Lina Okafor has backup access.
+
+Stakeholder notifications for SEV-1: the IC should notify Priya Kaur directly (Slack DM or phone call if after hours) within 15 minutes of declaration. Priya handles communication to the executive team and to Sales if enterprise customers are affected.
+
+### 4.5 Escalation Paths
+
+If the on-call engineer or IC cannot resolve the issue within the expected timeframes, the following escalation paths apply:
+
+| Severity | First Escalation | Second Escalation | Third Escalation |
+|----------|-----------------|-------------------|------------------|
+| SEV-1 | Secondary on-call (within 10 min) | Priya Kaur (within 30 min) | External vendor support (within 1 hour) |
+| SEV-2 | Secondary on-call (within 30 min) | Team lead of affected system (within 1 hour) | Priya Kaur (within 2 hours) |
+| SEV-3 | Team lead of affected system (next business day) | N/A | N/A |
+| SEV-4 | N/A | N/A | N/A |
+
+External vendor escalation contacts:
+- **Stripe**: Priority support via Stripe dashboard (all engineers have access), escalation email: enterprise-support@stripe.com, account rep: Jordan Fielding
+- **Auth0**: Support portal at support.auth0.com, priority ticket via admin console, account rep: Samira Voss
+- **AWS**: Business support plan, case creation via AWS Console, TAM: Rachel Liu
+- **Heroku**: Support ticket via dashboard, platform-status@heroku.com for platform-level issues
+
+### 4.6 Resolution
+
+An incident is resolved when:
+- The immediate issue is fixed (hotfix deployed, service restored)
+- Customer impact has ceased
+- Monitoring confirms stable operation for 30 minutes post-fix
+- All affected customers have been notified
+
+The IC posts a resolution message: `INCIDENT RESOLVED: [description of fix] — total duration: [X minutes/hours]`
+
+Post-resolution steps:
+
+1. **IC posts resolution summary** in the incident channel and in #engineering.
+2. **IC creates a PIR ticket** in the GitHub project board `pir-actions` with the incident ID, severity, brief summary, and deadline for the post-incident review meeting.
+3. **Scribe finalizes the timeline** document — fills in any gaps, adds timestamps from Slack messages or PagerDuty logs, and shares the completed timeline with the team.
+4. **Communications Lead sends a resolution notification** to affected customers, including: what happened, how it was fixed, and what steps are being taken to prevent recurrence (this last part can be updated after the PIR if the review hasn't happened yet).
+5. **On-call engineer monitors** for recurrence over the next 24 hours, with alerts set to escalate quickly if the same symptoms reappear.
+
+After a SEV-1 or SEV-2, the IC should explicitly ask the team "Is there anything we need to do RIGHT NOW to prevent this from recurring before the PIR?" If there's an obvious preventive measure (e.g., adding a feature flag, disabling a broken endpoint, reverting a config change), do it immediately rather than waiting for the formal review.
+
+---
+
+## 5. Post-Incident Review (PIR)
+
+### 5.1 Requirements
+
+| Severity | PIR Required | Timeline | Attendees |
+|----------|-------------|----------|-----------|
+| SEV-1 | Yes, mandatory | Within 48 hours | All engineering + stakeholders |
+| SEV-2 | Yes, mandatory | Within 1 week | Engineering team |
+| SEV-3 | Optional (IC discretion) | Within 2 weeks | Relevant engineers |
+| SEV-4 | No | N/A | N/A |
+
+PIR meetings are scheduled by the IC and facilitated by a designated facilitator. The facilitator should NOT be someone who was directly involved in the incident response — they provide a neutral perspective and keep the discussion on track. Lina Okafor has agreed to serve as the default PIR facilitator for SEV-1 incidents.
+
+For SEV-2 PIRs, the IC can facilitate or designate another team member. The key requirement is that someone in the room is responsible for ensuring the discussion stays blameless and productive.
+
+### 5.2 PIR Template
+
+```markdown
+## Post-Incident Review: INC-YYYY-MMDD-NNN
+
+### Summary
+[One paragraph: what happened, who was affected, how it was resolved]
+
+### Timeline
+| Time (UTC) | Event |
+|------------|-------|
+| HH:MM | First detection |
+| HH:MM | Incident declared |
+| HH:MM | Root cause identified |
+| HH:MM | Fix deployed |
+| HH:MM | Resolution confirmed |
+
+### Impact
+| Metric | Value |
+|--------|-------|
+| Duration | X minutes |
+| Customers affected | N |
+| Financial impact | $X |
+| SLO budget consumed | X% |
+
+### Root Cause Analysis (5 Whys)
+1. Why did [symptom] occur?
+   Because [proximate cause].
+2. Why did [proximate cause] occur?
+   Because [deeper cause].
+3. [Continue until systemic root cause is identified]
+
+### Contributing Factors
+- [Factor 1]
+- [Factor 2]
+
+### What Went Well
+- [Thing 1]
+- [Thing 2]
+
+### What Could Be Improved
+- [Thing 1]
+- [Thing 2]
+
+### Action Items
+| # | Action | Owner | Deadline | Status |
+|---|--------|-------|----------|--------|
+| 1 | [Action] | [Owner] | [Date] | Open |
+
+### Lessons Learned
+[Key takeaways for the team]
+```
+
+The PIR document is stored in `docs/pir/` in the `foldly-api` repository, named `PIR-INC-YYYY-MMDD-NNN.md`. This creates a searchable archive of past incidents and their resolutions. Danny Reeves suggested indexing these in Confluence as well, which will be evaluated in Q3 2025 when the team reviews documentation tooling.
+
+### 5.3 PIR Guidelines
+
+**Blameless culture**: PIRs focus on systems and processes, not individuals. Phrases like "Marcus's code had a bug" become "the billing module lacked test coverage for retry scenarios." The goal is to improve the system, not to assign blame.
+
+This is not just a nice-to-have. If people fear blame, they will hide information, and hiding information during incident response gets us slower resolution times and worse root cause analysis. Priya Kaur was explicit about this during the working sessions: anyone who engages in finger-pointing during a PIR will be privately counseled. The entire team agreed to this norm.
+
+Lina Okafor shared a useful reframing technique from her previous role at Datadog: instead of asking "who made this mistake?" ask "what about our system allowed this mistake to happen, and what about our system failed to catch it before it reached production?" This shifts the conversation from individual accountability to systemic improvement.
+
+**5 Whys until systemic**: Don't stop at the proximate cause. The duplicate billing PIR went from "idempotency key was wrong" to "no testing existed" to "testing was systematically deprioritized" to "the team culture valued speed over quality without guardrails." The systemic cause is where the actionable improvements live.
+
+A common failure mode with 5 Whys is stopping too early. "The code had a bug" is not a root cause — code always has bugs, that's why we have testing, code review, and monitoring. "The code had a bug AND the bug was not caught by tests AND the code was not reviewed carefully AND monitoring did not detect the impact" gets closer to the real problem. Each of those "AND" clauses is an independent defense layer that failed.
+
+Another failure mode is going too deep into abstract territory. "The team valued speed over quality" is useful if it leads to concrete actions (e.g., "we will allocate 20% of sprint capacity to test coverage"). If the root cause is so abstract that you can't write a specific action item, you've gone one level too far. Back up to the previous why and write actions for that level.
+
+**Action items must be specific and assigned**: "Improve testing" is not an action item. "Write integration tests for webhook retry scenarios, owned by Marcus, due April 18" is an action item.
+
+Each action item must have:
+- A clear, unambiguous description of what will be done
+- A single owner (not a team — one person is accountable)
+- A specific deadline
+- A definition of "done" (what does it look like when this action item is complete?)
+
+Jess Tanaka suggested that action items be classified as either "prevent" (prevents this specific incident from recurring) or "detect" (catches similar incidents faster). This helps ensure we're improving both prevention and detection, not just one or the other.
+
+**Follow-up on action items**: The weekly SLO review meeting includes a standing agenda item to review open PIR action items. Action items are tracked in the `pir-actions` GitHub project board.
+
+Action items that are overdue by more than one week are flagged in the weekly meeting. Persistent overdue items will be escalated to Priya Kaur. If an action item is no longer relevant (e.g., the system has been rewritten, making the fix moot), it can be closed with a "won't fix" resolution and a comment explaining why.
+
+### 5.4 PIR Scheduling & Logistics
+
+For SEV-1 PIRs (within 48 hours):
+- IC sends a calendar invite to all engineering team members plus relevant stakeholders (support lead, product manager if applicable)
+- Duration: 60 minutes minimum, 90 minutes recommended
+- The Scribe's timeline document and any relevant Grafana dashboards or log snippets should be shared with attendees at least 2 hours before the meeting
+- The facilitator prepares by reading the timeline and drafting initial 5 Whys questions
+
+For SEV-2 PIRs (within 1 week):
+- IC sends a calendar invite to the engineering team
+- Duration: 45-60 minutes
+- Pre-meeting prep: IC fills in the PIR template with known information and circulates it 24 hours before the meeting for async comments
+
+For optional SEV-3 PIRs:
+- Can be conducted asynchronously via a shared document if the IC determines a synchronous meeting is not needed
+- IC fills in the template and posts in #engineering for review and comment
+- Any resulting action items are still tracked in the `pir-actions` board
+
+---
+
+## 6. On-Call Rotation
+
+### 6.1 Schedule
+
+| Week Starting | Primary | Secondary |
+|---------------|---------|-----------|
+| 2025-04-28 | Lina Okafor | Marcus Webb |
+| 2025-05-05 | Marcus Webb | Jess Tanaka |
+| 2025-05-12 | Jess Tanaka | Danny Reeves |
+| 2025-05-19 | Danny Reeves | Lina Okafor |
+| 2025-05-26 | Priya Kaur | Marcus Webb |
+
+Rotation repeats every 5 weeks. Primary is the first responder; secondary is backup if primary doesn't acknowledge within 10 minutes.
+
+The schedule is also maintained in PagerDuty (service: "Foldly Production") and should be considered the source of truth if there are discrepancies between this document and PagerDuty. Lina Okafor updates PagerDuty at the start of each rotation cycle.
+
+Note: Priya Kaur is included in the rotation despite her management role. She expressed during the working session that she wants to stay hands-on with production systems and share the on-call load equitably. Her secondary is always one of the senior engineers for additional technical depth.
+
+### 6.2 On-Call Responsibilities
+
+- Respond to PagerDuty alerts within 10 minutes
+- Triage severity and escalate as needed
+- For SEV-1/SEV-2: begin investigation immediately, notify IC
+- For SEV-3/SEV-4: acknowledge and schedule for next business day if after hours
+- Monitor Grafana dashboards and Sentry during on-call shift
+- Hand off any active issues to the next on-call engineer at rotation time
+
+Daily check-in during on-call weeks:
+- Review Grafana dashboards (API latency, error rates, database metrics) at least once in the morning and once in the afternoon
+- Skim Sentry for new unresolved errors — if error volume is trending up, investigate even if no PagerDuty alert has fired
+- Check #eng-support-escalations for any customer-reported issues that haven't been triaged
+
+End-of-week handoff:
+- Post a summary in #engineering: "On-call handoff: [summary of notable events this week, any ongoing issues, any alerts that fired and were resolved]"
+- If there are active or recently resolved incidents, brief the incoming on-call engineer directly via Slack or a short call
+- Ensure PagerDuty is correctly configured for the incoming rotation
+
+### 6.3 On-Call Expectations
+
+- Keep laptop accessible during on-call hours (8am-10pm local time, weekdays; 10am-6pm weekends)
+- Maintain VPN connectivity for production access
+- No alcohol or activities that impair response capability during on-call
+- If unable to serve on-call (illness, travel), arrange a swap with another engineer at least 48 hours in advance
+
+Additional expectations discussed during the April 25 working session:
+
+- On-call engineers should have production SSH access verified BEFORE their rotation starts. Danny Reeves reported that during INC-2025-0413-001, there was a 12-minute delay while an engineer reset their SSH key. Test access at least 24 hours before your on-call week begins.
+- Keep your phone charged and with you. PagerDuty sends SMS and phone call notifications for SEV-1, but only if your phone number is correctly configured in your PagerDuty profile. Verify this.
+- If you are commuting, traveling, or otherwise away from your laptop during on-call hours, you should be able to acknowledge an alert and begin triage from your phone within 10 minutes, even if you cannot fully investigate until you reach your laptop. Acknowledgment buys time and lets the secondary on-call know someone is on it.
+
+### 6.4 Swap Procedure
+
+If you need to swap on-call shifts with another engineer:
+
+1. Find a willing swap partner (post in #engineering or ask directly)
+2. Both parties agree on the swap dates
+3. The engineer initiating the swap updates PagerDuty to reflect the change
+4. Post in #engineering: "On-call swap: [Your Name] and [Swap Partner] swapping weeks of [date] and [date]"
+5. Update this document only if the swap affects more than one rotation cycle
+
+Swaps should be arranged at least 48 hours in advance. For emergencies (sudden illness), notify Lina Okafor directly and she will arrange coverage.
+
+---
+
+## 7. Runbooks
+
+Runbooks provide step-by-step diagnostic and remediation procedures for common incident types. These are living documents — if you encounter a scenario not covered here or find a diagnostic step that's missing, update the runbook as part of the incident's action items.
+
+All runbook commands assume the engineer has production SSH access and the `foldly` CLI tools installed. Production hosts are accessible via the Tailscale VPN. SSH config is in the team 1Password vault under "Production Access."
+
+### 7.1 Billing Endpoint Not Responding
+
+**Symptoms**: PagerDuty alert "Payments endpoint down", Stripe webhook delivery failures, customer reports of payment errors
+
+**Severity Guidance**: Typically SEV-1 (financial impact). If the endpoint is degraded (slow but functional) rather than fully down, may be SEV-2.
+
+**Diagnostic Steps**:
+1. Check API server health: `curl https://api.foldly.io/health`
+   - Expected response: `{"status": "ok", "version": "X.Y.Z", "uptime_seconds": N}`
+   - If no response or connection refused: the entire API server is down, not just billing. Escalate immediately.
+   - If response is `{"status": "degraded", ...}`: the health check is detecting an internal issue. Check the `"checks"` field for details.
+
+2. Check billing endpoint: `curl https://api.foldly.io/api/billing/status`
+   - Expected response: `{"billing_service": "ok", "stripe_connection": "ok", "last_webhook_received": "ISO timestamp"}`
+   - If `stripe_connection` is not `ok`: likely a Stripe-side issue. Check Step 5.
+   - If `billing_service` is not `ok`: application-level issue. Continue diagnostics.
+
+3. Check server resource usage: SSH to prod, run `htop`, check disk space with `df -h`
+   - Production hosts: `prod-api-01.foldly.internal`, `prod-api-02.foldly.internal`
+   - Look for: high CPU usage by the `foldly-api` process, swap usage, disk space below 10%
+   - Memory threshold: if RSS for the API process exceeds 4GB, a memory leak is likely
+
+4. Check Postgres connectivity: `psql -h localhost -U foldly -d foldly_prod -c "SELECT 1"`
+   - If connection times out: database may be down or connection pool exhausted. See Runbook 7.2.
+   - If connection succeeds: database is reachable. The issue is likely in the application layer.
+   - Also check active connections: `SELECT count(*) FROM pg_stat_activity;` — pool max is 100, alert if above 80.
+
+5. Check Stripe API status: https://status.stripe.com
+   - If Stripe is reporting issues: this is an external dependency failure. Enable queued webhook processing (see below) and wait for Stripe resolution.
+   - Also check Stripe API response directly: `curl -s -o /dev/null -w "%{http_code}" https://api.stripe.com/v1/charges -H "Authorization: Bearer $STRIPE_API_KEY" -d limit=1`
+
+6. Check recent deployments: `cat /var/log/foldly/deployments.log | tail -5`
+   - If a deployment happened within the last hour: it may be the cause. Consider rollback (see Common Causes table).
+   - Note the deployment hash for reference in the incident timeline.
+
+7. Check application logs: `journalctl -u foldly-api --since "30 minutes ago"`
+   - Look for: stack traces, repeated error messages, connection refused errors, timeout errors
+   - Filter for billing-specific errors: `journalctl -u foldly-api --since "30 minutes ago" | grep -i "billing\|stripe\|payment\|webhook"`
+
+**Common Causes and Fixes**:
+| Cause | Fix |
+|-------|-----|
+| Server out of memory | Restart application: `sudo systemctl restart foldly-api`. Investigate memory leak |
+| Database connection pool exhausted | Restart application. Check for long-running queries: `SELECT * FROM pg_stat_activity WHERE state = 'active'` |
+| Stripe API outage | Wait for Stripe resolution. Enable queued webhook processing |
+| Bad deployment | Rollback: `./scripts/deploy.sh production --rollback` |
+| SSL certificate expired | Renew cert: `sudo certbot renew` |
+
+**Queued webhook processing**: If Stripe is down and cannot deliver webhooks, enable the retry queue: `curl -X POST https://api.foldly.io/admin/webhooks/enable-queue -H "Authorization: Bearer $ADMIN_TOKEN"`. This queues incoming Stripe events for processing when connectivity is restored. The queue is persisted in Redis and will survive application restarts.
+
+### 7.2 Database Performance Degradation
+
+**Symptoms**: API latency increase, slow search queries, Grafana P99 alert
+
+**Severity Guidance**: SEV-2 if latency is degraded but requests are completing. SEV-1 if queries are timing out and causing user-visible failures.
+
+**Diagnostic Steps**:
+1. Check active queries: `SELECT pid, now() - query_start AS duration, query FROM pg_stat_activity WHERE state = 'active' ORDER BY duration DESC`
+   - Any query running for more than 30 seconds is suspect
+   - Note the query text and the `pid` for potential cancellation
+
+2. Check for lock contention: `SELECT * FROM pg_locks WHERE NOT granted`
+   - If there are blocked locks, identify what is holding the lock: `SELECT pg_blocking_pids(pid) AS blocked_by, pid, query FROM pg_stat_activity WHERE pid IN (SELECT pid FROM pg_locks WHERE NOT granted)`
+
+3. Check table bloat: `SELECT schemaname, tablename, n_dead_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 10`
+   - Tables with more than 100K dead tuples need a VACUUM
+   - The `billing_events` table is the most common offender due to high write volume
+
+4. Check index usage: `SELECT indexrelname, idx_scan FROM pg_stat_user_indexes ORDER BY idx_scan ASC LIMIT 10`
+   - Indexes with zero scans may be unused and could be candidates for removal (but verify with Lina before dropping)
+   - Missing indexes on frequently queried columns will show up as sequential scans in the query plan
+
+**Common Causes and Fixes**:
+| Cause | Fix |
+|-------|-----|
+| Missing index on frequently queried column | Add index (schedule during low traffic) |
+| Long-running query holding locks | Kill query: `SELECT pg_cancel_backend([pid])`. Investigate query origin |
+| Table bloat from lack of VACUUM | Run `VACUUM ANALYZE [table]` |
+| Backup job causing I/O contention | Reschedule backup to off-peak hours |
+
+**Additional diagnostic**: Check if autovacuum is running: `SELECT relname, last_autovacuum, last_autoanalyze FROM pg_stat_user_tables ORDER BY last_autovacuum DESC NULLS LAST LIMIT 10`. If autovacuum hasn't run recently on high-churn tables, check the autovacuum configuration in `postgresql.conf`. Danny Reeves tuned autovacuum thresholds in March 2025 — settings are documented in `infra/postgres/README.md`.
+
+### 7.3 Authentication/SSO Failure
+
+**Symptoms**: Users unable to log in, SSO redirects failing, Auth0 errors in Sentry
+
+**Severity Guidance**: SEV-2 (multiple customers affected, core functionality blocked). Escalate to SEV-1 if the outage persists for more than 30 minutes or if enterprise customers with SLA commitments are affected.
+
+**Diagnostic Steps**:
+1. Check Auth0 status: https://status.auth0.com
+   - If Auth0 is reporting an outage: this is an external dependency failure. Communicate to affected customers and monitor for Auth0 resolution.
+
+2. Check SAML certificate expiration: Auth0 dashboard → Applications → [customer] → Certificates
+   - SAML certificates have expiration dates. If a certificate has expired, SSO will fail for that customer's users.
+   - Renewal procedure: generate a new certificate in Auth0, send the new metadata XML to the customer's IT team for configuration on their IdP.
+   - Jess Tanaka maintains a spreadsheet of SAML certificate expiration dates in the shared Google Drive folder "Customer SSO Config."
+
+3. Check recent auth config changes: `git log --oneline src/auth/ | head -5`
+   - If a recent commit modified auth configuration, it may have introduced a regression. Review the diff and consider revert.
+
+4. Test login flow manually: Open incognito browser, attempt login
+   - Try both email/password login and SSO login (if you have a test SSO account)
+   - Check browser developer tools Network tab for failed requests — note the HTTP status code and response body
+   - Check the Auth0 logs (Auth0 dashboard → Logs) for the specific error type
+
+**Additional Notes**:
+- Auth0 tenant: `foldly.us.auth0.com`
+- Auth0 admin credentials are in the team 1Password vault under "Auth0 Production"
+- If Auth0 is fully down and we need to provide emergency access, there is a bypass mechanism documented in `docs/emergency/auth_bypass.md`. This should ONLY be used as a last resort during a confirmed Auth0 outage, and every bypass login must be logged and reported in the PIR.
+
+### 7.4 Elevated Error Rates (General)
+
+**Symptoms**: Sentry alerts for increased error volume, Grafana showing elevated 5xx rate, customer reports of intermittent failures.
+
+**Severity Guidance**: Depends on the scope. If errors are isolated to one endpoint or feature, start at SEV-3. If errors are widespread across multiple endpoints, start at SEV-2.
+
+**Diagnostic Steps**:
+1. Identify the affected endpoints: Check Grafana dashboard "API Endpoint Health" to see which endpoints have elevated error rates.
+2. Check Sentry for the top errors: Group by exception type and endpoint. Identify if this is a new error or an increase in an existing error.
+3. Correlate with deployments: Check if a deployment happened recently. If so, review the deployment diff.
+4. Correlate with traffic: Check if traffic volume has spiked (possible DDoS or viral usage). Check Cloudflare analytics.
+5. Check downstream dependencies: Verify Stripe, Auth0, AWS, and SendGrid status pages.
+
+**Common Causes and Fixes**:
+| Cause | Fix |
+|-------|-----|
+| Recent deployment introduced regression | Rollback: `./scripts/deploy.sh production --rollback` |
+| Downstream dependency outage | Identify the dependency, add circuit breaker if not present, wait for resolution |
+| Traffic spike exceeding capacity | Scale up: add instances via Heroku dashboard or CLI |
+| Database connectivity issues | See Runbook 7.2 |
+
+---
+
+## 8. Tooling Reference
+
+Quick reference for the tools and services used during incident response:
+
+| Tool | Purpose | Access |
+|------|---------|--------|
+| PagerDuty | Alert routing and on-call management | pagerduty.com — all engineers have accounts |
+| Grafana | Metrics dashboards (API latency, error rates, DB perf) | grafana.foldly.internal — VPN required |
+| Sentry | Error tracking and exception monitoring | sentry.io/foldly — all engineers have accounts |
+| Slack | Primary communication during incidents | #engineering, #incident-YYYYMMDD channels |
+| GitHub | PIR documents, runbooks, code review for fixes | github.com/foldly/foldly-api |
+| 1Password | Production credentials, SSH keys, API keys | Team vault "Foldly Engineering" |
+| Stripe Dashboard | Billing event logs, webhook delivery status | dashboard.stripe.com |
+| Auth0 Dashboard | Authentication logs, SAML config, user management | manage.auth0.com |
+| Heroku Dashboard | Application scaling, deployment history, logs | dashboard.heroku.com |
+| Tailscale | VPN for production SSH access | tailscale.com — device enrollment required |
+| Cloudflare | CDN, DDoS protection, traffic analytics | dash.cloudflare.com |
+
+For tool access issues during an incident: contact Lina Okafor (Slack DM or phone: in 1Password under "Lina Emergency Contact"). Lina has admin access to all production tooling and can grant emergency access if needed.
+
+---
+
+## 9. Document Control
+
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 1.0 | 2025-04-28 | Priya Kaur, Lina Okafor | Initial version |
+
+**Review Schedule**: This document is reviewed and updated quarterly, or after any SEV-1 incident.
+
+**Next Scheduled Review**: 2025-07-28 (Q3 2025)
+
+**Distribution**: All engineering team members. Stored in `docs/processes/` in the `foldly-api` repository.
+
+**Feedback**: If you have suggestions for improving this document, open a PR against `docs/processes/incident_review_runbook.md` or post in #engineering with the tag `[runbook-feedback]`. All feedback is reviewed by Lina Okafor during the quarterly update cycle, or sooner if it addresses a gap discovered during an active incident.
+
+**Training**: New hires receive a walkthrough of this document during their first week. Lina Okafor conducts a 30-minute tabletop exercise within the new hire's first month, simulating a SEV-2 incident and walking through the response process end-to-end. The team also conducts a quarterly "game day" exercise where a simulated incident is injected into the production monitoring pipeline (without actual production impact) to test response procedures. The first game day is scheduled for Q3 2025.
+
+================================================================================
+END DOCUMENT — DOC-2025-0428-001
+================================================================================

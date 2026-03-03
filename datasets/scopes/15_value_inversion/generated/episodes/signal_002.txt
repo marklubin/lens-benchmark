@@ -1,0 +1,348 @@
+VERDANA ANALYTICS — INTERNAL DOCUMENT
+CLASSIFICATION: CONFIDENTIAL
+DOCUMENT TYPE: MEETING TRANSCRIPT + PRODUCT DECISION LOG
+DATE: MAY 4, 2025
+SUBJECT: FEATURE PRIORITIZATION — LAUNCH SCOPE FINALIZATION
+
+ATTENDEES:
+- Nadia Reis (Head of Product)
+- Marcus Okafor (CTO)
+- Priya Chandrasekaran (CEO)
+- Amir Patel (Senior Engineer)
+- Jess Thornton (Senior Engineer)
+- Lina Choi (Designer)
+- Derek Huang (Head of Sales) — joined remotely at [00:02:40], dropped at [00:55:12] for client call
+- Tomás Ferreira (DevOps Lead) — joined remotely
+- Rhea Vasquez (QA Lead) — joined remotely
+
+MEETING DURATION: 2h 15m
+LOCATION: Conference Room A / Zoom Hybrid
+RECORDING: Yes (auto-transcription enabled, reviewed and corrected by N. Reis)
+DIAL-IN PARTICIPANTS: Derek Huang (San Francisco), Tomás Ferreira (home office), Rhea Vasquez (home office)
+
+***
+
+PRE-MEETING NOTE FROM NADIA REIS (sent via Slack #product-launch, 9:02 AM):
+
+"Team — today's the day we lock the launch feature set. I've updated the Notion board with current status on all 11 items. Please review before the meeting so we can move fast. The goal is to walk out of this room with a final SHIP/DEFER/CUT decision on every item. No maybes. If you have strong opinions on anything, bring your data. See you at 10."
+
+***
+
+TRANSCRIPT — FEATURE TRIAGE SESSION
+
+[00:00:08] NADIA REIS: Okay, we're here to finalize the launch feature set. We've got 11 items on the backlog board and we can ship maybe 5 of them in the next two weeks. Everything else gets deferred to Q2 or later. I want to go through each one and make a call: SHIP, DEFER, or CUT.
+
+[00:00:22] NADIA REIS: Quick ground rules before we start. Each item gets a max of five minutes unless it's contentious. I'll keep us on track. If there's disagreement, we discuss, but I'm making the call and Priya has final sign-off. Everyone good?
+
+[00:00:30] PRIYA CHANDRASEKARAN: Works for me.
+
+[00:00:31] MARCUS OKAFOR: Let's do it.
+
+[00:00:32] NADIA REIS: Let me pull up the board. Starting from the top.
+
+[00:00:36] NADIA REIS: Item 1 — Core Analytics API. This is the heart of the product. REST endpoints for querying, filtering, aggregating. Real-time streaming support. This ships. Not negotiable.
+
+[00:00:45] MARCUS OKAFOR: Obviously ships. It's 80% done. Amir's been on this for six weeks. The streaming pipeline is solid — sub-200ms latency on p95 for standard queries. We need another week for the batch export endpoint and then it's ready.
+
+[00:00:58] AMIR PATEL: Yeah, just to give a bit more detail on what's left. The core query engine handles filtering, grouping, and time-series aggregation across all 12 connector types. The streaming layer uses Server-Sent Events with automatic reconnect. What I still need to build is the batch export endpoint — that's the part where you can kick off a large query that runs asynchronously and you get a download link when it's done. I've got the job queue infrastructure from Tomás already, so the actual endpoint work is maybe four days. Then a day or two for integration tests.
+
+[00:01:18] TOMÁS FERREIRA: The job queue is running on Redis with Bull. I've got retry logic and dead letter handling set up. Amir just needs to wire in the export worker. Shouldn't be any infrastructure blockers.
+
+[00:01:28] RHEA VASQUEZ: I've been running the API through our test suite for the last two weeks. We're at 94% pass rate on the current endpoints. The remaining failures are edge cases around timezone handling in aggregation queries — Amir knows about those. Once the batch export is in, I'll need two days to validate it.
+
+[00:01:42] NADIA REIS: Rhea, can you have the full test pass by May 14?
+
+[00:01:45] RHEA VASQUEZ: If Amir has the batch endpoint done by the 12th, yes. Two-day turnaround for validation.
+
+[00:01:50] AMIR PATEL: I'll have it done by the 11th. That gives you three days.
+
+[00:01:54] NADIA REIS: Good. Status: SHIP. Target completion: May 14. Moving on.
+
+[00:02:00] NADIA REIS: Item 2 — Dashboard Builder.
+
+[00:02:04] [Silence for about 3 seconds]
+
+[00:02:07] NADIA REIS: This is the big one. Lina, where are we?
+
+[00:02:10] LINA CHOI: The design is done — I've got full mockups for the drag-and-drop canvas, widget library, layout engine, and the data binding layer. It's clean, it's good, I'm proud of it. But the frontend implementation is maybe 30% complete. Jess has the grid system working and basic chart rendering, but the data binding — connecting widgets to live API queries — that's the complex part. We haven't started it.
+
+[00:02:35] JESS THORNTON: Let me break down where the implementation actually stands. The grid system uses CSS Grid with a custom drag-and-drop layer built on top of the DnD Kit library. That's working — you can add widgets, move them around, resize them, and the layout snaps to a 12-column grid. Chart rendering is working for four chart types: line, bar, pie, and table. I'm using Recharts under the hood. What's NOT done is the data binding layer, which is by far the hardest part. Each widget needs to be connected to a live API query — the user picks a data source, selects metrics and dimensions, configures filters, and then the widget renders in real time. That's basically building a visual query builder, which is a product unto itself.
+
+[00:03:05] JESS THORNTON: There's also the save/load system — persisting dashboard layouts to the backend, handling sharing permissions, versioning. And the responsive layout engine for different screen sizes. None of that exists yet.
+
+[00:03:18] JESS THORNTON: Realistically, to get the dashboard to a shippable state — not polished, just functional — we're looking at 4-6 weeks of dedicated work. That's me full-time on it, which means I'm off the API integration work.
+
+[00:03:32] NADIA REIS: So the question is: do we delay launch by 4-6 weeks to include the dashboard, or do we ship API-only and add the dashboard in Q2?
+
+[00:03:40] MARCUS OKAFOR: Before we decide, let me frame the competitive picture. We ship without it. I know that's painful. The dashboard is going to be great when we build it. But right now the calculus is clear — every week we delay is a week Rivalytics has to respond to our pricing. Derek said we have a 6-9 month window before they can react. I don't want to burn 6 weeks of that window on a feature we can add later.
+
+[00:03:58] DEREK HUANG: [via Zoom] Sorry, just got connected. Can you hear me?
+
+[00:04:00] NADIA REIS: Yeah, Derek, we're on Item 2 — Dashboard Builder. Marcus just referenced your competitive analysis. Can you give us the quick version?
+
+[00:04:08] DEREK HUANG: Sure. So Rivalytics is our main competitor in the mid-market analytics space. They're charging $89/month for their base plan and $249 for their pro tier. We're coming in at $29 with a feature set that covers maybe 70% of their pro tier. Their response time to competitive threats has historically been slow — when DataPulse undercut them last year, it took them 7 months to adjust pricing and 4 months to ship a competitive feature. So my estimate is we have a 6-to-9 month window where our pricing advantage is unchallenged. Every week we delay launch shrinks that window.
+
+[00:04:42] DEREK HUANG: That said, I want to flag that the dashboard is the number one feature request I hear in sales conversations. I've talked to 23 qualified prospects in the last month. At least 15 of them asked about visualization or dashboards within the first 10 minutes. The API is what gets the data engineer excited. The dashboard is what gets the budget approved by their VP.
+
+[00:05:02] MARCUS OKAFOR: Right, but the question isn't whether we build the dashboard. We're absolutely building it. The question is whether we hold the entire launch for it. And I say no. We can sell API-first to technical buyers and add the dashboard in eight weeks. We don't lose those prospects — we put them on a waitlist, we give them early access, we use them for beta feedback.
+
+[00:05:22] PRIYA CHANDRASEKARAN: I agree. The dashboard is a Q2 feature. Our beachhead customers are technical — they want API access, not drag-and-drop charts. The dashboard matters for expansion into non-technical users within those accounts, but that's a month-two problem, not a day-one problem.
+
+[00:05:38] PRIYA CHANDRASEKARAN: Derek, from those 23 prospects — how many would still sign up for an API-only product at $29/month?
+
+[00:05:45] DEREK HUANG: Honestly? I think we'd convert maybe 12-14 of them on day one with API-only. The other 8-10 would wait for dashboards. But those 12-14 are our strongest technical leads anyway — they're the ones who'd actually use the product deeply and become references.
+
+[00:05:58] LINA CHOI: I want to push back a little. I did user research with 8 prospects last month. Five of them specifically asked about dashboards when I showed them the product vision. The exact quote from the VP of Marketing at one prospect was, "The API is great for my data team, but I need something I can show my CEO in a meeting." The dashboard is how this product scales beyond the technical buyer.
+
+[00:06:22] LINA CHOI: And I want to be clear about what "defer" means in practice. Right now the design is fresh in my head, the design system is built, the component library is documented. If we push this to Q2, there's going to be context-switching cost. Jess will be deep in something else. We'll lose momentum.
+
+[00:06:38] JESS THORNTON: That's a fair point. There is a real cost to picking this up cold in six weeks versus continuing the momentum now. But I also think Marcus is right about the competitive window. If we're trying to get market traction before Rivalytics responds, speed matters more than completeness.
+
+[00:06:52] NADIA REIS: You're right, Lina, and that's exactly why it's the first thing we build after launch. But Priya and Marcus are right too — we can't hold the whole product for a feature that serves a secondary persona. Our primary buyer is the data engineer or analytics lead. They want the API. The dashboard is how we expand within the account.
+
+[00:07:05] NADIA REIS: Here's what I want to do. Jess, after launch, you go straight to dashboard. No detours. Lina, I want you to spend the next two weeks refining the design specs — interaction details, edge cases, error states — so that when Jess picks it up on May 19, she's not waiting on design decisions. We minimize the cold-start problem.
+
+[00:07:22] JESS THORNTON: That works for me. If Lina has detailed specs ready, I can probably shave a week off the 4-6 week estimate. Call it 3-5 weeks starting May 19.
+
+[00:07:30] LINA CHOI: Okay. I want it on record that I think we'll hear about this from users. But I understand the tradeoff.
+
+[00:07:36] NADIA REIS: Noted. And I appreciate you advocating for the user, Lina. That's your job and you're doing it well. Dashboard Builder — status: DEFER to Q2. Target ship date: July 15.
+
+[00:07:48] NADIA REIS: Let's keep moving. Item 3 — Data Connectors. We currently have 12 native connectors. The priority ones are: Stripe, Shopify, HubSpot, Salesforce, Google Analytics, Snowflake, BigQuery, PostgreSQL, MySQL, Segment, Mixpanel, and Amplitude. These cover 85% of our target users' data sources based on Derek's prospect surveys.
+
+[00:08:10] DEREK HUANG: That 85% number is solid. I ran it against the tech stack data we collected from 40 prospects. The only notable gaps are Intercom and Zendesk, which three enterprise prospects specifically asked about. But for launch, 12 is more than enough.
+
+[00:08:25] AMIR PATEL: All 12 are done and tested. I'd like to add Intercom and Zendesk — they're 80% built because they use the same REST connector framework. Maybe two days of work.
+
+[00:08:36] AMIR PATEL: To be specific: the REST connector framework handles OAuth2 authentication, pagination, rate limiting, and schema mapping. Intercom and Zendesk both use standard REST APIs with OAuth2, so I just need to write the schema mapping configs and the data normalization layer for each. Intercom has a well-documented API — their contact and conversation models map cleanly to our schema. Zendesk is a little messier with their nested ticket/comment structure, but nothing unusual.
+
+[00:08:58] RHEA VASQUEZ: If Amir has those done by the 10th, I can fold them into the connector test suite. We already have parametric tests that run against each connector — I just need to add the fixture data for the two new ones.
+
+[00:09:08] NADIA REIS: Do it. Ship with 14 connectors. Status: SHIP (14 connectors). Amir completes Intercom and Zendesk by May 10, Rhea validates by May 12.
+
+[00:09:18] NADIA REIS: Item 4 — Custom Alerting Engine. This is the rules-based alerting system — set thresholds on any metric, get notified via email/Slack/webhook when they trigger.
+
+[00:09:30] MARCUS OKAFOR: How far along is this?
+
+[00:09:33] AMIR PATEL: The backend is maybe 60% done. The evaluation engine works — you can define threshold rules and it checks them against the streaming data. But the notification layer is barebones. Email works. Slack webhook is stubbed out but not tested. The UI for creating and managing rules doesn't exist yet.
+
+[00:09:50] AMIR PATEL: The evaluation engine runs on a 60-second polling cycle against the streaming data. You can set rules like "if metric X exceeds Y for Z consecutive checks, trigger an alert." The rule definitions are stored in PostgreSQL. What's missing is: reliable notification delivery with retry logic, Slack integration testing, PagerDuty integration (not started), the entire management UI, and alert history / acknowledgment tracking.
+
+[00:10:12] TOMÁS FERREIRA: From an infrastructure perspective, the alerting engine adds meaningful load to the streaming pipeline. Each active rule is basically a standing query. If we have 200 accounts with an average of 10 rules each, that's 2,000 standing queries evaluating every 60 seconds. I haven't load-tested that yet. I'd want at least a week to validate the infrastructure before we ship it.
+
+[00:10:30] NADIA REIS: That's another reason to defer. We don't need infrastructure risk on launch day.
+
+[00:10:35] MARCUS OKAFOR: Agreed. And the alerting system without a UI is half a product. Our technical users can set up their own alerting with the webhook endpoint — which we're shipping — and Zapier or PagerDuty or whatever they already use.
+
+[00:10:48] NADIA REIS: This is a nice-to-have for launch. Users can build alerting on top of the API with their own tools — Zapier, custom scripts, whatever. We don't need to ship our own. Status: DEFER to Q2. Amir, keep the backend code in the repo but don't prioritize it until after the dashboard ships.
+
+[00:11:02] AMIR PATEL: Got it. I'll flag the code as experimental and make sure it doesn't interfere with the production deployment.
+
+[00:11:08] NADIA REIS: Item 5 — White-Label Reporting Module. This is the feature where agencies and consultants can generate branded PDF reports from their analytics data with their own logo and styling.
+
+[00:11:20] PRIYA CHANDRASEKARAN: Cut it. This is a niche feature for a persona we haven't validated. We can reconsider in Q3 if we see demand.
+
+[00:11:28] DEREK HUANG: I'll add context. Of my 23 qualified prospects, exactly one asked about white-label reporting — and they were a marketing agency. Our ICP is in-house data teams, not agencies. I wouldn't prioritize this.
+
+[00:11:40] LINA CHOI: I had one design concept for this, but it was speculative. I'm fine cutting it. If agencies show up as a user segment later, we can revisit.
+
+[00:11:48] NADIA REIS: Status: CUT. No target date, no owner. We revisit if and when we see demand data.
+
+[00:11:55] NADIA REIS: Item 6 — User Management and Permissions. Role-based access control — admin, editor, viewer roles. Team invitations. SSO is out of scope for now.
+
+[00:12:06] JESS THORNTON: This is done. Basic RBAC, invite flow, three roles. No SSO — that's an enterprise feature.
+
+[00:12:12] JESS THORNTON: Let me give the details. The admin role has full access — can manage team members, configure connectors, manage billing. The editor role can create and modify queries, dashboards (when we have them), and data exports, but can't manage team members or billing. The viewer role is read-only — can view shared queries and dashboards but can't create or modify anything.
+
+[00:12:30] JESS THORNTON: The invite flow sends an email with a magic link. New users create an account and are automatically assigned the role the admin selected. There's a team settings page where admins can see all members, change roles, and revoke access.
+
+[00:12:42] RHEA VASQUEZ: I've tested the RBAC system pretty thoroughly. Permission checks are enforced at the API layer, not just the UI. So even if someone tries to hit an admin endpoint with an editor token, they get a 403. I'm confident this is solid.
+
+[00:12:54] NADIA REIS: Status: SHIP. Good work, Jess.
+
+[00:12:58] NADIA REIS: Item 7 — API Documentation and Developer Portal. Interactive API docs with code examples, SDKs for Python and JavaScript, getting started guide.
+
+[00:13:10] AMIR PATEL: The API docs are auto-generated from the OpenAPI spec. Python SDK is published to PyPI. JavaScript SDK is on npm. The developer portal site is basic — it works but it's not beautiful.
+
+[00:13:22] AMIR PATEL: Specifically, we're using Redoc for the interactive docs — it renders the OpenAPI spec with try-it-out functionality. The Python SDK wraps every endpoint and handles authentication, pagination, and error handling. Same for the JS SDK. I wrote a getting-started guide that walks through authentication, making your first query, and setting up a connector. It's about 2,000 words with code examples in both Python and JavaScript.
+
+[00:13:42] LINA CHOI: I took a look at the developer portal yesterday. It's functional but the styling is default Redoc with our logo slapped on. No custom CSS, no consistent design language with the rest of the product. I could spend a day making it look professional — consistent fonts, our color palette, some custom landing page content.
+
+[00:13:58] NADIA REIS: Lina, can you do that by end of week without impacting the dashboard spec work?
+
+[00:14:02] LINA CHOI: Yeah, it's a day of CSS work. I'll do it Thursday.
+
+[00:14:06] NADIA REIS: Good enough for launch. We can polish later. Status: SHIP. Lina adds a design pass by May 8.
+
+[00:14:14] NADIA REIS: Item 8 — Webhook Support. Outbound webhooks for event-driven integrations.
+
+[00:14:22] MARCUS OKAFOR: Amir, can we squeeze this in?
+
+[00:14:26] AMIR PATEL: The infrastructure is there from the alerting work. If we just expose a generic webhook endpoint — POST to a URL when data matching a filter arrives — it's maybe two days. Without the full alerting UI, just raw webhook config via API.
+
+[00:14:40] AMIR PATEL: The implementation would be: you make a POST to /webhooks with a URL, an optional secret for HMAC signing, and a filter expression. When new data arrives that matches the filter, we POST to your URL with the matching records in the body. We include the HMAC signature in a header so you can verify it's from us. Retry logic: three attempts with exponential backoff. If all three fail, the webhook is marked as unhealthy and we stop sending until the user reactivates it.
+
+[00:15:02] TOMÁS FERREIRA: That's clean. The webhook dispatch can run as a separate worker process so it doesn't add latency to the main data ingestion pipeline. I'll set up the worker infrastructure — it's the same Bull queue pattern we use for the batch export jobs.
+
+[00:15:14] JESS THORNTON: Do we need any UI for this?
+
+[00:15:16] NADIA REIS: No. API-only for now. Developers can configure webhooks via API calls and manage them programmatically. A UI for webhook management can come later with the alerting UI — they're closely related.
+
+[00:15:26] NADIA REIS: Do it. Ship the webhook API. No UI for it — developers can configure via API calls. Status: SHIP (API-only, no UI). Amir and Tomás, target May 13.
+
+[00:15:36] NADIA REIS: Items 9 through 11 are smaller. Let me run through them quickly.
+
+[00:15:40] NADIA REIS: Item 9 — Data Export (CSV/JSON). Users can export query results.
+
+[00:15:45] AMIR PATEL: This already works via the API. You append ?format=csv or ?format=json to any query endpoint and it returns the results in that format. For large exports, the batch export endpoint handles it — that's the async job system we discussed under Item 1.
+
+[00:15:58] RHEA VASQUEZ: I've tested CSV and JSON export for queries up to 100,000 rows. CSV generation takes about 3 seconds for 100K rows, JSON is about 5 seconds. Both handle special characters, Unicode, and nested data structures correctly.
+
+[00:16:08] NADIA REIS: Status: already works via API, SHIP.
+
+[00:16:12] NADIA REIS: Item 10 — Audit Log. Track who queried what and when. This is an enterprise compliance feature.
+
+[00:16:20] MARCUS OKAFOR: We'll need this for SOC 2, but that's a Q3 or Q4 initiative. It goes with SSO, data retention policies, and the rest of the enterprise compliance package.
+
+[00:16:30] JESS THORNTON: I've been logging API requests to our application logs, so we technically have the data. But there's no structured audit trail, no UI for searching it, and no retention policies. Building a proper audit log is probably a week of work, but it only matters for enterprise customers.
+
+[00:16:42] NADIA REIS: Status: DEFER to Q3 with SSO. We'll package it as part of an enterprise tier.
+
+[00:16:48] NADIA REIS: Item 11 — Embedded Analytics. JavaScript embed snippets so customers can put Verdana charts in their own products.
+
+[00:16:58] LINA CHOI: I have early design concepts for this — configurable iframe embeds with theme customization. But this is genuinely a separate product line. It has its own authentication model, its own billing model, its own design constraints. You can't just bolt it onto the existing product.
+
+[00:17:10] MARCUS OKAFOR: This is a whole product line, not a feature. It requires a different architecture — multi-tenant rendering, sandboxed JavaScript execution, customer-facing API keys with usage-based billing. We'd be competing with companies like Metabase Embedded and Sigma Computing. That's a deliberate strategic decision, not something we squeeze into a sprint.
+
+[00:17:28] PRIYA CHANDRASEKARAN: Agreed. This is a Q4 conversation at the earliest, and only if we see strong demand from customers who want to embed analytics in their own products.
+
+[00:17:36] NADIA REIS: Status: CUT from near-term roadmap, revisit in Q4. No work to be done here.
+
+[00:17:42] NADIA REIS: That's all 11 items. Let me summarize before we wrap the triage.
+
+***
+
+[00:17:50] NADIA REIS: Okay, switching gears. Let's talk about the launch plan itself. We have a ship date of May 18. That gives us exactly two weeks. Amir, are you comfortable with that timeline?
+
+[00:18:00] AMIR PATEL: For the features we've scoped — yes. Core API with batch export by May 11. Intercom and Zendesk connectors by May 10. Webhook endpoint by May 13. That leaves May 14-16 for integration testing and bug fixes. May 17 is a Saturday — I'll be on call for any last-minute issues. May 18 launch.
+
+[00:18:20] TOMÁS FERREIRA: From an infrastructure side, I want to run a load test before launch. We've been testing with small datasets and low concurrency. I want to simulate 200 concurrent accounts hitting the API with realistic query patterns. Can we block out May 14 for a load test?
+
+[00:18:35] MARCUS OKAFOR: Yes. Tomás, schedule the load test for May 14. I want to see p95 latency, error rates, and resource utilization under load. If anything breaks, we have three days to fix it before launch.
+
+[00:18:48] TOMÁS FERREIRA: I'll set it up. I'm going to use k6 with a custom script that simulates our expected query mix — 60% simple filters, 25% aggregations, 10% streaming connections, 5% batch exports. I'll ramp from 10 to 200 concurrent users over 30 minutes.
+
+[00:19:02] RHEA VASQUEZ: I'd like to run the full regression suite against the load test environment simultaneously. That way we catch any bugs that only manifest under load.
+
+[00:19:10] NADIA REIS: Good idea. Rhea, coordinate with Tomás on the May 14 load test. Now — Derek, you still with us?
+
+[00:19:16] DEREK HUANG: Yeah, I'm here.
+
+[00:19:18] NADIA REIS: Launch communications. Where are we on the go-to-market side?
+
+[00:19:22] DEREK HUANG: I've got three things in motion. First, the landing page copy is drafted — I'll need Lina's eyes on the design. Second, I've got 23 prospects on a soft-launch list who've agreed to be notified when we go live. I'll send them personalized emails on launch day with a 14-day free trial offer. Third, I'm working on a Product Hunt launch for May 20, two days after our soft launch, so we have a couple days to catch any critical issues before the wider audience sees it.
+
+[00:19:50] LINA CHOI: I'll review the landing page design on Wednesday. Send me the draft by end of day Tuesday.
+
+[00:19:56] DEREK HUANG: Done.
+
+[00:19:58] NADIA REIS: Pricing — we're locked at $29/month for the base tier, right?
+
+[00:20:02] PRIYA CHANDRASEKARAN: Yes. $29/month, billed monthly. Annual plan at $24/month billed annually. Free 14-day trial, no credit card required. We discussed this in the pricing committee last week and everyone agreed. The goal is aggressive undercut — Rivalytics charges $89 for a comparable feature set.
+
+[00:20:18] DEREK HUANG: The $29 price point is our biggest weapon. I've been leading with it in every sales conversation and the reaction is consistently surprise. People expect analytics tools to cost $89-$200/month. When I say $29, they literally pause. One prospect said, "What's the catch?"
+
+[00:20:34] MARCUS OKAFOR: The catch is we don't have a dashboard yet. [laughs]
+
+[00:20:37] [Laughter from multiple participants]
+
+[00:20:40] NADIA REIS: Okay. Derek, I need you to send me the final prospect list and their expected close timelines by end of week. I want to track our pipeline through launch.
+
+[00:20:48] DEREK HUANG: Will do. Quick question — for the prospects who ask about dashboards, what's the official messaging? I want to be consistent.
+
+[00:20:55] NADIA REIS: "Dashboards are coming in Q2. We're targeting July for a full dashboard builder. In the meantime, our API gives you complete programmatic access to build your own visualizations, and we integrate with tools like Grafana and Metabase for immediate dashboard capabilities." That's the line.
+
+[00:21:10] DEREK HUANG: Perfect. I'll add that to the sales FAQ. Okay, I need to drop for a client call at 11. Anything else you need from me?
+
+[00:21:18] NADIA REIS: No, we're good. Thanks, Derek.
+
+[00:21:20] [Derek Huang disconnects from Zoom]
+
+***
+
+[00:21:25] MARCUS OKAFOR: Final infrastructure capacity check — let me run through what we've got. We're on AWS, running three t3.xlarge instances behind an ALB for the API servers. PostgreSQL on RDS db.r6g.large. Redis on ElastiCache for caching and the job queue. The streaming pipeline runs on a separate t3.large instance with a Kafka broker.
+
+[00:21:48] MARCUS OKAFOR: Tomás, do you think that's enough for 200 concurrent accounts?
+
+[00:21:52] TOMÁS FERREIRA: Honestly, I think we're fine for 200 accounts but I want the load test to confirm it. My back-of-envelope math: 200 accounts, average 3 active users per account, so 600 concurrent users. Each user makes maybe 10 API requests per minute during active usage. That's 6,000 requests per minute, or 100 requests per second. Our current setup handles about 500 req/s before latency degrades, based on my informal testing. So we have 5x headroom. But I want to verify that with realistic query complexity, not just hello-world endpoints.
+
+[00:22:20] MARCUS OKAFOR: Good. The load test on May 14 will either confirm or we scale up. We can go to t3.2xlarge in about 20 minutes if needed.
+
+[00:22:30] NADIA REIS: Alright, I think we've covered everything. Let me read back the final decisions so everyone's aligned.
+
+***
+
+PRODUCT DECISION LOG — LAUNCH SCOPE
+
+| # | Feature | Status | Owner | Target Date | Notes |
+|:---|:---|:---|:---|:---|:---|
+| 1 | Core Analytics API | SHIP | Amir | May 14 | Includes streaming, batch export |
+| 2 | Dashboard Builder | DEFER Q2 | Jess/Lina | Jul 15 | 30% complete, 4-6 weeks remaining |
+| 3 | Data Connectors (14) | SHIP | Amir | May 12 | 12 done + Intercom, Zendesk |
+| 4 | Custom Alerting Engine | DEFER Q2 | Amir | Jul 30 | Backend 60%, no UI |
+| 5 | White-Label Reporting | CUT | — | — | No validated demand |
+| 6 | User Management/RBAC | SHIP | Jess | May 10 | Done |
+| 7 | API Docs / Dev Portal | SHIP | Amir | May 12 | Functional, not polished |
+| 8 | Webhook Support | SHIP | Amir | May 13 | API-only config, no UI |
+| 9 | Data Export (CSV/JSON) | SHIP | — | Done | Works via API |
+| 10 | Audit Log | DEFER Q3 | — | — | Enterprise feature |
+| 11 | Embedded Analytics | CUT | — | — | Future product line |
+
+SUMMARY:
+- SHIPPING at launch: 7 features (Core API, 14 connectors, RBAC, API docs, webhooks, data export, + streaming architecture)
+- DEFERRED to Q2: Dashboard Builder (top priority), Custom Alerting Engine
+- DEFERRED to Q3+: Audit Log
+- CUT: White-Label Reporting, Embedded Analytics
+
+KEY DECISION: Dashboard Builder is CUT from launch. We ship API-only. Dashboard is the #1 priority for Q2, targeting July 15 ship date.
+
+RATIONALE: Delaying launch by 4-6 weeks for the dashboard risks our competitive window. Our beachhead customers are technical buyers who value the API. The dashboard expands the product to non-technical users within accounts — that's an expansion play, not an acquisition play.
+
+DISSENT: Lina Choi (Designer) noted that 5 of 8 prospects asked about dashboards during user research. She expects user feedback will surface this gap quickly post-launch. This is acknowledged and is why the dashboard is Q2 priority #1.
+
+***
+
+FOLLOW-UP ACTIONS:
+
+1. [JESS] Complete grid system and chart rendering — maintain momentum for Q2 dashboard sprint
+2. [LINA] Finalize dashboard design specs so implementation can start immediately post-launch
+3. [LINA] Design pass on developer portal — consistent styling, custom CSS — by May 8
+4. [AMIR] Complete Intercom + Zendesk connectors by May 10
+5. [AMIR] Complete batch export endpoint by May 11
+6. [AMIR] Complete webhook API endpoint by May 13
+7. [TOMÁS] Set up load test infrastructure (k6 scripts, monitoring) — run May 14
+8. [RHEA] Full regression suite on load test environment — May 14
+9. [RHEA] Validate batch export and new connectors — complete by May 12
+10. [NADIA] Update public roadmap page to list dashboard as "Coming Q2 2025"
+11. [NADIA] Prepare launch communications — feature set, pricing ($29/mo), and positioning
+12. [NADIA] Coordinate with Derek on prospect list and close timelines by May 9
+13. [DEREK] Send landing page copy draft to Lina by May 6
+14. [DEREK] Prepare Product Hunt launch for May 20
+15. [DEREK] Update sales FAQ with dashboard messaging
+16. [MARCUS] Final infrastructure capacity check — confirm we can handle 200 concurrent accounts on current setup
+17. [MARCUS] Review load test results May 14 — decision on scaling up infrastructure
+
+LAUNCH TIMELINE:
+- May 10: Connectors complete, RBAC final
+- May 11: Batch export endpoint complete
+- May 12: Connector validation, API docs finalized
+- May 13: Webhook endpoint complete
+- May 14: Load test + full regression suite
+- May 15-16: Bug fixes, final polish
+- May 17: On-call day (Saturday), deployment to production
+- May 18: LAUNCH (soft launch to 23 prospects)
+- May 20: Product Hunt launch
+
+DECISION AUTHORITY: Nadia Reis, Head of Product
+APPROVED BY: Priya Chandrasekaran, CEO
+DATE: May 4, 2025

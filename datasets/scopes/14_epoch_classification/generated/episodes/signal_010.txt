@@ -1,0 +1,478 @@
+================================================================================
+FOLDLY ENGINEERING — MEETING NOTES
+================================================================================
+Meeting ID    : MTG-2025-0425-001
+Type          : SLO Definition Working Session
+Date          : 2025-04-25, 14:00-15:30 UTC
+Location      : Zoom (Room: eng-slo-session) + #slo-discussion (async follow-up)
+Attendees     : Priya Kaur (facilitator), Marcus Webb, Lina Okafor, Ravi Mehta
+Absent        : Jess Tanaka (doc collab feature sprint), Danny Reeves (test coverage sprint)
+Status        : Final
+Recording      : Available in Zoom cloud (auto-deleted after 30 days)
+Pre-read      : SLO primer doc shared 2025-04-24 in #slo-discussion
+================================================================================
+
+## Pre-Meeting Notes
+
+Priya shared a one-page SLO primer document in #slo-discussion on 2025-04-24 so attendees
+could familiarize themselves with the terminology before the session. Marcus and Lina both
+commented on it. Ravi confirmed he read through it before joining. The primer covered the
+distinction between SLIs (indicators), SLOs (objectives), and SLAs (agreements), as well
+as the concept of error budgets.
+
+Lina also posted a preliminary Grafana dashboard link in the channel the night before,
+showing raw availability and latency numbers for the past 3 weeks. She noted the data was
+pulled from Postgres query logs and Sentry error tracking, and that she'd have cleaned-up
+numbers ready for the meeting.
+
+---
+
+## Agenda
+
+1. What are SLOs and why do we need them now
+2. Define SLOs for critical services
+3. Establish monitoring and alerting thresholds
+4. Review cadence
+5. SLO-driven prioritization framework
+
+---
+
+## 1. Context
+
+**Priya**: "Alright, thanks everyone for making time for this. I know we've got a lot going on with the feature sprints, so I'll try to keep us moving. Let me set the stage. One of the action items from the post-mortem was to define SLOs for our critical services. Before the incident, we didn't have any formal targets for availability, latency, or error rates. We need to change that. SLOs give us a quantitative way to measure whether our services are healthy, and they give us an early warning system before things become incidents."
+
+**Priya**: "For those who didn't get to the primer doc — and I know Danny and Jess couldn't be here — the short version is: an SLO is a target we set for ourselves. It's not a promise to a customer, that's an SLA. The SLO is the internal bar we hold ourselves to. We measure it with SLIs, which are the actual metrics — things like response time, error rate, uptime percentage."
+
+**Marcus**: "And the idea is we pick targets that are ambitious but achievable, right? Not 100% uptime because that's impossible, but high enough that we're actually delivering a reliable service."
+
+**Priya**: "Exactly. And each SLO comes with an error budget — the amount of 'allowed' failure within the target. We'll get into that more in a bit."
+
+**Ravi**: "Quick context from the business side. From the customer side, both Belmont and Crestview have asked about our uptime guarantees. Right now we can't give them a number because we don't track one. We need SLOs to write into enterprise SLAs. I've been stalling on the Belmont contract renewal because they want an uptime commitment and I literally don't have a number to give them."
+
+**Priya**: "That's exactly the kind of thing SLOs solve. Once we have internal targets, Ravi, you and I can work with legal to translate those into SLA language for enterprise contracts."
+
+**Ravi**: "That would be huge. Belmont's renewal is due end of May, so the sooner we have numbers the better."
+
+**Lina**: "On the data side — I've set up basic Grafana dashboards pulling from our Postgres query logs and Sentry. We have about 3 weeks of data to baseline against. I'll share the numbers as we go through each service. Fair warning, some of the numbers are going to look rough. The data collection isn't perfect — we're missing some request logs from the first few days because the Postgres slow query log wasn't capturing everything under 100ms. But for latency P50 and P99, and for error rates, the data is solid enough to establish baselines."
+
+**Marcus**: "Are we pulling from application logs too, or just Postgres?"
+
+**Lina**: "Application logs through Sentry, Postgres query logs for database-level latency, and I added a lightweight request timing middleware about two and a half weeks ago that logs to a separate table. So we have three data sources that I'm cross-referencing. The middleware data is the most complete but also the newest."
+
+**Priya**: "Great. Let's get into the specific services. I'm going to go through them in order of criticality."
+
+---
+
+## 2. SLO Definitions
+
+### 2.1 Payments Service
+
+**Discussion**:
+
+**Marcus**: "Payments is the most critical path. The incident showed us that. I'd argue we need the highest targets here. If documents are slow, that's annoying. If payments are wrong, that's money. Real money. Our customers' money."
+
+**Priya**: "Agreed. Let's start with availability. What does 99.9% availability mean in practice?"
+
+**Lina**: "99.9% uptime is 43.8 minutes of allowed downtime per month. For payments, that means no more than ~44 minutes where the billing API returns errors or is unreachable. I calculated this as 30 days times 24 hours times 60 minutes times 0.001, which gives us 43.2 minutes. Rounding to 43.8 if you use 30.44 days as an average month."
+
+**Ravi**: "Forty-four minutes. That's not a lot."
+
+**Marcus**: "That's tight but achievable. The only downtime we've had was the incident and the hotfix deploy, which was about 45 minutes. And that was a pretty severe event. Under normal operations, the payments service has been up continuously."
+
+**Priya**: "So we've already blown our monthly budget on one incident."
+
+**Marcus**: "Exactly. Which is why we need the staging environment and tests — to prevent incidents from burning the error budget. If we'd had the staging gate in place, the incident wouldn't have happened, and we'd be sitting at 100% for the month."
+
+**Lina**: "I can confirm from the data — outside of the incident window, the payments endpoints have had zero unplanned downtime in the past 3 weeks. The only errors I see are the expected ones: invalid request bodies, auth failures from bad tokens, that sort of thing. Legitimate 4xx responses, not system failures."
+
+**Priya**: "Good. Let's also talk about latency. Marcus, what are we seeing for billing API response times?"
+
+**Marcus**: "The billing endpoints are pretty fast. Most requests are simple lookups — current plan, usage summary, invoice history. The heaviest one is invoice generation, which involves a Stripe API call. That can take up to a second depending on Stripe's response time."
+
+**Lina**: "From the data: billing API P50 is 145ms, P99 is 1.4s. The P99 spike is almost entirely the invoice generation endpoint hitting Stripe."
+
+**Marcus**: "So a P50 target of 200ms and P99 of 2s gives us headroom. I'm comfortable with that."
+
+**Priya**: "And webhook processing — that's the Stripe webhooks?"
+
+**Marcus**: "Yes. Stripe sends us webhooks for payment events — successful charges, failed charges, subscription changes, disputes. We need to process those reliably. If we miss a webhook, we might not update a customer's subscription status, which leads to access issues or incorrect billing."
+
+**Lina**: "Current webhook success rate over the past 3 weeks is 99.97%. We had 3 failures out of about 11,000 webhooks. All three were transient — Stripe retried and they succeeded on the second attempt."
+
+**Marcus**: "So 99.95% as a target is slightly below our current performance. That gives us a small buffer."
+
+**Priya**: "Makes sense. Let's put it all in a table."
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Availability | 99.9% | Successful responses / total requests on `/api/billing/*` endpoints |
+| Latency (P50) | < 200ms | Median response time for billing API calls |
+| Latency (P99) | < 2s | 99th percentile response time |
+| Error rate | < 0.1% | 5xx responses / total requests |
+| Webhook processing | 99.95% | Successfully processed webhooks / total received |
+| Invoice accuracy | 100% | Correct invoices / total invoices generated |
+
+**Ravi**: "Quick question on measurement — when you say 'successful responses,' does that include 4xx responses? Because a 400 Bad Request is technically a successful response from the server's perspective."
+
+**Lina**: "Good question. For availability, we're counting only 5xx responses as failures. 4xx responses mean the server handled the request correctly — it just rejected bad input. So yes, 4xx counts as 'successful' for SLO purposes."
+
+**Ravi**: "Got it. That makes sense."
+
+**Priya**: "Invoice accuracy at 100%? Is that realistic?"
+
+**Marcus**: "It has to be. We can't accept any rate of incorrect invoices. If we're wrong on a bill, that's a customer trust issue. The $12K incident was a 100% accuracy failure. Zero tolerance. Every other metric has room for error — a few slow requests, a brief period of unavailability, that's life in distributed systems. But sending someone the wrong bill? No. That's a different category."
+
+**Priya**: "How do we measure it, though? How do we know an invoice is correct?"
+
+**Marcus**: "We compare the invoice line items against the usage records in the database. I'm going to build a reconciliation check that runs after every invoice generation. It compares what Stripe charged against what our usage tracking says should have been charged. Any discrepancy gets flagged immediately."
+
+**Lina**: "So it's not real-time — it's a post-generation audit?"
+
+**Marcus**: "Right. The invoice gets generated, sent to the customer, and then the reconciliation runs within 5 minutes. If there's a mismatch, we get an alert and can correct it before the customer even notices."
+
+**Priya**: "Fair. 100% target, with any violation triggering an immediate incident review. Let's move on to documents."
+
+### 2.2 Document Operations
+
+**Discussion**:
+
+**Priya**: "Documents are our core product — file storage, search, retrieval. What should the targets look like?"
+
+**Lina**: "I'll lead with the data. Current baseline from the last 3 weeks: availability is 99.7%, search P50 is 340ms, P99 is 1.8s. Upload success rate is 99.85%. Document retrieval is at 99.92%."
+
+**Marcus**: "99.7% availability seems low. What's bringing it down?"
+
+**Lina**: "Two things. First, we had a brief period where the search index was being rebuilt and search queries were returning 503s. That was planned maintenance but it counted against availability because we didn't have a maintenance window concept in the SLI definition. Second, there was a period where large file uploads were timing out due to a misconfigured Nginx proxy timeout. That's been fixed."
+
+**Priya**: "So with those two issues resolved, the underlying availability is higher?"
+
+**Lina**: "If I exclude those two windows, availability jumps to 99.86%. So the 99.5% target is very achievable. It gives us room for planned maintenance and the occasional hiccup."
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Availability | 99.5% | Successful responses / total requests on `/api/docs/*` endpoints |
+| Upload success rate | 99.9% | Successful uploads / total upload attempts |
+| Search latency (P50) | < 500ms | Median search query response time |
+| Search latency (P99) | < 3s | 99th percentile search response time |
+| Document retrieval | 99.9% | Successfully retrieved docs / total retrieval requests |
+
+**Priya**: "The targets are realistic but will require us to improve on the upload success rate. We're at 99.85% and targeting 99.9%. What needs to happen there?"
+
+**Lina**: "The upload failures are almost all large files — anything over 50MB has a significantly higher failure rate. It's a combination of timeout issues and memory pressure on the upload handler. We need to implement chunked uploads for large files. That's a separate project though."
+
+**Marcus**: "For now, can we just increase the timeout for large uploads?"
+
+**Lina**: "I already bumped the Nginx timeout from 30s to 120s. That fixed the worst cases. But for truly large files — 200MB, 500MB — we need proper chunked upload support."
+
+**Priya**: "Okay, let's note that as a future improvement. The SLO target of 99.9% gives us something to work toward. Good. These give us room to grow into. What about the doc preview and collaboration features?"
+
+**Lina**: "I'd keep those out of SLOs for now — they're still being stabilized. We can add them once they've been running for a month. Jess is in the middle of the collab feature sprint right now, and there are still some known race conditions in the real-time editing. It doesn't make sense to set a target for something we know is broken."
+
+**Priya**: "Agreed. We'll revisit doc preview and collab SLOs in the June review cycle. Marcus, make a note."
+
+**Marcus**: "Noted."
+
+### 2.3 Authentication
+
+**Discussion**:
+
+**Priya**: "Auth is the front door. If users can't log in, nothing else matters."
+
+**Marcus**: "Right. And we have two auth paths — standard email/password login and SSO for enterprise customers."
+
+**Lina**: "Auth has been solid. Over the past 3 weeks, I'm seeing 99.95% availability. Login P50 is 210ms. SSO is slower because of the SAML round-trip — P50 is 780ms, which is actually pretty good for SSO."
+
+**Ravi**: "Belmont and Crestview both use SSO. If SSO is slow or unreliable, that's a direct enterprise customer impact."
+
+**Priya**: "What's driving the 0.05% unavailability?"
+
+**Lina**: "Mostly transient network issues between us and the SSO identity providers. When Okta or Azure AD has a hiccup, our SSO flow fails. That's somewhat outside our control, but we can mitigate it with better retry logic and cached sessions."
+
+**Marcus**: "We should also track auth errors separately from auth failures. If someone types the wrong password, that's not a system failure. But if our auth service returns a 500 when someone tries to log in, that's a real problem."
+
+**Priya**: "Good distinction. The SLO should only count system errors — 5xx responses and timeouts — not invalid credentials or expired tokens."
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Availability | 99.9% | Successful auth responses / total auth requests |
+| Login latency (P50) | < 300ms | Median login response time |
+| SSO latency (P50) | < 1s | Median SSO flow completion time |
+| Auth error rate | < 0.05% | Failed auth attempts due to system error (not invalid credentials) |
+
+**Marcus**: "The 300ms login P50 target gives us 90ms of headroom over current performance. That's comfortable."
+
+**Lina**: "And 1s for SSO is generous — we're at 780ms right now. But SSO latency can vary a lot depending on the identity provider's response time, so the extra buffer is smart."
+
+**Priya**: "Good. Let's move on to the overall API."
+
+### 2.4 Overall API
+
+**Discussion**:
+
+**Priya**: "This is the catch-all. Every endpoint, every service, aggregated together."
+
+**Lina**: "Overall API availability over the past 3 weeks is 99.6%. P50 latency is 260ms. P99 is 2.3s. Error rate is 0.38%."
+
+**Marcus**: "So our current performance already meets the targets we're about to set?"
+
+**Lina**: "For availability and error rate, yes. Latency is slightly above target — P50 of 260ms against a target of 300ms is fine, but P99 of 2.3s against a target of 3s doesn't leave much room."
+
+**Priya**: "The P99 is being pulled up by which endpoints?"
+
+**Lina**: "Search is the biggest contributor. Some complex search queries with multiple filters take 2-3 seconds. The other slow endpoint is the document export function — generating PDFs from stored documents."
+
+**Marcus**: "Those are both heavy operations. I don't think we can easily bring the P99 down without caching or async processing."
+
+**Priya**: "That's fine. The target is 3s. We're at 2.3s. We have headroom. Let's not over-optimize right now."
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Availability | 99.5% | Successful responses / total API requests |
+| Latency (P50) | < 300ms | Median API response time |
+| Latency (P99) | < 3s | 99th percentile |
+| Error rate | < 0.5% | 5xx responses / total requests |
+
+**Ravi**: "These overall numbers — are these what we'd put in an SLA for customers? Or would we use the per-service numbers?"
+
+**Priya**: "For SLAs, I'd recommend using the overall API numbers as the baseline commitment, and then offering per-service SLOs as add-ons for enterprise contracts. That way we're making a broad commitment that's achievable, and customers who care about specific services can get more granular guarantees."
+
+**Ravi**: "That's smart. I'll draft the SLA language based on the overall numbers and we can review it next week."
+
+---
+
+## 3. Error Budgets
+
+**Priya**: "Okay, let's talk about error budgets. This is the mechanism that makes SLOs actionable rather than aspirational. Each SLO comes with an error budget. If we're targeting 99.9% availability on payments, that means we have 0.1% budget — about 44 minutes per month. Once we burn through that budget, we stop shipping new features and focus on reliability until the budget resets."
+
+**Marcus**: "Wait — so if we have a bad incident early in the month, we pause feature work?"
+
+**Priya**: "Yes. That's the trade-off. If our payments service is down for an hour, we've blown the monthly error budget and the team shifts to reliability work. No new billing features until the next month."
+
+**Marcus**: "Just the billing features? Or all features?"
+
+**Priya**: "Just the affected service. If payments blows its budget but documents is fine, the docs team keeps shipping. The payments team shifts to reliability. The idea is that the error budget is service-scoped, not team-scoped."
+
+**Lina**: "What about shared infrastructure? If the database goes down and it takes out both payments and documents, do both budgets get burned?"
+
+**Priya**: "Yes. A database outage affects all services that depend on it, so all their budgets take the hit. That's actually a feature, not a bug — it means shared infrastructure reliability is everyone's problem, which creates pressure to invest in it."
+
+**Ravi**: "That's going to be hard to explain to sales when they want a feature by end of month. I can already hear the conversation: 'Sorry, we can't ship the feature you promised the customer because we had an outage last Tuesday.'"
+
+**Priya**: "That's the point. It creates real consequences for reliability failures, which means we invest in preventing them. The alternative is what we had before — ship fast, hope nothing breaks, deal with the fallout when it does. And we saw how that turned out."
+
+**Ravi**: "No, I get it. I'm just flagging that we need to communicate this to the sales team so they understand the constraints. I don't want someone making a delivery commitment that engineering can't keep because we're in a feature freeze."
+
+**Priya**: "Absolutely. I'll put together a one-pager for sales explaining the error budget policy and what it means for delivery timelines. That's a good call, Ravi."
+
+**Marcus**: "I'm on board. Error budgets make the cost of unreliability tangible. Before this, reliability was this abstract thing that everyone agreed was important but nobody prioritized because there was no mechanism to force the trade-off. This is the mechanism."
+
+**Lina**: "How do we handle planned maintenance? If I need to take the search index offline for a rebuild, does that count against the error budget?"
+
+**Priya**: "Good question. Let's say that planned maintenance with 24-hour notice does not count against the error budget, but unplanned outages always do. We should define a formal maintenance window process — file a ticket, get approval, notify affected teams, post in #engineering-alerts. If you follow the process, the downtime is excluded from SLO calculations."
+
+**Lina**: "That works. I'll document the maintenance window procedure."
+
+| Service | Monthly Error Budget | = Allowed Downtime |
+|---------|---------------------|-------------------|
+| Payments | 0.1% | 43.8 minutes |
+| Documents | 0.5% | 3.65 hours |
+| Auth | 0.1% | 43.8 minutes |
+| Overall API | 0.5% | 3.65 hours |
+
+**Marcus**: "Looking at these numbers — documents has 3.65 hours of allowed downtime per month. That's actually quite generous."
+
+**Lina**: "It accounts for the fact that documents is a more complex service with more moving parts. Search indexing, file processing, preview generation — there are more things that can go wrong. We gave it a wider budget intentionally."
+
+**Priya**: "And if we consistently perform well within the budget, we can tighten it over time. SLOs aren't set in stone. We'll revisit them quarterly."
+
+---
+
+## 4. Monitoring and Alerting
+
+**Lina**: "Okay, let me walk through how I'm setting up monitoring for these SLOs. I've been building this out over the past week in anticipation of this meeting."
+
+### 4.1 Grafana Dashboards
+
+Three dashboards created:
+
+1. **SLO Overview** — all services, current period availability and latency, error budget remaining. This is the one I expect everyone to check regularly. It shows a traffic light view: green if the service is healthy and the budget is above 50%, yellow if the budget is between 25% and 50%, red if below 25%.
+
+2. **Payments Deep Dive** — webhook processing, invoice accuracy, stripe API health. This one shows individual endpoint latency, webhook processing lag, and a running count of invoice reconciliation results. Marcus, you'll want to bookmark this one.
+
+3. **API Performance** — endpoint-level latency, error rates, request volume. This one is more operational — it shows which endpoints are getting the most traffic, which ones are slowest, and where the errors are concentrated.
+
+**Priya**: "These are view-only for everyone, or can people edit them?"
+
+**Lina**: "View-only by default. I'm the only editor for now to prevent accidental changes. If anyone needs a custom view, tell me and I'll create a copy."
+
+**Marcus**: "Can we get a mobile view? I'd like to check the payments dashboard from my phone during off-hours."
+
+**Lina**: "Grafana has a mobile-responsive layout. I'll make sure the panels are sized for mobile viewing. I'll also set up the Grafana mobile app with push notifications for critical alerts."
+
+**Ravi**: "Is there a way for me to share a read-only view with customers? Belmont specifically asked if they could see our uptime metrics."
+
+**Lina**: "We can create a public dashboard with a subset of metrics — overall availability and latency, nothing internal. I'll look into Grafana's public dashboard feature. But that's a separate project."
+
+**Priya**: "Let's table the customer-facing dashboard for now. Focus on internal monitoring first."
+
+### 4.2 Alert Thresholds
+
+**Lina**: "Here are the alert thresholds I'm proposing. I tried to create a graduated system — warning, high, critical — so we catch problems early without alert fatigue."
+
+| Alert | Condition | Severity | Notification |
+|-------|-----------|----------|-------------|
+| Error budget < 50% | Half the monthly budget consumed | Warning | #engineering-alerts |
+| Error budget < 25% | Three-quarters of budget consumed | High | #engineering-alerts + Priya |
+| Error budget exhausted | 0% remaining | Critical | PagerDuty + feature freeze |
+| P99 latency > 5s | Sustained for 5 minutes | Warning | #engineering-alerts |
+| Error rate > 1% | Sustained for 2 minutes | High | PagerDuty |
+| Payments endpoint down | 3 consecutive failures | Critical | PagerDuty + Marcus + Priya |
+
+**Marcus**: "Why 3 consecutive failures for the payments endpoint alert? One failure seems like enough."
+
+**Lina**: "A single failure could be a transient network blip. Three consecutive failures means something is actually wrong. We check every 30 seconds, so 3 failures means 90 seconds of confirmed downtime. That's fast enough to catch real problems without firing on noise."
+
+**Marcus**: "What about the health check frequency — are we using synthetic monitoring or real traffic?"
+
+**Lina**: "Both. I've set up a synthetic health check that hits the `/api/billing/health` endpoint every 30 seconds. That catches full outages. For degradation — slow responses, elevated error rates — we're using real traffic metrics aggregated over 1-minute windows."
+
+**Priya**: "And PagerDuty is set up?"
+
+**Lina**: "Yes. I created a 'Critical SLO' escalation policy. First responder is whoever is on call — right now that's Marcus for payments and me for everything else. If no acknowledgment within 10 minutes, it escalates to Priya."
+
+**Priya**: "We need to formalize the on-call rotation. Right now it's ad hoc. Let's add that to the action items."
+
+**Lina**: "Agreed. I'll set up a proper PagerDuty rotation once Danny is back from his sprint."
+
+**Marcus**: "What about the 'sustained for 5 minutes' condition on the P99 latency alert? If P99 goes above 5s but comes back down in 3 minutes, we don't get alerted?"
+
+**Lina**: "Correct. Short spikes happen — a garbage collection pause, a slow database query, a burst of traffic. We don't want to page people for transient spikes. Five minutes of sustained high latency means there's an actual problem that needs attention."
+
+**Marcus**: "Fair enough. We can always tighten it later if we find we're missing real issues."
+
+### 4.3 Weekly SLO Review
+
+**Priya**: "I want a weekly SLO review meeting. 15 minutes, every Monday. Lina presents the numbers, we discuss any budget burns, we adjust priorities if needed. It should be short and structured — not a free-form discussion."
+
+**Lina**: "I'll set it up. I'll also send a weekly email summary with the dashboard snapshots. The email goes out Sunday evening so people can review before the Monday meeting."
+
+**Priya**: "Perfect. Format for the weekly email — I'd like to see: current error budget remaining for each service, any SLO violations in the past week, trending metrics that might become problems, and a one-line summary per service."
+
+**Lina**: "I can automate most of that from Grafana's reporting feature. The one-line summary I'll write manually."
+
+**Ravi**: "Can you add me to the email distribution? I want to know the numbers for customer conversations."
+
+**Lina**: "Sure. I'll create a distribution list: slo-review@foldly.io. Anyone who wants the weekly email can subscribe."
+
+**Marcus**: "Should Danny and Jess be in the Monday meeting too?"
+
+**Priya**: "Yes. Once their sprints wrap up, the full engineering team should attend. For now, the four of us will get it started."
+
+---
+
+## 5. SLO-Driven Prioritization
+
+**Priya**: "Here's the new framework for how we decide what to work on. This is the piece that turns SLOs from a reporting exercise into an actual decision-making tool."
+
+### Priority Levels
+
+| Priority | Condition | Action |
+|----------|-----------|--------|
+| P0 | Error budget exhausted | Feature freeze. All engineering on reliability |
+| P1 | Error budget < 25% | No new features for affected service. Bug fixes and reliability only |
+| P2 | Error budget < 50% | New features allowed but reliability work takes priority |
+| P3 | Error budget > 50% | Normal feature development with standard testing requirements |
+
+**Marcus**: "This is a complete inversion of how we operated a month ago. We went from 'ship features at all costs' to 'features are gated by reliability.'"
+
+**Priya**: "Because we learned what 'at all costs' actually costs. $12K, customer trust, and weeks of remediation work. The old way was faster in the short term and catastrophically expensive in the medium term. We can't keep operating on the assumption that nothing will break. The SLO framework gives us a structured way to balance speed and reliability."
+
+**Marcus**: "Who makes the call on priority level? Is it automatic based on the error budget, or does someone have to declare it?"
+
+**Priya**: "Automatic. The Grafana dashboard shows the current priority level for each service. When an alert fires for 'error budget < 25%,' that automatically triggers P1 for that service. No one needs to make a judgment call — the numbers speak for themselves."
+
+**Ravi**: "From a sales perspective, I'd rather tell a prospect 'we have 99.9% uptime SLOs with error budgets' than 'we ship really fast.' Enterprise customers care about reliability, not velocity. They want to know that we take stability seriously and that we have systems in place to maintain it."
+
+**Priya**: "Exactly. And it's not just about what we tell customers — it's about how we actually operate."
+
+**Lina**: "One thing to think about — what happens if we're in P1 for payments and a critical security vulnerability comes in? Does the feature freeze apply to security patches?"
+
+**Priya**: "Security patches are always P0, regardless of error budget status. A vulnerability fix is reliability work, not feature work. Good question though — I'll make sure the framework document includes that exception."
+
+**Marcus**: "What about bug fixes for existing features? If a customer reports a bug in the billing flow, can we fix it during a P1 freeze?"
+
+**Priya**: "Bug fixes are allowed during P1 — the restriction is on new features only. Fixing existing functionality is reliability work. The distinction is: are we adding new capability, or are we improving what we already have? New capability waits. Improvements and fixes proceed."
+
+---
+
+## 6. Action Items
+
+| # | Action | Owner | Deadline | Notes |
+|---|--------|-------|----------|-------|
+| 1 | Finalize Grafana SLO dashboards | Lina Okafor | 2025-04-28 | Three dashboards: SLO Overview, Payments Deep Dive, API Performance |
+| 2 | Configure alert thresholds per table above | Lina Okafor | 2025-04-28 | Includes PagerDuty escalation policy setup |
+| 3 | Schedule weekly SLO review (Mondays 9:00) | Priya Kaur | 2025-04-28 | 15-minute cadence, full team once sprints complete |
+| 4 | Add SLO targets to enterprise SLA templates | Ravi Mehta | 2025-05-01 | Focus on Belmont renewal first |
+| 5 | Instrument payments endpoints with latency tracking | Marcus Webb | 2025-04-30 | Per-endpoint timing, separate from Lina's middleware |
+| 6 | Add invoice accuracy metric to billing module | Marcus Webb | 2025-04-30 | Post-generation reconciliation check |
+| 7 | Document SLO framework in engineering handbook | Priya Kaur | 2025-05-05 | Include error budget policy, priority levels, maintenance window procedure |
+| 8 | Set up weekly SLO email distribution list | Lina Okafor | 2025-04-28 | slo-review@foldly.io, automated from Grafana |
+| 9 | Prepare SLO/error budget one-pager for sales team | Priya Kaur | 2025-05-01 | Explains feature freeze implications for delivery timelines |
+| 10 | Document maintenance window procedure | Lina Okafor | 2025-05-02 | 24-hour notice, approval process, exclusion from SLO calculation |
+| 11 | Set up formal on-call rotation in PagerDuty | Lina Okafor | 2025-05-05 | Pending Danny's return from sprint |
+
+---
+
+## 7. Meeting Notes — Discussion Excerpts
+
+The following are additional discussion excerpts captured during the session.
+
+**Marcus**: "A month ago I deployed a billing system at 6am from my laptop. Now we're defining P99 latency targets and error budgets. This is a different company."
+
+**Lina**: "It's the same company with the same people. We just got serious about not hurting our customers."
+
+**Priya**: "That's exactly right. The team didn't change. The standards changed. And they changed because we learned — the hard way — what happens without them."
+
+**Ravi**: "For what it's worth, the investors loved the post-mortem and the process changes in the update. They said it showed maturity. Jenna's exact words were 'this is what separates companies that survive Series B from companies that don't.'"
+
+**Priya**: "Good. Let's earn that."
+
+**Marcus**: "Quick question before we wrap — do we publish these SLOs internally? Like, should the whole company know what the targets are?"
+
+**Priya**: "Yes. I want the SLOs visible to everyone — engineering, sales, support, product. Transparency is the whole point. If support knows we're at P2 for documents, they can set expectations with customers. If product knows payments is in P1, they won't push for new billing features."
+
+**Ravi**: "I'll make sure the sales team reviews them. It would be good to have a Slack channel where SLO status is posted automatically."
+
+**Lina**: "I can set up a Slackbot that posts daily SLO status to #engineering-alerts. Green/yellow/red for each service, error budget remaining as a percentage."
+
+**Priya**: "Do it. Add that to your action items. Alright, I think we've covered everything. Good session, everyone. Let's get these dashboards and alerts live by Monday so we can start the first weekly review."
+
+**Marcus**: "Agreed. This feels like real progress."
+
+**Lina**: "I'll have the dashboards finalized over the weekend. I'll post the links in #slo-discussion once they're ready for review."
+
+**Priya**: "Thanks, Lina. And thanks everyone. Let's make these numbers real."
+
+---
+
+## 8. Async Follow-Up (#slo-discussion)
+
+The following messages were posted in #slo-discussion after the meeting:
+
+**Lina Okafor** (2025-04-25, 16:42 UTC): "Meeting notes posted above. Draft dashboards are live at [internal Grafana link]. Please review and flag anything that looks off. I'll finalize by Monday."
+
+**Marcus Webb** (2025-04-25, 17:15 UTC): "Looks good. One request — can you add a panel showing Stripe API response times? If Stripe is slow, it'll impact our P99 for billing, and I want to be able to distinguish between our latency and Stripe's latency."
+
+**Lina Okafor** (2025-04-25, 17:23 UTC): "Good idea. I'll add a Stripe API latency panel to the Payments Deep Dive dashboard. I can pull that from the Stripe webhook metadata."
+
+**Ravi Mehta** (2025-04-25, 17:48 UTC): "Shared the SLO summary with the Belmont account team. They're going to want specific numbers in the contract. I'll draft the SLA language this week and circulate for review."
+
+**Priya Kaur** (2025-04-25, 18:05 UTC): "Great meeting today. I've added the weekly SLO review to the calendar — Mondays at 9:00 AM, starting April 28. 15 minutes. Agenda: Lina presents numbers, we discuss any budget impacts, we agree on priorities for the week."
+
+**Danny Reeves** (2025-04-25, 19:30 UTC): "Just read the notes. This all looks solid. Happy to be included in the Monday reviews once the test coverage sprint wraps — should be done by end of next week."
+
+**Jess Tanaka** (2025-04-25, 20:12 UTC): "Agreed with Danny. The doc collab SLO exclusion makes sense — we're still ironing out some edge cases. I'll flag when the feature is stable enough for SLO tracking."
+
+================================================================================
+END MEETING NOTES — MTG-2025-0425-001
+================================================================================

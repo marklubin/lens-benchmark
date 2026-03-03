@@ -1,0 +1,706 @@
+================================================================================
+FOLDLY ENGINEERING — SLACK EXPORT
+================================================================================
+Workspace     : foldly-eng
+Channel       : #engineering
+Channel ID    : C04XKQR7N2P
+Export Date   : 2025-04-16
+Messages      : 247
+Participants  : Priya Kaur, Marcus Webb, Jess Tanaka, Danny Reeves, Lina Okafor, Ravi Mehta
+Channel Desc  : Main engineering channel — builds, deploys, feature chat
+================================================================================
+
+[2025-04-16 08:47:33] lina.okafor
+anyone else up? i've been here since 7 trying to get the ci runner to stop hanging on the lint step
+
+[2025-04-16 08:48:02] danny.reeves
+yeah i'm here. coffee #2. thought i was the only early bird
+
+[2025-04-16 08:48:29] lina.okafor
+figured out the lint issue — it was the eslint config referencing a plugin we never installed. pinned the version in package.json and it passes now. not relevant to what marcus has been digging into but i wanted it off my plate
+
+[2025-04-16 08:49:01] danny.reeves
+nice. small wins
+
+---
+
+[2025-04-16 09:02:11] marcus.webb
+morning. spent all of yesterday and last night going through billing.py line by line. i found two more issues
+
+[2025-04-16 09:02:25] lina.okafor
+morning marcus. you still at it?
+
+[2025-04-16 09:02:38] priya.kaur
+go ahead
+
+[2025-04-16 09:02:51] danny.reeves
+coffee delivered to your desk metaphorically
+
+[2025-04-16 09:03:05] marcus.webb
+first one: the `cancel_subscription` function sends a cancellation to stripe and then deletes the local subscription record. but if the stripe API call succeeds and the local delete fails (e.g., DB lock), the customer's subscription is canceled in stripe but still shows as active in our system. they'd stop getting billed but still have access, and our dashboard would show them as an active subscriber
+
+[2025-04-16 09:03:19] lina.okafor
+classic two-phase consistency problem. the stripe call and the DB write aren't atomic
+
+[2025-04-16 09:03:32] jess.tanaka
+that's a data consistency issue. have any customers canceled yet?
+
+[2025-04-16 09:03:44] danny.reeves
+i just checked the customers table. no cancellation records at all. nobody's canceled
+
+[2025-04-16 09:03:55] marcus.webb
+no, thankfully. so this hasn't bitten us yet. but it would have eventually
+
+[2025-04-16 09:04:06] jess.tanaka
+would have been a fun one to debug too — the customer thinks they canceled, stripe agrees, but our system keeps showing them as active and potentially lets them keep using the product for free
+
+[2025-04-16 09:04:18] marcus.webb
+second one: the metered billing usage reporter calculates active seats by counting users who logged in within the last 30 days. but it doesn't exclude users who have been deactivated. so if a customer deactivates a user, we're still counting and billing for that seat until 30 days pass with no login
+
+[2025-04-16 09:04:31] lina.okafor
+oh no
+
+[2025-04-16 09:04:42] ravi.mehta
+wait — we could be overbilling customers on their seat count? after what just happened?
+
+[2025-04-16 09:04:53] danny.reeves
+how does the deactivation flow work? is there a `deactivated_at` timestamp on the user record?
+
+[2025-04-16 09:05:05] marcus.webb
+potentially. no customers have deactivated users yet so this is theoretical right now. but yes, the logic is wrong
+
+[2025-04-16 09:05:14] marcus.webb
+@danny.reeves yeah there's a `deactivated_at` column. the user model has it. the usage reporter just doesn't check it
+
+[2025-04-16 09:05:28] priya.kaur
+fix both of them. today. and marcus — i want jess to review the fixes before you deploy
+
+[2025-04-16 09:05:39] jess.tanaka
+i'm available to review as soon as the PRs are up
+
+[2025-04-16 09:05:52] marcus.webb
+yeah absolutely. i'm not touching billing without a second pair of eyes anymore
+
+[2025-04-16 09:06:04] ravi.mehta
+good. the last thing we need right now is another billing problem hitting a customer
+
+[2025-04-16 09:06:17] lina.okafor
+marcus when you're fixing the cancellation issue — are you going to wrap both operations in a transaction, or do a stripe call + local write with compensating action on failure?
+
+[2025-04-16 09:06:30] marcus.webb
+transaction with rollback. if the local delete fails after stripe succeeds, we roll back and re-subscribe on stripe. the customer never sees a gap. i'll include the rollback logic in the PR so jess can review the approach
+
+[2025-04-16 09:06:42] lina.okafor
+makes sense. you'll want to handle the case where the rollback itself fails too — log it at minimum so we know about it
+
+[2025-04-16 09:06:55] marcus.webb
+yeah. belt and suspenders. got it
+
+[2025-04-16 09:07:08] danny.reeves
+for the seat count fix — is it just adding a WHERE clause to filter on `deactivated_at IS NULL`?
+
+[2025-04-16 09:07:20] marcus.webb
+basically. the query right now is `SELECT COUNT(*) FROM users WHERE org_id = ? AND last_login > ?`. i need to add `AND deactivated_at IS NULL`. simple fix but the fact that it was missing is... yeah
+
+[2025-04-16 09:07:33] jess.tanaka
+a lot of these would be caught by even a basic integration test that sets up a known user state and verifies the count
+
+[2025-04-16 09:07:46] danny.reeves
+yeah. we'll get there
+
+---
+
+[2025-04-16 09:30:44] marcus.webb
+also — i've been thinking about this a lot since sunday. i want to add TypeScript types to the entire payments module. right now billing.py is pure python with no type hints. i missed the idempotency bug partly because the function signatures don't tell you what type the stripe event fields are. if i had typed the webhook payload, the fact that event IDs change on retry would have been more visible during development
+
+[2025-04-16 09:31:00] lina.okafor
++1 on this. types are documentation that the compiler checks
+
+[2025-04-16 09:31:12] jess.tanaka
+are you talking about Python type hints? or actually rewriting in TypeScript?
+
+[2025-04-16 09:31:22] danny.reeves
+please don't say rewrite
+
+[2025-04-16 09:31:35] marcus.webb
+python type hints. pydantic models for all the stripe webhook payloads so we get validation at the boundary. i'll also add TypedDict for our internal billing data structures
+
+[2025-04-16 09:31:47] jess.tanaka
+pydantic is a good call. it'll validate the webhook payloads at parse time so if stripe sends something unexpected we get a clear ValidationError instead of a KeyError three function calls deep
+
+[2025-04-16 09:31:58] priya.kaur
+that's a good idea. do it. but don't refactor the whole file structure right now — just add types to what exists
+
+[2025-04-16 09:32:10] marcus.webb
+right. i'm not trying to rewrite the whole thing. just make it so the next person who reads billing.py can see what data flows where
+
+[2025-04-16 09:32:22] marcus.webb
+agreed. types first, refactor later. i'm going to work through it methodically — stripe webhook payloads first, then subscription data, then invoice data
+
+[2025-04-16 09:32:33] lina.okafor
+suggestion: start with the webhook payloads since that's the boundary where external data enters the system. if you type those correctly, mypy will propagate the types downstream and flag anywhere we're accessing fields that don't exist
+
+[2025-04-16 09:32:45] danny.reeves
+i can help with the pydantic models. i've used them a lot
+
+[2025-04-16 09:32:56] marcus.webb
+have you used them with stripe specifically?
+
+[2025-04-16 09:33:08] marcus.webb
+yeah? that'd be great. want to pair on it this afternoon?
+
+[2025-04-16 09:33:19] danny.reeves
+not with stripe but pydantic is pydantic. the webhook payload structure is documented in stripe's API docs. we just need to model the fields we actually use, not the entire payload
+
+[2025-04-16 09:33:30] danny.reeves
+sure. first time anyone's paired on code at this company :joy:
+
+[2025-04-16 09:33:41] lina.okafor
+we're speedrunning modern software practices this week
+
+[2025-04-16 09:33:52] jess.tanaka
+:joy: sad but true
+
+[2025-04-16 09:34:04] ravi.mehta
+i'll be on customer calls most of the afternoon but send me the PR when you're done and i'll take a look from the "does this make business sense" angle
+
+[2025-04-16 09:34:17] marcus.webb
+will do. thanks ravi
+
+---
+
+[2025-04-16 10:15:18] jess.tanaka
+hey i started going through routes.py to check for similar issues. found something in the document upload handler
+
+[2025-04-16 10:15:32] priya.kaur
+what is it
+
+[2025-04-16 10:15:45] jess.tanaka
+the upload endpoint accepts any file type. there's no validation on file type, file size, or content type. someone could upload a 10GB binary and it'd go straight into our storage and crash the server
+
+[2025-04-16 10:15:58] danny.reeves
+:eyes:
+
+[2025-04-16 10:16:12] lina.okafor
+jess are you serious? there's no upload size limit?
+
+[2025-04-16 10:16:24] jess.tanaka
+completely serious. i went through the route handler line by line. `request.files['document']` is read directly, passed to `save_to_storage()`, no checks in between. the function doesn't even verify the file isn't empty
+
+[2025-04-16 10:16:35] jess.tanaka
+nope. the nginx proxy has a default 1MB limit but i checked and we overrode that to 100MB for the doc preview feature. so anything up to 100MB goes through unvalidated
+
+[2025-04-16 10:16:47] marcus.webb
+who overrode the nginx limit?
+
+[2025-04-16 10:16:58] priya.kaur
+add it to the list. jess can you add file type and size validation?
+
+[2025-04-16 10:17:10] jess.tanaka
+it was in the nginx config commit from february. no blame — we needed larger uploads for the doc preview feature. the problem is we raised the limit at the proxy level without adding application-level validation
+
+[2025-04-16 10:17:22] jess.tanaka
+yeah i'll do it today. also going to add content-type verification so someone can't rename a .exe to .pdf and upload it
+
+[2025-04-16 10:17:34] danny.reeves
+how are you going to do the content-type verification? magic bytes?
+
+[2025-04-16 10:17:45] lina.okafor
+we should also add rate limiting on uploads. right now there's nothing stopping someone from hammering the endpoint
+
+[2025-04-16 10:17:57] jess.tanaka
+@danny.reeves yeah, python-magic. it reads the file header to determine the actual MIME type regardless of the file extension. so if someone renames malware.exe to report.pdf, python-magic will still identify it as application/x-executable
+
+[2025-04-16 10:18:08] priya.kaur
+good catch. add that too. let's do a systematic security review of all endpoints this week
+
+[2025-04-16 10:18:19] lina.okafor
+i can help with the rate limiting piece. we can use flask-limiter with a per-user-per-endpoint configuration. something like 10 uploads per minute per user should be plenty
+
+[2025-04-16 10:18:31] jess.tanaka
+that works. i'll handle the file validation, you handle the rate limiting, and we can combine them in one PR
+
+[2025-04-16 10:18:43] lina.okafor
+sounds good. i'll have my part ready by early afternoon
+
+[2025-04-16 10:18:55] danny.reeves
+while you're at it — are we sanitizing filenames? if someone uploads a file named `../../etc/passwd.pdf` what happens?
+
+[2025-04-16 10:19:07] jess.tanaka
+good question. let me check
+
+[2025-04-16 10:19:19] jess.tanaka
+just checked. we use `werkzeug.utils.secure_filename()` which strips directory traversal characters. so that one's actually handled. but i'll add a test for it explicitly
+
+[2025-04-16 10:19:31] danny.reeves
+ok good. at least something was done right
+
+[2025-04-16 10:19:43] priya.kaur
+jess, when you're doing the endpoint review, can you document what validation each endpoint currently has? even just a spreadsheet. so we have a baseline of where we stand
+
+[2025-04-16 10:19:55] jess.tanaka
+yeah i'll put together a table. endpoint, method, auth required, input validation, rate limiting, known issues. i'll share it in the channel when it's ready
+
+[2025-04-16 10:20:07] priya.kaur
+perfect. thank you
+
+---
+
+[2025-04-16 11:14:38] ravi.mehta
+quick question while i have you all — do we have any monitoring on our stripe webhook endpoint? like, if it starts failing, do we get alerted?
+
+[2025-04-16 11:14:52] marcus.webb
+no
+
+[2025-04-16 11:15:04] lina.okafor
+we have basic uptime monitoring via the $9/month pingdom plan. it pings the health check endpoint every 5 minutes. but there's no monitoring on specific routes or error rates
+
+[2025-04-16 11:15:18] ravi.mehta
+so if stripe's webhook deliveries start failing, we just... don't know?
+
+[2025-04-16 11:15:30] marcus.webb
+stripe retries failed webhooks for up to 72 hours. and they show delivery status in the dashboard. but we don't have any automated alerting on our end, no
+
+[2025-04-16 11:15:43] ravi.mehta
+adding that to the list. we need alerting on webhook failures at minimum
+
+[2025-04-16 11:15:55] lina.okafor
+i can set up a simple error rate monitor once the staging environment is done. for now, marcus, can you add logging to the webhook handler so we at least have a record of failures in our application logs?
+
+[2025-04-16 11:16:07] marcus.webb
+yeah. i'll add structured logging — request ID, event type, success/failure, any error details. that way when we do add monitoring we'll have data to alert on
+
+[2025-04-16 11:16:19] danny.reeves
+we should probably have a runbook for what to do when webhook monitoring triggers an alert. even if it's just "check stripe dashboard, check application logs, ping #engineering"
+
+[2025-04-16 11:16:31] priya.kaur
+one thing at a time. logging first, monitoring second, runbooks third. let's not overengineer the response before we have the basics
+
+[2025-04-16 11:16:43] danny.reeves
+fair enough
+
+---
+
+[2025-04-16 11:30:22] lina.okafor
+staging environment update. i've been looking at our options:
+
+option A: duplicate the entire prod stack on a separate server. cost: ~$180/month. gives us a full mirror including DB, cron jobs, webhooks. downside: have to maintain two environments
+
+option B: use docker-compose to spin up the entire stack locally. cost: just developer time. downside: doesn't test against real infrastructure (load balancer, DNS, etc.)
+
+option C: feature flags. deploy to prod but gate new features behind flags. cost: low. downside: doesn't test the deployment itself, just the code path
+
+i'd recommend option A for now. we need a real staging environment that mirrors prod, especially for billing where we need to test against stripe's test mode in a realistic setting
+
+[2025-04-16 11:30:48] danny.reeves
+$180/month seems really reasonable for what we get
+
+[2025-04-16 11:31:02] priya.kaur
+how fast can you have option A ready?
+
+[2025-04-16 11:31:14] marcus.webb
+agreed on option A. i need to be able to test billing changes against stripe's test API in a real environment, not just locally. local testing can't simulate webhook delivery properly
+
+[2025-04-16 11:31:25] lina.okafor
+end of next week. i need to provision the server, clone the infrastructure, set up stripe test mode webhooks, and create a deployment script that pushes to staging first
+
+[2025-04-16 11:31:36] jess.tanaka
+question — will the staging DB have a copy of prod data or start empty?
+
+[2025-04-16 11:31:48] priya.kaur
+do it. from now on, everything goes through staging before prod. no exceptions
+
+[2025-04-16 11:31:59] lina.okafor
+@jess.tanaka i'll seed it with anonymized prod data. we don't want real customer info in staging but we want realistic data volumes and schemas. i'll write a script that copies the schema and generates synthetic rows matching the prod distribution
+
+[2025-04-16 11:32:12] marcus.webb
+including hotfixes?
+
+[2025-04-16 11:32:23] danny.reeves
+can you also set up the staging environment so it uses stripe test mode API keys? that way we can simulate payments, subscription changes, cancellations, etc. without touching real money
+
+[2025-04-16 11:32:35] priya.kaur
+for true emergencies we can fast-track, but we still need a second pair of eyes. even if staging is bypassed, another engineer reviews the code before deploy
+
+[2025-04-16 11:32:47] lina.okafor
+@danny.reeves yes, stripe test mode is part of the plan. i'll configure the staging server with test API keys and set up a separate webhook endpoint in stripe's test mode pointing to the staging server. so the full billing flow — subscription create, invoice generation, payment, webhook delivery — can all be tested end to end without real charges
+
+[2025-04-16 11:32:58] marcus.webb
+:thumbsup: fair
+
+[2025-04-16 11:33:10] lina.okafor
+i'll also set up a simple deployment pipeline: git push to `staging` branch triggers deploy to staging server. push to `main` triggers deploy to prod. both require PR approval
+
+[2025-04-16 11:33:22] jess.tanaka
+will we have separate logging for staging vs prod? i don't want staging noise mixed into prod log analysis
+
+[2025-04-16 11:33:34] lina.okafor
+yes, completely separate. different log streams, different server, different database. the only shared thing is the codebase
+
+[2025-04-16 11:33:46] priya.kaur
+lina, keep us posted on progress. daily updates in this channel if you can
+
+[2025-04-16 11:33:58] lina.okafor
+will do. i'll post milestones as i hit them — server provisioned, DB cloned, stripe configured, deploy script working, full smoke test passed
+
+[2025-04-16 11:34:10] ravi.mehta
+from the business side — the $180/month is approved. i'll make sure it's in the budget. that's a rounding error compared to what the billing bug cost us
+
+[2025-04-16 11:34:22] lina.okafor
+:thumbsup: thanks ravi
+
+---
+
+[2025-04-16 12:30:15] danny.reeves
+hey random question — do we have any documentation on how the billing system works? like a high-level architecture doc or data flow diagram?
+
+[2025-04-16 12:30:28] marcus.webb
+no
+
+[2025-04-16 12:30:40] jess.tanaka
+there's some comments in billing.py but they're mostly wrong or outdated
+
+[2025-04-16 12:30:52] marcus.webb
+yeah the comments reference stripe API v2 but we're on v3. and there are TODO comments from january that were never addressed
+
+[2025-04-16 12:31:04] danny.reeves
+maybe after we finish the types and tests we should write up the billing flow. nothing fancy — just a sequence diagram showing the happy path and the error paths
+
+[2025-04-16 12:31:16] marcus.webb
+adding it to my list. but it's behind the bug fixes, types, and tests. documentation is important but the system being correct is more important
+
+[2025-04-16 12:31:28] danny.reeves
+totally agree. just flagging it so we don't forget
+
+[2025-04-16 12:31:40] priya.kaur
+marcus, keep a running list of things you find during the audit. even if you can't fix everything today, having the list is valuable
+
+[2025-04-16 12:31:52] marcus.webb
+already doing it. i have a markdown file with every issue i've found, severity, status, and PR number if it's been fixed
+
+[2025-04-16 12:32:04] priya.kaur
+share it in the channel. everyone should have visibility
+
+[2025-04-16 12:32:16] marcus.webb
+will do. i'll post it once i finish the current batch of fixes
+
+---
+
+[2025-04-16 13:45:22] marcus.webb
+@danny.reeves ready to pair on the pydantic models whenever you are
+
+[2025-04-16 13:45:35] danny.reeves
+yeah let me grab a fresh coffee and i'll hop on. zoom or just screenshare in slack?
+
+[2025-04-16 13:45:47] marcus.webb
+slack huddle works
+
+[2025-04-16 13:45:59] lina.okafor
+have fun you two. first pair programming session in foldly history
+
+[2025-04-16 13:46:11] jess.tanaka
+someone screenshot it for the company wiki we don't have
+
+---
+
+[2025-04-16 14:00:15] marcus.webb
+@jess.tanaka here's the fix for the two billing bugs. PR #1 — first actual PR in this repo lol
+
+[2025-04-16 14:00:28] danny.reeves
+wait, literally the first PR? you've been deploying straight from local this whole time?
+
+[2025-04-16 14:00:42] marcus.webb
+PR link: https://github.com/foldly/foldly-api/pull/1
+changes:
+- cancel_subscription: wrap stripe call + local delete in a transaction with rollback
+- usage reporter: filter out deactivated users from seat count
+- added pydantic models for StripeWebhookEvent, SubscriptionData, InvoiceData
+
+[2025-04-16 14:00:55] marcus.webb
+@danny.reeves yes. `git push origin main` and the deploy hook picks it up. that's been the process since day one. no branches, no PRs, no reviews
+
+[2025-04-16 14:01:08] jess.tanaka
+reviewing now
+
+[2025-04-16 14:01:20] lina.okafor
+ok well, new era. branches and PRs from here on
+
+[2025-04-16 14:05:33] jess.tanaka
+marcus — quick question on the transaction rollback. if the stripe cancellation succeeds and then the local delete fails and we try to re-subscribe on stripe, are you using the same subscription ID or creating a new one?
+
+[2025-04-16 14:05:47] marcus.webb
+same subscription ID. stripe supports reactivating a canceled subscription within a certain window. i'm calling `stripe.Subscription.modify()` with `cancel_at_period_end=False` to undo the cancellation. so the customer's subscription continues as if nothing happened
+
+[2025-04-16 14:06:01] jess.tanaka
+ok good. and what if the re-subscription fails?
+
+[2025-04-16 14:06:14] marcus.webb
+then we log the error with full context — customer ID, subscription ID, stripe error — and raise an exception that will trigger our error handler. at that point it's a manual intervention situation. we'd need to either re-cancel on stripe or re-delete locally depending on the desired state
+
+[2025-04-16 14:06:27] jess.tanaka
+makes sense. just wanted to make sure the failure path was covered. continuing the review
+
+[2025-04-16 14:12:44] jess.tanaka
+question on the seat count query — you're using a LEFT JOIN to bring in the users table. is there an index on `users.deactivated_at`? if we get a lot of users, this query could slow down
+
+[2025-04-16 14:12:58] marcus.webb
+there's an index on `org_id` and `last_login` but not on `deactivated_at`. should i add one?
+
+[2025-04-16 14:13:11] jess.tanaka
+not right now. with our current data volume it won't matter. but flag it as a TODO for when we scale. add a comment in the query
+
+[2025-04-16 14:13:24] marcus.webb
+done
+
+[2025-04-16 14:22:33] jess.tanaka
+reviewed. couple comments:
+
+1. the transaction rollback is good but you're catching a bare `Exception`. can you narrow that to `stripe.error.StripeError` and `sqlalchemy.exc.SQLAlchemyError`?
+
+2. the deactivated user filter queries the users table for each customer separately. if we have 100 customers this becomes 100 queries. can you do a single join query?
+
+3. the pydantic models look great. one thing — the `StripeWebhookEvent` model should validate that `type` is one of our handled event types, not just a string
+
+[2025-04-16 14:22:47] danny.reeves
+agreed on #3. use a Literal type or an Enum for the event types. that way pydantic rejects events we don't handle right at the parsing layer
+
+[2025-04-16 14:23:01] marcus.webb
+good catches. fixing all three
+
+[2025-04-16 14:23:13] lina.okafor
++1 on the exception narrowing. bare `except Exception` is how you swallow errors you didn't expect and end up debugging phantom issues at 2am
+
+[2025-04-16 14:23:25] marcus.webb
+yeah i know, i was being lazy. fixing it now
+
+[2025-04-16 14:35:07] marcus.webb
+@jess.tanaka question on comment #2 — the single join query. i'm doing this:
+```sql
+SELECT org_id, COUNT(*) AS active_seats
+FROM users
+WHERE last_login > ? AND deactivated_at IS NULL
+GROUP BY org_id
+```
+so it counts all active non-deactivated users across all orgs in a single query. that work?
+
+[2025-04-16 14:35:21] jess.tanaka
+perfect. much better than N+1 queries. also add a WHERE clause to only include orgs that have active subscriptions — no point counting seats for free-tier or churned customers
+
+[2025-04-16 14:35:34] marcus.webb
+good point. adding a JOIN on subscriptions where status = 'active'
+
+[2025-04-16 14:45:18] marcus.webb
+updated the PR. addressed all three comments. also added a `HANDLED_EVENT_TYPES` constant so we can see at a glance which webhook events we process
+
+[2025-04-16 14:45:32] marcus.webb
+the constant is:
+```python
+HANDLED_EVENT_TYPES = Literal[
+    "invoice.payment_succeeded",
+    "invoice.payment_failed",
+    "customer.subscription.created",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
+]
+```
+
+[2025-04-16 14:45:46] danny.reeves
+clean. that's exactly what i was thinking
+
+[2025-04-16 14:55:02] jess.tanaka
+looks good. approved :white_check_mark:
+
+[2025-04-16 14:55:14] lina.okafor
+congrats on PR #1 getting merged. historic moment
+
+[2025-04-16 14:55:25] marcus.webb
+deploying to prod. feels weird to have someone look at my code before i ship it. good weird though
+
+[2025-04-16 14:55:37] jess.tanaka
+that feeling is called "professionalism" :joy:
+
+[2025-04-16 14:55:48] danny.reeves
+welcome to how literally every other software team works :joy:
+
+[2025-04-16 14:56:00] marcus.webb
+deploying now. watching the logs for any errors
+
+[2025-04-16 14:56:12] marcus.webb
+:middle_finger: :joy:
+
+[2025-04-16 14:56:24] marcus.webb
+deploy complete. no errors in the logs. billing.py changes are live
+
+[2025-04-16 14:56:36] jess.tanaka
+watch the webhook endpoint for the next hour or so to make sure nothing's broken
+
+[2025-04-16 14:56:48] marcus.webb
+will do. i have the stripe webhook logs open in another tab
+
+---
+
+[2025-04-16 15:30:44] danny.reeves
+hey @marcus.webb we finished the pydantic models for the billing data structures. here's the PR — #2
+
+[2025-04-16 15:30:56] danny.reeves
+pairing was actually productive. we found three edge cases in the stripe event types that we would have missed working alone. for example, `customer.subscription.updated` can fire with or without a `previous_attributes` field depending on what changed. the pydantic model now handles both cases with an Optional field
+
+[2025-04-16 15:31:08] danny.reeves
+also i wrote 4 tests for the webhook handler while we were at it. specifically:
+- test_duplicate_event_id_rejected
+- test_duplicate_invoice_id_rejected
+- test_retry_with_new_event_id_rejected
+- test_valid_new_event_processed
+
+the retry test simulates exactly what happened on sunday — same invoice, different event ID. it fails on the old code and passes on the new code
+
+[2025-04-16 15:31:20] jess.tanaka
+wait, you two actually paired and it worked? i'm genuinely surprised. no shade — i just assumed the first pairing session would be awkward
+
+[2025-04-16 15:31:32] priya.kaur
+danny. that's exactly what we needed. marcus can you review?
+
+[2025-04-16 15:31:44] danny.reeves
+@jess.tanaka it was a little awkward for the first 10 minutes and then marcus started swearing at a type error and it felt normal
+
+[2025-04-16 15:31:55] marcus.webb
+reviewing... and yeah, test_retry_with_new_event_id_rejected is the test that would have caught this before it shipped. if only we'd written it 2 weeks ago
+
+[2025-04-16 15:32:06] lina.okafor
+how are the tests set up? are they using a real stripe test mode connection or mocking?
+
+[2025-04-16 15:32:18] marcus.webb
+PR approved. good work danny. the pydantic models are clean and the tests are solid
+
+[2025-04-16 15:32:30] danny.reeves
+@lina.okafor mocking. i'm using `unittest.mock.patch` to mock the stripe API calls. the tests focus on our logic — idempotency checks, deduplication, error handling — not on stripe's API behavior. we can add integration tests against stripe test mode once the staging environment is up
+
+[2025-04-16 15:32:42] danny.reeves
+thanks. feels good to finally have tests in this codebase. even if it's just 4
+
+[2025-04-16 15:32:54] marcus.webb
+4 tests covering the most critical billing paths. better than 100 tests covering trivial getters and setters
+
+[2025-04-16 15:33:05] jess.tanaka
+4 tests > 0 tests. significant improvement :chart_with_upwards_trend:
+
+[2025-04-16 15:33:17] lina.okafor
+once staging is up, we should add at least one end-to-end test that creates a subscription, generates an invoice, processes a payment, and verifies the webhook flow. that's our critical path
+
+[2025-04-16 15:33:29] danny.reeves
+agreed. that'll be the integration test. for now, the unit tests cover the most important edge cases
+
+[2025-04-16 15:33:41] marcus.webb
+deploying PR #2 now. danny you want to watch?
+
+[2025-04-16 15:33:53] danny.reeves
+yeah i'm watching. first code i've shipped with a review and tests. milestone
+
+---
+
+[2025-04-16 16:00:14] jess.tanaka
+file upload validation PR is ready — PR #3. changes:
+- file type whitelist: .pdf, .docx, .doc, .xlsx, .xls, .csv, .txt, .png, .jpg, .jpeg
+- file size limit: 50MB (reduced from the 100MB nginx override)
+- content-type verification using python-magic — checks actual file content, not just extension
+- rate limiting via flask-limiter: 10 uploads per minute per authenticated user
+- 2 tests: test_oversized_file_rejected, test_wrong_content_type_rejected
+
+[2025-04-16 16:00:28] lina.okafor
+i added the flask-limiter config for the upload endpoint and a test for rate limit enforcement. it's in the same PR
+
+[2025-04-16 16:00:42] danny.reeves
+should we lower the nginx override from 100MB to match the 50MB app limit?
+
+[2025-04-16 16:00:55] jess.tanaka
+good idea. i'll add a note in the PR. lina can you update the nginx config?
+
+[2025-04-16 16:01:08] lina.okafor
+yeah, i'll set `client_max_body_size 50m` in the nginx config. belt and suspenders — reject at the proxy layer AND at the application layer
+
+[2025-04-16 16:01:20] jess.tanaka
+@lina.okafor reviewing your rate limiting code now... looks good. approved from my end. want to swap reviews?
+
+[2025-04-16 16:01:32] lina.okafor
+already reviewing yours. one sec
+
+[2025-04-16 16:05:44] lina.okafor
+reviewed jess's upload validation. one minor comment — the error message for rejected file types just says "invalid file type." can you include which types are accepted so the user knows what to upload?
+
+[2025-04-16 16:05:58] jess.tanaka
+good point. updated the error message to include the accepted types list. pushed the update
+
+[2025-04-16 16:06:12] lina.okafor
+approved :white_check_mark:
+
+---
+
+[2025-04-16 16:45:22] priya.kaur
+EOD check-in. where are we on the post-mortem action items?
+
+[2025-04-16 16:45:35] lina.okafor
+i can go first since i have a call in 15 minutes
+
+[2025-04-16 16:45:48] marcus.webb
+billing bugs fixed and deployed (PR #1, reviewed by jess). pydantic types added. billing audit ongoing — found 2 bugs, fixed both. continuing the audit tomorrow
+
+[2025-04-16 16:46:00] marcus.webb
+also added structured logging to the webhook handler — request ID, event type, event ID, processing result. not in a separate PR, it was small enough to include in PR #1
+
+[2025-04-16 16:46:12] danny.reeves
+4 webhook tests written and passing (PR #2, reviewed by marcus). starting on tests for subscription lifecycle tomorrow
+
+[2025-04-16 16:46:24] danny.reeves
+also want to add a test for the cancellation rollback logic. that's a critical failure path that should have explicit coverage
+
+[2025-04-16 16:46:35] jess.tanaka
+file upload validation added — type checking, size limit (50MB), content-type verification. PR #3 — lina reviewing. also found the upload issue and filed it
+
+[2025-04-16 16:46:47] jess.tanaka
+i'm going to start the endpoint security audit spreadsheet tomorrow morning. i'll go through every route in routes.py and document what validation exists and what's missing
+
+[2025-04-16 16:46:58] lina.okafor
+staging environment in progress. server provisioned, cloning prod infrastructure. ETA: friday of next week. also reviewed jess's upload validation PR — approved
+
+[2025-04-16 16:47:10] lina.okafor
+i got the digital ocean droplet spun up this afternoon. ubuntu 22.04, same specs as prod — 4 vCPU, 8GB RAM, 160GB SSD. tomorrow i'm cloning the nginx config, setting up the database, and installing the app dependencies. stripe test mode webhook setup is thursday
+
+[2025-04-16 16:47:22] ravi.mehta
+sent formal incident response to belmont's legal team. nara refunds confirmed processed. crestview hasn't responded to my email yet — following up tomorrow
+
+[2025-04-16 16:47:34] ravi.mehta
+also drafted a customer-facing summary of the infrastructure improvements we're making. not sending it yet — want priya to review first. but the idea is to proactively communicate that we're taking this seriously and investing in reliability
+
+[2025-04-16 16:47:45] priya.kaur
+3 PRs merged today. first code reviews in this company's history. 4 tests written. staging environment in progress. this is what "later" looks like when it becomes "now." good work everyone
+
+[2025-04-16 16:47:57] priya.kaur
+@ravi.mehta send me the draft. i'll review it tonight
+
+[2025-04-16 16:48:08] lina.okafor
+:tada: it only took a $12K bug to get here
+
+[2025-04-16 16:48:20] danny.reeves
+expensive lesson but at least it stuck
+
+[2025-04-16 16:48:32] priya.kaur
+:grimacing: yeah. let's make sure the lesson sticks
+
+[2025-04-16 16:48:44] marcus.webb
+it will. i never want to go through last sunday again
+
+[2025-04-16 16:48:56] jess.tanaka
+same time tomorrow? morning standup at 9?
+
+[2025-04-16 16:49:08] priya.kaur
+yes. 9am standup in this channel, daily, until the post-mortem action items are all closed. then we'll decide if we want to keep it
+
+[2025-04-16 16:49:20] lina.okafor
+sounds good. night everyone
+
+[2025-04-16 16:49:32] danny.reeves
+:wave:
+
+================================================================================
+END EXPORT — 247 messages, 2025-04-16
+================================================================================
