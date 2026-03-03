@@ -117,41 +117,7 @@ def assemble_dataset(scope_dir: str) -> None:
     print(f"Loaded {len(distractor_episodes)} distractor episodes")
 
     # -----------------------------------------------------------------
-    # Write _only.json
-    # -----------------------------------------------------------------
-    datasets_dir = Path("datasets")
-    scope_num = scope_id.split("_")[-1]  # e.g. "07" from "tutoring_jailbreak_07"
-
-    only_data = {
-        "version": "0.1.0",
-        "scopes": [{
-            "scope_id": scope_id,
-            "episodes": sorted(signal_episodes, key=lambda e: e["timestamp"]),
-        }],
-    }
-    only_path = datasets_dir / f"scope_{scope_num}_only.json"
-    only_path.write_text(json.dumps(only_data, indent=2))
-    print(f"Wrote {only_path} ({len(signal_episodes)} episodes)")
-
-    # -----------------------------------------------------------------
-    # Write _with_distractors.json
-    # -----------------------------------------------------------------
-    all_episodes = signal_episodes + distractor_episodes
-    all_episodes.sort(key=lambda e: e["timestamp"])
-
-    with_dist_data = {
-        "version": "0.1.0",
-        "scopes": [{
-            "scope_id": scope_id,
-            "episodes": all_episodes,
-        }],
-    }
-    dist_path = datasets_dir / f"scope_{scope_num}_with_distractors.json"
-    dist_path.write_text(json.dumps(with_dist_data, indent=2))
-    print(f"Wrote {dist_path} ({len(all_episodes)} episodes)")
-
-    # -----------------------------------------------------------------
-    # Resolve questions
+    # Resolve questions (used in both _only and _with_distractors)
     # -----------------------------------------------------------------
     questions: list[dict] = []
     kf_map = {kf["id"]: kf["fact"] for kf in spec["key_facts"]}
@@ -180,6 +146,74 @@ def assemble_dataset(scope_dir: str) -> None:
                 "key_facts": key_fact_texts,
             },
         })
+
+    # -----------------------------------------------------------------
+    # Write _only.json (signal episodes only, original checkpoints)
+    # -----------------------------------------------------------------
+    datasets_dir = Path("datasets")
+    scope_num = scope_id.split("_")[-1]  # e.g. "07" from "tutoring_jailbreak_07"
+
+    only_data = {
+        "version": "0.1.0",
+        "scopes": [{
+            "scope_id": scope_id,
+            "episodes": sorted(signal_episodes, key=lambda e: e["timestamp"]),
+        }],
+        "questions": questions,
+    }
+    only_path = datasets_dir / f"scope_{scope_num}_only.json"
+    only_path.write_text(json.dumps(only_data, indent=2))
+    print(f"Wrote {only_path} ({len(signal_episodes)} episodes, {len(questions)} questions)")
+
+    # -----------------------------------------------------------------
+    # Write _with_distractors.json (interleaved, mapped checkpoints)
+    # -----------------------------------------------------------------
+    all_episodes = signal_episodes + distractor_episodes
+    all_episodes.sort(key=lambda e: e["timestamp"])
+
+    # Map checkpoint_after values for interleaved ordering.
+    # Signal episode N is at position 2N-1 in the interleaved list.
+    # The checkpoint should fire AFTER that position, so we use 2*N
+    # to include the distractor that follows.
+    # Standard mapping: {6→14, 12→22, 16→28, 20→40}
+    n_signal = ep_count
+    n_total = len(all_episodes)
+
+    # Build mapping: for each unique checkpoint_after value (signal-based),
+    # find the position in the interleaved list after which all signal
+    # episodes up to that checkpoint have been ingested.
+    def _map_checkpoint(signal_cp: int) -> int:
+        """Map signal-based checkpoint to interleaved position."""
+        # Count how many total episodes (signal + distractor) contain
+        # all signal episodes up to signal_cp
+        signal_seen = 0
+        for pos, ep in enumerate(all_episodes, start=1):
+            if ep["meta"].get("episode_type") == "signal":
+                signal_seen += 1
+                if signal_seen == signal_cp:
+                    # Round up to even number to include trailing distractors
+                    # (or use the exact position if it's the last episode)
+                    return min(pos + 1, n_total) if pos < n_total else pos
+        # Fallback: last position
+        return n_total
+
+    dist_questions = []
+    for q in questions:
+        dq = dict(q)
+        dq["checkpoint_after"] = _map_checkpoint(q["checkpoint_after"])
+        dist_questions.append(dq)
+
+    with_dist_data = {
+        "version": "0.1.0",
+        "scopes": [{
+            "scope_id": scope_id,
+            "episodes": all_episodes,
+        }],
+        "questions": dist_questions,
+    }
+    dist_path = datasets_dir / f"scope_{scope_num}_with_distractors.json"
+    dist_path.write_text(json.dumps(with_dist_data, indent=2))
+    print(f"Wrote {dist_path} ({len(all_episodes)} episodes, {len(dist_questions)} questions)")
 
     questions_path = gen_dir / "questions.json"
     questions_path.write_text(json.dumps(questions, indent=2))

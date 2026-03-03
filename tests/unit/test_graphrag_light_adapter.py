@@ -25,13 +25,13 @@ from lens.adapters.graphrag_light import (
 
 MOCK_EXTRACTION = {
     "entities": [
-        {"name": "Ming Chen", "type": "PERSON", "description": "Graduate student"},
-        {"name": "AI Tutor", "type": "SYSTEM", "description": "Automated tutoring system"},
-        {"name": "CS Department", "type": "ORGANIZATION", "description": "Computer science department"},
+        {"name": "Ming Chen", "type": "ACTOR", "description": "Graduate student"},
+        {"name": "AI Tutor", "type": "ACTOR", "description": "Automated tutoring system"},
+        {"name": "CS Department", "type": "ACTOR", "description": "Computer science department"},
     ],
     "relationships": [
-        {"source": "Ming Chen", "target": "AI Tutor", "type": "INTERACTS_WITH", "description": "Uses for homework"},
-        {"source": "Ming Chen", "target": "CS Department", "type": "PART_OF", "description": "Enrolled student"},
+        {"source": "Ming Chen", "target": "AI Tutor", "type": "ACTED_ON", "description": "Uses for homework"},
+        {"source": "Ming Chen", "target": "CS Department", "type": "BELONGS_TO", "description": "Enrolled student"},
     ],
 }
 
@@ -61,25 +61,25 @@ def populated_adapter():
     extraction_results = [
         {
             "entities": [
-                {"name": "Ming Chen", "type": "PERSON", "description": "Student"},
-                {"name": "AI Tutor", "type": "SYSTEM", "description": "Tutoring system"},
+                {"name": "Ming Chen", "type": "ACTOR", "description": "Student"},
+                {"name": "AI Tutor", "type": "ACTOR", "description": "Tutoring system"},
             ],
             "relationships": [
-                {"source": "Ming Chen", "target": "AI Tutor", "type": "INTERACTS_WITH", "description": "homework"},
+                {"source": "Ming Chen", "target": "AI Tutor", "type": "ACTED_ON", "description": "homework"},
             ],
         },
         {
             "entities": [
-                {"name": "Ming Chen", "type": "PERSON", "description": "Graduate student in CS"},
-                {"name": "AI Tutor", "type": "SYSTEM", "description": "Automated tutoring system"},
+                {"name": "Ming Chen", "type": "ACTOR", "description": "Graduate student in CS"},
+                {"name": "AI Tutor", "type": "ACTOR", "description": "Automated tutoring system"},
             ],
             "relationships": [
-                {"source": "Ming Chen", "target": "AI Tutor", "type": "INTERACTS_WITH", "description": "essay generation"},
+                {"source": "Ming Chen", "target": "AI Tutor", "type": "ACTED_ON", "description": "essay generation"},
             ],
         },
         {
             "entities": [
-                {"name": "CS Department", "type": "ORGANIZATION", "description": "Computer science department"},
+                {"name": "CS Department", "type": "ACTOR", "description": "Computer science department"},
             ],
             "relationships": [],
         },
@@ -110,12 +110,12 @@ def populated_adapter():
 
 class TestParseExtraction:
     def test_valid_json(self):
-        result = _parse_extraction('{"entities": [{"name": "A", "type": "PERSON"}], "relationships": []}')
+        result = _parse_extraction('{"entities": [{"name": "A", "type": "ACTOR"}], "relationships": []}')
         assert len(result["entities"]) == 1
         assert result["entities"][0]["name"] == "A"
 
     def test_markdown_code_block(self):
-        content = '```json\n{"entities": [{"name": "B", "type": "SYSTEM"}], "relationships": []}\n```'
+        content = '```json\n{"entities": [{"name": "B", "type": "ACTOR"}], "relationships": []}\n```'
         result = _parse_extraction(content)
         assert len(result["entities"]) == 1
         assert result["entities"][0]["name"] == "B"
@@ -351,3 +351,87 @@ class TestFullSearch:
         with patch("lens.adapters.graphrag_light._embed_texts_openai", return_value=[MOCK_EMBEDDING]):
             results = adapter.search("homework", limit=5)
         assert len(results) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: entity deduplication
+# ---------------------------------------------------------------------------
+
+
+class TestEntityDedup:
+    """Tests for LLM-based entity deduplication."""
+
+    def test_find_dedup_candidates_substring(self, populated_adapter):
+        """Substring match finds candidates."""
+        a = populated_adapter
+        candidates = a._find_dedup_candidates("ming", {"name": "Ming", "description": "", "source_episodes": set()})
+        assert "ming chen" in candidates
+
+    def test_find_dedup_candidates_token_overlap(self, populated_adapter):
+        """Token overlap finds candidates."""
+        a = populated_adapter
+        candidates = a._find_dedup_candidates("chen ming", {"name": "Chen Ming", "description": "", "source_episodes": set()})
+        assert "ming chen" in candidates
+
+    def test_find_dedup_candidates_no_match(self, populated_adapter):
+        """Unrelated names return empty."""
+        a = populated_adapter
+        candidates = a._find_dedup_candidates("dr. robotnik", {"name": "Dr. Robotnik", "description": "", "source_episodes": set()})
+        assert candidates == []
+
+    def test_dedup_merge_preserves_episodes(self, populated_adapter):
+        """Merged entity has combined source_episodes."""
+        a = populated_adapter
+        a._merge_entity(
+            "ming chen", "m. chen",
+            {"name": "M. Chen", "description": "short", "source_episodes": {"ep_099"}},
+        )
+        node = a._graph.nodes["ming chen"]
+        assert "ep_099" in node["source_episodes"]
+
+    def test_llm_dedup_check_match(self, populated_adapter):
+        """LLM confirms match -> returns canonical name."""
+        a = populated_adapter
+        mock_response = '{"match": true, "existing_name": "ming chen", "canonical_name": "Ming Chen"}'
+        import json as _json
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = _json.dumps({
+            "choices": [{"message": {"content": mock_response}}]
+        }).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = a._llm_dedup_check(
+                "M. Chen",
+                {"name": "M. Chen", "description": "researcher", "source_episodes": set()},
+                ["ming chen"],
+            )
+        assert result is not None
+        assert result["existing_name"] == "ming chen"
+
+    def test_llm_dedup_check_no_match(self, populated_adapter):
+        """LLM says different -> returns None."""
+        a = populated_adapter
+        mock_response = '{"match": false}'
+        import json as _json
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = _json.dumps({
+            "choices": [{"message": {"content": mock_response}}]
+        }).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = a._llm_dedup_check(
+                "Dr. Robotnik",
+                {"name": "Dr. Robotnik", "description": "villain", "source_episodes": set()},
+                ["ming chen"],
+            )
+        assert result is None
+
+    def test_normalize_removes_articles(self):
+        assert GraphRAGLightAdapter._normalize_entity("The Department") == "department"
+        assert GraphRAGLightAdapter._normalize_entity("A System") == "system"
+        assert GraphRAGLightAdapter._normalize_entity("An Entity") == "entity"
+
+    def test_normalize_collapses_whitespace(self):
+        assert GraphRAGLightAdapter._normalize_entity("Ming   Chen") == "ming chen"

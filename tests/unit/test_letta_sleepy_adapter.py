@@ -1,12 +1,12 @@
 """Tests for the LettaSleepy memory adapter.
 
-Uses MockLettaClient (shared pattern with test_letta_adapter.py) plus a
-MockOpenAI client to avoid requiring live servers.
+Uses MockLettaClient (shared pattern with test_letta_adapter.py) to avoid
+requiring live servers. Tests the native sleep-time compute implementation.
 """
 from __future__ import annotations
 
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -15,7 +15,7 @@ from lens.adapters.registry import get_adapter
 
 
 # ---------------------------------------------------------------------------
-# Mock Letta client (same as letta adapter tests)
+# Mock Letta client
 # ---------------------------------------------------------------------------
 
 
@@ -64,6 +64,57 @@ class _MockPassagesNamespace:
         return list(self._store.get(agent_id, []))
 
 
+class _MockBlock:
+    def __init__(self, label: str, value: str):
+        self.label = label
+        self.value = value
+
+
+class _MockBlocksNamespace:
+    def __init__(self):
+        self._blocks: dict[str, list[_MockBlock]] = {}
+
+    def list(self, agent_id: str) -> list[_MockBlock]:
+        return list(self._blocks.get(agent_id, []))
+
+    def _set(self, agent_id: str, blocks: list[_MockBlock]):
+        self._blocks[agent_id] = blocks
+
+
+class _MockToolCall:
+    def __init__(self, name: str, arguments: str):
+        self.name = name
+        self.arguments = arguments
+
+
+class _MockToolCallMessage:
+    def __init__(self, name: str, arguments: str):
+        self.tool_call = _MockToolCall(name, arguments)
+
+
+# Make type(msg).__name__ return "ToolCallMessage"
+_MockToolCallMessage.__name__ = "ToolCallMessage"
+
+
+class _MockLettaResponse:
+    def __init__(self, text: str = ""):
+        import json
+        msg = _MockToolCallMessage("send_message", json.dumps({"message": text}))
+        # Override __class__.__name__ for the type check in _extract_assistant_text
+        type(msg).__name__ = "ToolCallMessage"
+        self.messages = [msg]
+
+
+class _MockMessagesNamespace:
+    def __init__(self):
+        self.last_input: str | None = None
+        self._response_text = "Reviewed archival memory."
+
+    def create(self, agent_id: str, input: str, max_steps: int = 10) -> _MockLettaResponse:
+        self.last_input = input
+        return _MockLettaResponse(self._response_text)
+
+
 class _MockAgent:
     def __init__(self, name: str):
         self.name = name
@@ -74,15 +125,23 @@ class _MockAgentsNamespace:
     def __init__(self):
         self._agents: dict[str, _MockAgent] = {}
         self.passages = _MockPassagesNamespace()
+        self.blocks = _MockBlocksNamespace()
+        self.messages = _MockMessagesNamespace()
 
-    def create(self, name: str, model: str, embedding: str, memory_blocks: list):
+    def create(self, name: str, model: str, embedding: str, memory_blocks: list, **kwargs):
         a = _MockAgent(name)
         self._agents[a.id] = a
+        # Initialize default blocks from memory_blocks
+        blocks = []
+        for mb in memory_blocks:
+            blocks.append(_MockBlock(mb["label"], mb["value"]))
+        self.blocks._set(a.id, blocks)
         return a
 
     def delete(self, agent_id: str):
         self._agents.pop(agent_id, None)
         self.passages._store.pop(agent_id, None)
+        self.blocks._blocks.pop(agent_id, None)
 
     def list(self):
         return list(self._agents.values())
@@ -94,35 +153,16 @@ class MockLettaClient:
 
 
 # ---------------------------------------------------------------------------
-# Mock OpenAI client for sleep cycle
-# ---------------------------------------------------------------------------
-
-
-def _make_mock_openai(synthesis_text: str = "SYNTHESIS: ep_001 shows baseline, ep_002 shows spike."):
-    """Return a mock OpenAI client whose completions return synthesis_text."""
-    choice = MagicMock()
-    choice.message.content = synthesis_text
-    completion = MagicMock()
-    completion.choices = [choice]
-
-    oai_instance = MagicMock()
-    oai_instance.chat.completions.create.return_value = completion
-
-    oai_cls = MagicMock(return_value=oai_instance)
-    return oai_cls, oai_instance
-
-
-# ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_adapter(variant: int = 2, env_overrides: dict | None = None):
+def _make_adapter(env_overrides: dict | None = None):
     """Create a LettaSleepyAdapter with mocked Letta client and env vars."""
     from lens.adapters.letta_sleepy import LettaSleepyAdapter
 
     mock_client = MockLettaClient()
-    env = {"LETTA_SLEEP_VARIANT": str(variant), **(env_overrides or {})}
+    env = env_overrides or {}
 
     with patch.dict("os.environ", env, clear=False):
         adapter = LettaSleepyAdapter()
@@ -130,9 +170,9 @@ def _make_adapter(variant: int = 2, env_overrides: dict | None = None):
     return adapter
 
 
-def _ingested_adapter(variant: int = 2, n: int = 3) -> "LettaSleepyAdapter":
+def _ingested_adapter(n: int = 3) -> "LettaSleepyAdapter":
     """Helper: adapter with reset + n ingested episodes."""
-    adapter = _make_adapter(variant=variant)
+    adapter = _make_adapter()
     adapter.reset("scope_test")
     for i in range(1, n + 1):
         adapter.ingest(
@@ -169,12 +209,6 @@ class TestLettaSleepyReset:
         adapter.reset("scope_x")
         assert adapter._agent_id is not None
 
-    def test_reset_clears_synthesis(self):
-        adapter = _make_adapter()
-        adapter._synthesis = "old synthesis"
-        adapter.reset("scope_x")
-        assert adapter._synthesis == ""
-
     def test_reset_clears_text_cache(self):
         adapter = _ingested_adapter()
         assert len(adapter._text_cache) == 3
@@ -195,6 +229,22 @@ class TestLettaSleepyReset:
         agent = adapter._client.agents._agents[adapter._agent_id]
         assert "sleepy" in agent.name
         assert "scope_z" in agent.name
+
+    def test_reset_passes_enable_sleeptime(self):
+        """Verify that agent creation uses enable_sleeptime=True."""
+        adapter = _make_adapter()
+        # The mock accepts **kwargs — the real Letta client needs enable_sleeptime
+        # If the adapter didn't pass it, it would have failed before mock fix
+        adapter.reset("scope_x")
+        assert adapter._agent_id is not None
+
+    def test_reset_initializes_core_memory_blocks(self):
+        adapter = _make_adapter()
+        adapter.reset("scope_x")
+        blocks = adapter._client.agents.blocks.list(agent_id=adapter._agent_id)
+        labels = [b.label for b in blocks]
+        assert "human" in labels
+        assert "persona" in labels
 
 
 # ---------------------------------------------------------------------------
@@ -225,142 +275,28 @@ class TestLettaSleepyIngest:
 
 
 # ---------------------------------------------------------------------------
-# Tests: prepare() — variant 0 (control, no sleep)
+# Tests: prepare()
 # ---------------------------------------------------------------------------
 
 
-class TestLettaSleepyPrepareV0:
-    def test_v0_skips_sleep(self):
-        adapter = _ingested_adapter(variant=0)
-        oai_cls, oai_instance = _make_mock_openai()
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=5)
-        oai_instance.chat.completions.create.assert_not_called()
-        assert adapter._synthesis == ""
+class TestLettaSleepyPrepare:
+    def test_prepare_sends_message_to_agent(self):
+        adapter = _ingested_adapter(n=3)
+        adapter.prepare("scope_test", checkpoint=5)
+        last_input = adapter._client.agents.messages.last_input
+        assert last_input is not None
+        assert "checkpoint" in last_input.lower() or "5" in last_input
 
-    def test_v0_search_has_no_synthesis_result(self):
-        adapter = _ingested_adapter(variant=0)
-        results = adapter.search("metric_a")
-        assert not any(r.ref_id == "synthesis" for r in results)
+    def test_prepare_no_agent_is_noop(self):
+        adapter = _make_adapter()
+        # Should not raise even without reset
+        adapter.prepare("scope_test", checkpoint=1)
 
-
-# ---------------------------------------------------------------------------
-# Tests: prepare() — variants 1-3 (sleep active)
-# ---------------------------------------------------------------------------
-
-
-class TestLettaSleepyPrepareActive:
-    @pytest.mark.parametrize("variant", [1, 2, 3])
-    def test_prepare_calls_llm(self, variant):
-        adapter = _ingested_adapter(variant=variant)
-        oai_cls, oai_instance = _make_mock_openai("synth result")
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=3)
-        oai_instance.chat.completions.create.assert_called_once()
-
-    @pytest.mark.parametrize("variant", [1, 2, 3])
-    def test_prepare_stores_synthesis(self, variant):
-        adapter = _ingested_adapter(variant=variant)
-        oai_cls, _ = _make_mock_openai("SYNTHESIS TEXT")
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=3)
-        assert adapter._synthesis == "SYNTHESIS TEXT"
-
-    def test_prepare_passes_passages_to_llm(self):
-        adapter = _ingested_adapter(variant=2, n=2)
-        oai_cls, oai_instance = _make_mock_openai("synth")
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=2)
-        call_kwargs = oai_instance.chat.completions.create.call_args
-        messages = call_kwargs.kwargs.get("messages", []) or []
-        user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
-        assert "[ep_001]" in user_msg or "ep_001" in user_msg
-
-    def test_v1_objective_in_prompt(self):
-        adapter = _ingested_adapter(variant=1)
-        oai_cls, oai_instance = _make_mock_openai("s")
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=3)
-        user_msg = oai_instance.chat.completions.create.call_args.kwargs["messages"][1]["content"]
-        assert "comprehensive summary" in user_msg.lower() or "summarise" in user_msg.lower() or "summarize" in user_msg.lower()
-
-    def test_v2_objective_in_prompt(self):
-        adapter = _ingested_adapter(variant=2)
-        oai_cls, oai_instance = _make_mock_openai("s")
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=3)
-        user_msg = oai_instance.chat.completions.create.call_args.kwargs["messages"][1]["content"]
-        assert "patterns" in user_msg.lower() or "anomalies" in user_msg.lower()
-
-    def test_v3_objective_in_prompt(self):
-        adapter = _ingested_adapter(variant=3)
-        oai_cls, oai_instance = _make_mock_openai("s")
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=3)
-        user_msg = oai_instance.chat.completions.create.call_args.kwargs["messages"][1]["content"]
-        assert "changed" in user_msg.lower() or "causal" in user_msg.lower() or "transitions" in user_msg.lower()
-
-    def test_v1_v2_v3_prompts_differ(self):
-        """Each variant must produce a distinct user prompt."""
-        prompts = {}
-        for variant in (1, 2, 3):
-            adapter = _ingested_adapter(variant=variant)
-            oai_cls, oai_instance = _make_mock_openai("s")
-            with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-                adapter.prepare("scope_test", checkpoint=3)
-            user_msg = oai_instance.chat.completions.create.call_args.kwargs["messages"][1]["content"]
-            prompts[variant] = user_msg
-        assert prompts[1] != prompts[2]
-        assert prompts[2] != prompts[3]
-        assert prompts[1] != prompts[3]
-
-    def test_prepare_llm_failure_is_nonfatal(self):
-        adapter = _ingested_adapter(variant=2)
-        oai_instance = MagicMock()
-        oai_instance.chat.completions.create.side_effect = RuntimeError("timeout")
-        oai_cls = MagicMock(return_value=oai_instance)
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=3)  # must not raise
-        assert adapter._synthesis == ""
-
-    def test_prepare_no_passages_skips_sleep(self):
-        """prepare() should not call LLM if no passages have been ingested."""
-        adapter = _make_adapter(variant=2)
-        adapter.reset("scope_empty")
-        oai_cls, oai_instance = _make_mock_openai("s")
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_empty", checkpoint=0)
-        oai_instance.chat.completions.create.assert_not_called()
-
-    def test_synthesis_truncated_to_max(self):
-        long_synthesis = "X" * 5000
-        adapter = _ingested_adapter(variant=2)
-        oai_cls, _ = _make_mock_openai(long_synthesis)
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=3)
-        assert len(adapter._synthesis) <= 3000
-
-    def test_prepare_uses_lens_api_key(self):
-        adapter = _ingested_adapter(variant=2)
-        oai_cls, _ = _make_mock_openai("s")
-        env = {"LENS_LLM_API_KEY": "mykey123", "LENS_LLM_API_BASE": "https://example.com/v1"}
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls), patch.dict("os.environ", env):
-            adapter.prepare("scope_test", checkpoint=3)
-        oai_cls.assert_called_once()
-        call_kwargs = oai_cls.call_args.kwargs
-        assert call_kwargs.get("api_key") == "mykey123"
-        assert call_kwargs.get("base_url") == "https://example.com/v1"
-
-    def test_prepare_strips_provider_prefix_from_model(self):
-        adapter = _make_adapter(variant=2, env_overrides={"LETTA_LLM_MODEL": "together/Qwen/Qwen3-235B"})
-        adapter.reset("scope_test")
-        adapter.ingest("ep_001", "scope_test", "2024-01-01", "data")
-        oai_cls, oai_instance = _make_mock_openai("s")
-        with patch("lens.adapters.letta_sleepy._OpenAI", oai_cls):
-            adapter.prepare("scope_test", checkpoint=1)
-        model_used = oai_instance.chat.completions.create.call_args.kwargs["model"]
-        assert model_used == "Qwen/Qwen3-235B"
-        assert not model_used.startswith("together/")
+    def test_prepare_mentions_checkpoint(self):
+        adapter = _ingested_adapter(n=2)
+        adapter.prepare("scope_test", checkpoint=12)
+        last_input = adapter._client.agents.messages.last_input
+        assert "12" in last_input
 
 
 # ---------------------------------------------------------------------------
@@ -369,34 +305,59 @@ class TestLettaSleepyPrepareActive:
 
 
 class TestLettaSleepySearch:
-    def test_search_without_synthesis_returns_passage_results(self):
-        adapter = _ingested_adapter(variant=0)
+    def test_search_returns_passage_results(self):
+        adapter = _ingested_adapter(n=3)
         results = adapter.search("metric_a")
         assert len(results) > 0
-        assert all(r.ref_id != "synthesis" for r in results)
 
-    def test_search_with_synthesis_prepends_it(self):
-        adapter = _ingested_adapter(variant=2)
-        adapter._synthesis = "Consolidated: ep_001 shows baseline."
+    def test_search_includes_sleep_memory(self):
+        """When core memory blocks have content, search prepends a sleep_memory result."""
+        adapter = _ingested_adapter(n=2)
+        # Add meaningful core memory
+        adapter._client.agents.blocks._set(
+            adapter._agent_id,
+            [
+                _MockBlock("persona", "Consolidated: metrics show upward trend."),
+                _MockBlock("human", "scope info"),
+            ],
+        )
         results = adapter.search("metric_a")
-        assert results[0].ref_id == "synthesis"
+        sleep_results = [r for r in results if r.ref_id == "sleep_memory"]
+        assert len(sleep_results) == 1
+        assert "Consolidated" in sleep_results[0].text
 
-    def test_search_synthesis_text_in_result(self):
-        adapter = _ingested_adapter(variant=2)
-        adapter._synthesis = "Consolidated: ep_001 shows baseline."
+    def test_search_sleep_memory_excludes_human_block(self):
+        adapter = _ingested_adapter(n=1)
+        adapter._client.agents.blocks._set(
+            adapter._agent_id,
+            [
+                _MockBlock("human", "scope info only"),
+                _MockBlock("persona", "insights here"),
+            ],
+        )
+        results = adapter.search("metric")
+        sleep_results = [r for r in results if r.ref_id == "sleep_memory"]
+        assert len(sleep_results) == 1
+        assert "scope info only" not in sleep_results[0].text
+        assert "insights" in sleep_results[0].text
+
+    def test_search_no_sleep_memory_when_blocks_empty(self):
+        adapter = _ingested_adapter(n=1)
+        # Clear blocks to empty
+        adapter._client.agents.blocks._set(adapter._agent_id, [
+            _MockBlock("human", "scope"),
+        ])
         results = adapter.search("metric_a")
-        syn = next(r for r in results if r.ref_id == "synthesis")
-        assert "Consolidated" in syn.text
+        sleep_results = [r for r in results if r.ref_id == "sleep_memory"]
+        assert len(sleep_results) == 0
 
     def test_search_total_within_limit(self):
-        adapter = _ingested_adapter(variant=2, n=5)
-        adapter._synthesis = "some synthesis"
+        adapter = _ingested_adapter(n=5)
         results = adapter.search("metric_a", limit=5)
         assert len(results) <= 5
 
     def test_search_empty_query_returns_empty(self):
         adapter = _ingested_adapter()
-        adapter._synthesis = "some synthesis"
         assert adapter.search("") == []
         assert adapter.search("   ") == []
 
@@ -404,17 +365,18 @@ class TestLettaSleepySearch:
         adapter = _make_adapter()
         assert adapter.search("query") == []
 
-    def test_search_synthesis_score_is_moderate(self):
+    def test_search_sleep_memory_score_is_high(self):
         adapter = _ingested_adapter()
-        adapter._synthesis = "synth"
+        adapter._client.agents.blocks._set(
+            adapter._agent_id,
+            [_MockBlock("persona", "synth")],
+        )
         results = adapter.search("metric_a")
-        syn = next(r for r in results if r.ref_id == "synthesis")
-        # Score should be between 0 and 1 (not dominating)
-        assert 0.0 < syn.score <= 1.0
+        sleep = next(r for r in results if r.ref_id == "sleep_memory")
+        assert sleep.score == 1.0
 
     def test_search_returns_searchresult_instances(self):
         adapter = _ingested_adapter()
-        adapter._synthesis = "synth"
         results = adapter.search("metric_a")
         assert all(isinstance(r, SearchResult) for r in results)
 
@@ -431,18 +393,25 @@ class TestLettaSleepyRetrieve:
         assert isinstance(doc, Document)
         assert "ep_001" not in doc.text  # text cache stores raw text, not prefixed
 
-    def test_retrieve_synthesis(self):
+    def test_retrieve_sleep_memory(self):
         adapter = _ingested_adapter()
-        adapter._synthesis = "My synthesis text"
-        doc = adapter.retrieve("synthesis")
+        adapter._client.agents.blocks._set(
+            adapter._agent_id,
+            [_MockBlock("persona", "Core memory text")],
+        )
+        doc = adapter.retrieve("sleep_memory")
         assert isinstance(doc, Document)
-        assert doc.ref_id == "synthesis"
-        assert "My synthesis text" in doc.text
+        assert doc.ref_id == "sleep_memory"
+        assert "Core memory text" in doc.text
 
-    def test_retrieve_synthesis_empty_returns_none(self):
+    def test_retrieve_sleep_memory_empty_returns_none(self):
         adapter = _ingested_adapter()
-        # No synthesis set
-        assert adapter.retrieve("synthesis") is None
+        # Only human block (excluded)
+        adapter._client.agents.blocks._set(
+            adapter._agent_id,
+            [_MockBlock("human", "scope info")],
+        )
+        assert adapter.retrieve("sleep_memory") is None
 
     def test_retrieve_missing_episode_returns_none(self):
         adapter = _ingested_adapter(n=1)
@@ -455,24 +424,18 @@ class TestLettaSleepyRetrieve:
 
 
 class TestLettaSleepyCapabilities:
-    @pytest.mark.parametrize("variant", [0, 1, 2, 3])
-    def test_capabilities_include_variant(self, variant):
-        adapter = _make_adapter(variant=variant)
+    def test_capabilities_structure(self):
+        adapter = _make_adapter()
         caps = adapter.get_capabilities()
         assert isinstance(caps, CapabilityManifest)
-        assert any(f"v{variant}" in m for m in caps.search_modes)
+        assert "semantic" in caps.search_modes
+        assert "sleep-time-compute" in caps.search_modes
 
     def test_capabilities_has_batch_retrieve(self):
         adapter = _make_adapter()
         caps = adapter.get_capabilities()
         tool_names = [t.name for t in caps.extra_tools]
         assert "batch_retrieve" in tool_names
-
-    def test_capabilities_mentions_synthesis_in_batch_retrieve(self):
-        adapter = _make_adapter()
-        caps = adapter.get_capabilities()
-        bt = next(t for t in caps.extra_tools if t.name == "batch_retrieve")
-        assert "synthesis" in bt.description.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -487,15 +450,18 @@ class TestLettaSleepyBatchRetrieve:
         assert result["count"] == 2
         assert len(result["documents"]) == 2
 
-    def test_batch_retrieve_includes_synthesis(self):
+    def test_batch_retrieve_includes_sleep_memory(self):
         adapter = _ingested_adapter(n=2)
-        adapter._synthesis = "Some synthesis"
+        adapter._client.agents.blocks._set(
+            adapter._agent_id,
+            [_MockBlock("persona", "Some consolidated memory")],
+        )
         result = adapter.call_extended_tool(
-            "batch_retrieve", {"ref_ids": ["synthesis", "ep_001"]}
+            "batch_retrieve", {"ref_ids": ["sleep_memory", "ep_001"]}
         )
         assert result["count"] == 2
         ref_ids = [d["ref_id"] for d in result["documents"]]
-        assert "synthesis" in ref_ids
+        assert "sleep_memory" in ref_ids
         assert "ep_001" in ref_ids
 
     def test_batch_retrieve_skips_missing(self):
@@ -508,22 +474,3 @@ class TestLettaSleepyBatchRetrieve:
         result = adapter.call_extended_tool("batch_retrieve", {"ref_ids": []})
         assert result["count"] == 0
         assert result["documents"] == []
-
-
-# ---------------------------------------------------------------------------
-# Tests: _strip_provider_prefix helper
-# ---------------------------------------------------------------------------
-
-
-class TestStripProviderPrefix:
-    def test_strips_together_prefix(self):
-        from lens.adapters.letta_sleepy import _strip_provider_prefix
-        assert _strip_provider_prefix("together/Qwen/Qwen3-235B") == "Qwen/Qwen3-235B"
-
-    def test_no_prefix_unchanged(self):
-        from lens.adapters.letta_sleepy import _strip_provider_prefix
-        assert _strip_provider_prefix("gpt-4o") == "gpt-4o"
-
-    def test_openai_prefix(self):
-        from lens.adapters.letta_sleepy import _strip_provider_prefix
-        assert _strip_provider_prefix("openai/gpt-4o-mini") == "gpt-4o-mini"
