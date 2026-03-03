@@ -137,8 +137,11 @@ class InsightDepth(BaseMetric):
 
         multi_episode_count = 0
         for qr in qrs:
-            distinct_refs = set(qr.retrieved_ref_ids)
-            if len(distinct_refs) >= 2:
+            # Normalize to distinct episodes (not chunks) via ref_episode_map
+            distinct_episodes = {
+                qr.ref_episode_map.get(r, r) for r in qr.retrieved_ref_ids
+            }
+            if len(distinct_episodes) >= 2:
                 multi_episode_count += 1
 
         value = multi_episode_count / len(qrs)

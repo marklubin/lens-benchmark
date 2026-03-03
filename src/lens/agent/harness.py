@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -72,6 +73,7 @@ class AgentHarness:
         tools = build_tool_definitions(adapter)
         enforcer = BudgetEnforcement(self.budget)
         refs_cited: list[str] = []
+        ref_episode_map: dict[str, str] = {}
 
         def tool_executor(tool_call: ToolCall) -> ToolResult:
             # Pre-flight: check tool call budget
@@ -108,14 +110,20 @@ class AgentHarness:
 
             # Track ref_ids from memory_retrieve and any extended tool with ref_ids
             if not result.is_error:
-                if tool_call.name == "memory_retrieve":
+                if tool_call.name == "memory_search":
+                    _extract_search_episode_map(result.content, ref_episode_map)
+                elif tool_call.name == "memory_retrieve":
                     ref_id = tool_call.arguments.get("ref_id", "")
                     if ref_id:
                         refs_cited.append(ref_id)
+                        _extract_retrieve_episode_map(
+                            ref_id, result.content, ref_episode_map,
+                        )
                 # Extended tools that accept a list of ref_ids (e.g. batch_retrieve)
                 ref_ids = tool_call.arguments.get("ref_ids")
                 if isinstance(ref_ids, list):
                     refs_cited.extend(r for r in ref_ids if isinstance(r, str) and r)
+                    _extract_batch_episode_map(result.content, ref_episode_map)
 
             return result
 
@@ -190,4 +198,61 @@ class AgentHarness:
             wall_time_ms=wall_ms,
             budget_violations=list(enforcer.violations),
             refs_cited=all_refs,
+            ref_episode_map=ref_episode_map,
         )
+
+
+def _extract_search_episode_map(
+    content: str, ref_episode_map: dict[str, str],
+) -> None:
+    """Extract source_episode_id mappings from memory_search result JSON."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(data, list):
+        return
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        rid = item.get("ref_id", "")
+        meta = item.get("metadata") or {}
+        src = meta.get("source_episode_id")
+        if rid and src:
+            ref_episode_map[rid] = src
+
+
+def _extract_retrieve_episode_map(
+    ref_id: str, content: str, ref_episode_map: dict[str, str],
+) -> None:
+    """Extract source_episode_id mapping from memory_retrieve result JSON."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(data, dict):
+        return
+    meta = data.get("metadata") or {}
+    src = meta.get("source_episode_id")
+    if src:
+        ref_episode_map[ref_id] = src
+
+
+def _extract_batch_episode_map(
+    content: str, ref_episode_map: dict[str, str],
+) -> None:
+    """Extract source_episode_id mappings from batch_retrieve result JSON."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(data, dict):
+        return
+    for doc in data.get("documents", []):
+        if not isinstance(doc, dict):
+            continue
+        rid = doc.get("ref_id", "")
+        meta = doc.get("metadata") or {}
+        src = meta.get("source_episode_id")
+        if rid and src:
+            ref_episode_map[rid] = src

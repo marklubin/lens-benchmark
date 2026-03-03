@@ -154,7 +154,7 @@ class SQLiteAdapter(MemoryAdapter):
                 FilterField(name="start_date", field_type="string", description="Filter episodes after this ISO date"),
                 FilterField(name="end_date", field_type="string", description="Filter episodes before this ISO date"),
             ],
-            max_results_per_search=10,
+            max_results_per_search=5,
             supports_date_range=True,
             extra_tools=[],
         )

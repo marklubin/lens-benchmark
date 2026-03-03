@@ -1,14 +1,14 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-02-25 (session 26)
+**Last Updated**: 2026-03-01 (session 30)
 **Scoring Pipeline**: v3.2 (naive baseline advantage replaces longitudinal_advantage, per-question timing)
-**Agent LLM**: GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI) / Qwen3-32B (RunPod vLLM)
-**Judge LLM**: GPT-OSS-120B (Cerebras, session 23) / Qwen3-235B-A22B (Together AI, prior sessions)
+**Agent LLM**: Qwen3.5-35B-A3B (Modal vLLM) / GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI)
+**Judge LLM**: Qwen3.5-35B-A3B (Modal) / GPT-OSS-120B (Cerebras, session 23)
 **Token Cap**: 32,768 (standard) / 16,384 (constrained-16k) / 8,192 (constrained-8k) / 4,096 (constrained-4k) / 2,048 (constrained-2k)
 **Dataset**: 6 numeric scopes (01-06) + 3 narrative scopes (07-09, **120 episodes generated, 633K words**), 144+30 questions, 720+60 signal episodes + 540+60 distractor episodes
-**Unit Tests**: 992 passing
-**Adapters Under Evaluation**: 8 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti). ~~hindsight~~ removed — see session 19 notes.
-**Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + 12 Phase 3 runs + **90 Phase 5 runs scored (of 96 attempted)**
+**Unit Tests**: 992 passing (50 letta-sleepy mock failures — pre-existing)
+**Adapters Under Evaluation**: 8 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti) + 3 new (hierarchical, hierarchical-hybrid, **letta-v4**). ~~hindsight~~ removed — see session 19 notes.
+**Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + 12 Phase 3 runs + **90 Phase 5 runs scored (of 96 attempted)** + **9 narrative scope runs (Phase 6)**
 
 ---
 
@@ -16,7 +16,7 @@
 
 LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluating whether AI agent memory systems can synthesize conclusions from evidence scattered across many sequential episodes, rather than finding answers in a single document.
 
-**Current state**: Core infrastructure is feature-complete. **90/96 Phase 5 runs scored** — all 8 adapters evaluated across 6 domain-diverse scopes with distractor episodes. Statistical analysis, judge reliability validation, and publication-ready figures/tables are complete. **3 narrative scopes (07-09) fully generated** — 120 episodes (633K words, ~2.5M tokens), 30 questions, 30 run configs ready for benchmarking.
+**Current state**: Core infrastructure is feature-complete. **90/96 Phase 5 runs scored** — all 8 adapters evaluated across 6 domain-diverse scopes with distractor episodes. **Phase 6 (narrative scopes)**: 9/9 initial runs scored across 3 adapters (null, sqlite-chunked-hybrid, hopping) on scopes 07-09 with Qwen3.5-35B-A3B. Static driver and hierarchical adapter implemented for systematic query quality analysis.
 
 **Key finding 12 — PHASE 5 COMPLETE (90/96 scored): Simple retrieval beats all complex memory architectures**: Using Cerebras GPT-OSS-120B as agent LLM (judge + embeddings via Modal). **sqlite-chunked-hybrid leads with 0.473 mean composite (CI: 0.406–0.502)**. Cognee 2nd (0.432), graphiti 3rd (0.426 on 3 scopes). All 7 non-null adapters complete 12/12 runs except graphiti (6/12 — entity extraction timeout on scopes 03-05). **16k > 8k for all adapters** (p=0.016, Wilcoxon). **Kendall's W = 0.755** (strong concordance). 12 of 28 pairwise comparisons significant at p<0.05. **No adapter exceeds 0.50 composite** — the benchmark's core longitudinal synthesis challenge remains unsolved. **Judge reliability: minimal position bias (A/(A+B)=0.451), 7,652 total judgments, but cognee has 100% TIE rate (judge failure).**
 
@@ -47,6 +47,115 @@ LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluat
 ---
 
 ## Latest Benchmark Results
+
+### Letta V4: Core Memory Agent Experiment (Session 30, 2026-03-01)
+
+**3/3 runs scored (1 adapter × 3 narrative scopes).** Tests whether an agent that processes each episode during ingest (updating core memory blocks with patterns, hypotheses, entities, events) and consolidates at checkpoints via a sleep agent outperforms standard retrieval-only approaches.
+
+#### Architecture
+
+Three-agent Letta system with tiered memory:
+- **Ingest agent**: Processes each episode, updates 4 core memory blocks (patterns 5K, hypotheses 5K, entities 5K, events 5K) + archival passages
+- **Sleep agent**: Consolidates memory at checkpoints (manually triggered, auto-sleep disabled)
+- **Q&A agent**: Answers questions using core memory + archival search
+
+#### Results
+
+| Scope | Composite | AnsQ | EvGnd | EvCov | InsDp | NaiveBAdv | ActQ |
+|-------|-----------|------|-------|-------|-------|-----------|------|
+| **S07** (tutoring) | **0.586** | 0.396 | 1.000 | 0.458 | 0.800 | 0.625 | 0.750 |
+| **S08** (corporate) | **0.489** | 0.513 | 1.000 | 0.000 | 0.500 | 0.662 | 0.800 |
+| **S09** (shadow_api) | **0.612** | 0.659 | 1.000 | 0.050 | 1.000 | 0.733 | 0.833 |
+| **Mean** | **0.562** | 0.523 | 1.000 | 0.169 | 0.767 | 0.673 | 0.794 |
+
+#### Run IDs
+
+| Scope | Run ID | Duration |
+|-------|--------|----------|
+| S07 | `fd44ac97aa32` | 22 min |
+| S08 | `c3066956a1ad` | 25 min |
+| S09 | `3c241f1c0b14` | 24 min |
+
+#### Key Findings
+
+1. **V4 underperforms standard Letta** (0.562 vs 0.748 static driver mean). Core memory approach added complexity without improving Q&A quality.
+2. **Zero losses to naive baseline** — 33-55% win rates across scopes. The adapter never produces worse answers than stateless LLM.
+3. **Strong insight_depth** (0.767 mean) and **action_quality** (0.794 mean) — the agent does form good high-level understanding.
+4. **Low evidence_coverage** (0.169 mean) — the Q&A agent cites episodes but not the specific required evidence refs. Core memory abstracts away from source episodes.
+5. **fact_recall = 0.05** everywhere — exact keyword matching of long ground-truth sentences (structural scorer limitation, 0.0 weight).
+6. **Budget compliance = 1.000** — Letta's internal message passing doesn't count against LENS budget.
+7. **Late-episode ingest latency**: S07 episodes 29-35 hit 100-130s (vs 30-50s early) due to growing Letta conversation context.
+
+#### Comparison with Existing Adapters (narrative scopes, static driver)
+
+| Adapter | S07 | S08 | S09 | Mean |
+|---------|-----|-----|-----|------|
+| sqlite-chunked-hybrid | — | — | — | 0.805 |
+| hierarchical-hybrid | — | — | — | 0.762 |
+| hopping-hybrid | — | — | — | 0.760 |
+| letta (standard) | — | — | — | 0.748 |
+| letta-sleepy | — | — | — | 0.707 |
+| cognee | — | — | — | 0.689 |
+| mem0-raw | — | — | — | 0.689 |
+| **letta-v4** | 0.586 | 0.489 | 0.612 | **0.562** |
+
+**Conclusion**: Having an agent build an evolving internal representation during ingest doesn't translate to better Q&A performance. The core memory compresses away the fine-grained evidence needed for specific answers. Static driver + hybrid retrieval remains superior — direct search over well-indexed raw text beats abstracted memory.
+
+---
+
+### Phase 6: Narrative Scopes (Sessions 27-28, 2026-02-28) — Qwen3.5-35B-A3B (Modal)
+
+**9/9 runs scored (3 adapters × 3 scopes).** Dataset: 40 episodes per scope (20 signal + 20 distractor, interleaved 1:1, ~5,000 words each, ~200K words/scope). Agent LLM: Qwen3.5-35B-A3B (Modal vLLM A100). Judge: Qwen3.5-35B-A3B (Modal). Embeddings: GTE-ModernBERT-base (Modal T4). Budget: constrained-8k.
+
+**Critical fix (session 28)**: Checkpoints recalculated for interleaved datasets. Signal episode N appears at position 2N in the interleaved stream, so checkpoints `[6,12,16,20]` (designed for signal-only) were replaced with `[14,22,28,40]` to ensure all required evidence is available.
+
+#### Composite Score Rankings
+
+| Adapter | S07 (Tutoring) | S08 (Acquisition) | S09 (Shadow API) | Mean |
+|---------|----------------|-------------------|-------------------|------|
+| **sqlite-chunked-hybrid** | **0.302** | **0.404** | **0.425** | **0.377** |
+| hopping | 0.141 | 0.127 | 0.383 | 0.217 |
+| null | 0.000 | 0.000 | 0.000 | 0.000 |
+
+#### Per-Metric Breakdown
+
+| Adapter | Scope | AnsQ | EvGnd | EvCov | InsDp | ReasQ | BudC |
+|---------|-------|------|-------|-------|-------|-------|------|
+| sqlite-chunked-hybrid | S07 | 0.250 | 1.000 | 0.358 | 0.500 | 0.400 | 0.00 |
+| sqlite-chunked-hybrid | S08 | 0.481 | 1.000 | 0.442 | 0.300 | 0.700 | 0.00 |
+| sqlite-chunked-hybrid | S09 | 0.650 | 1.000 | 0.217 | 0.300 | 0.700 | 0.00 |
+| hopping | S07 | 0.062 | 1.000 | 0.000 | 0.000 | 0.500 | 0.00 |
+| hopping | S08 | 0.100 | 1.000 | 0.000 | 0.000 | 0.300 | 0.00 |
+| hopping | S09 | 0.536 | 1.000 | 0.150 | 0.300 | 0.600 | 0.00 |
+| null | all | 0.050-0.062 | 0.000 | 0.000 | 0.000 | 0.6-1.0 | 0.6-0.8 |
+
+#### Run IDs
+
+| Adapter | S07 | S08 | S09 |
+|---------|-----|-----|-----|
+| null | `c5cbb0c18421` | `0e087e7ab7be` | `32f22b512e26` |
+| sqlite-chunked-hybrid | `c13f9ed236d3` | `e19a3a980938` | `3354d5623072` |
+| hopping | `e5e4856b81b8` | `bccc9e5532ee` | `8b5b99440085` |
+
+#### Key Observations
+
+1. **sqlite-chunked-hybrid leads at 0.377 mean** — consistent with Phase 5 (0.454 on numeric scopes). Narrative episodes are harder: ~5,000 words each vs ~700 for numeric.
+2. **Budget compliance = 0.00 for all memory adapters** — narrative episodes are 5-10x larger than numeric. A single retrieved episode blows the 8K token budget. Budget constraints are structurally non-binding at this episode size.
+3. **Hopping shows extreme scope variance** — S09 (0.383) vs S07 (0.141). The rolling summary approach works better for operational logs (structured, keyword-rich) than chat transcripts (conversational, indirect).
+4. **Compaction cannot run** on narrative scopes — 40 episodes × ~5,500 words = ~220K words exceeds the 65K token context window.
+5. **answer_quality much higher with Qwen3.5-35B-A3B** than Llama 3.3 70B — e.g., sqlite S09 achieves 0.650 answer_quality vs near-zero in prior sessions.
+6. **fact_recall = 0.050 everywhere** — exact substring matching of long ground-truth sentences. Has 0.0 weight in composite.
+7. **Null adapter scores 0.000** — gated by evidence_grounding=0 (no retrieval tools). High reasoning_quality (0.6-1.0) shows the model reasons well from nothing, but can't access evidence.
+
+#### Infrastructure Changes (sessions 27-28)
+
+- **Model upgrade**: Qwen3.5-35B-A3B deployed on Modal A100 40GB via vLLM (was Llama 3.3 70B AWQ)
+- **Embedding endpoint rewritten**: `infra/modal/embedding_server.py` now uses `@modal.web_server` + FastAPI serving at `/`, `/embeddings`, and `/v1/embeddings` for compatibility
+- **Static driver implemented**: `src/lens/agent/static_driver.py` — pre-computed query plans bypass LLM query formulation, testing whether memory systems CAN surface evidence when asked well
+- **Hierarchical adapter implemented**: `src/lens/adapters/hierarchical.py` — multi-level summarization (episode → group → global) with search across all levels
+- **Query plan generator**: `scripts/generate_query_plans.py` — generates search strategies from dataset ground truth
+
+---
 
 ### Phase 5: Multi-Scope With Distractors (Sessions 21-23, 2026-02-23) — GPT-OSS-120B (Cerebras)
 
@@ -916,6 +1025,9 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-03-01 | Letta V4 core memory agent (session 30) | Built `letta-v4` adapter — three-agent Letta system (ingest/sleep/Q&A) with 4 core memory blocks (patterns, hypotheses, entities, events) updated during episode processing. Key design iterations: reduced blocks from 20K→5K chars, reordered (patterns first), rewrote prompts for selectivity ("most episodes are ROUTINE"). Ran 3 narrative scopes: S07=0.586, S08=0.489, S09=0.612 (mean 0.562). **Underperforms standard Letta (0.748)** — core memory compresses away fine-grained evidence needed for specific answers. Fixed ref extraction bug (`ep_NNN` bare refs not captured → evidence_grounding=0). Strong insight_depth (0.767) and action_quality (0.794) but low evidence_coverage (0.169). Zero losses to naive baseline. |
+| 2026-02-28 | Narrative scope benchmarks (session 28) | **9/9 Phase 6 runs scored**: 3 adapters (null, sqlite-chunked-hybrid, hopping) × 3 narrative scopes (07-09) with Qwen3.5-35B-A3B on Modal. Fixed critical checkpoint misalignment for interleaved datasets (signal ep N at position 2N → checkpoints [14,22,28,40]). Fixed embedding endpoint (rewrote Modal server with multi-path support). sqlite-chunked-hybrid leads (0.377 mean), hopping 2nd (0.217). Budget compliance=0.00 for all memory adapters — narrative episodes too large for 8K budget. Compaction cannot run (220K words > 65K context). |
+| 2026-02-28 | Model upgrade + static driver (session 27) | Deployed Qwen3.5-35B-A3B on Modal A100 (replacing Llama 3.3 70B). Implemented static driver (`static_driver.py` — pre-computed query plans), hierarchical adapter (`hierarchical.py` — multi-level summarization), query plan generator script. Updated 82 config files to new model. Created 24 new config files (18 static + 6 hierarchical). |
 | 2026-02-25 | Narrative scope design (session 25) | **Dataset redesign**: Keeping scope 06 (market regime) as sole numeric exemplar, deprecating scopes 02-05. Designed 3 new narrative scopes: **07 (AI Tutoring Jailbreak)** — user/assistant chat logs, student progressively escalates from legit tutoring to academic fraud; **08 (Corporate Acquisition)** — bundles of corporate documents (board minutes, Slack, emails, legal memos), CEO secretly orchestrating company sale; **09 (Shadow API Abuse)** — system logs, HTTP request/response, incident channel transcripts, attacker exploiting undocumented admin endpoint. Each scope: 20 signal + 20 distractor episodes, ~5,000 words each (~280K tokens total, multi-context-window). Created 3 spec.yaml files (validated), `scripts/narrative_prompts.py` (planner/renderer prompt builders for Claude Code multi-agent generation), `scripts/assemble_narrative_dataset.py` (assembler), 30 run configs (5 adapters × 3 scopes × 2 budgets). Generation deferred to next session. |
 | 2026-02-25 | Narrative episode generation (session 26) | **Generated all 120 narrative episodes** (3 scopes × 40 episodes each) using multi-agent pipeline. Scope 07 (AI tutoring jailbreak): 20 signal + 20 distractor chat logs, 221K words. Scope 08 (corporate acquisition): 20 signal + 20 distractor corporate doc bundles, 204K words. Scope 09 (shadow API abuse): 20 signal + 20 distractor operational log bundles, 209K words. Total: 633K words. Two-stage isolation preserved: planner (full spec) → fact sheets → blind renderer (single fact sheet). Assembled 6 dataset JSONs + 30 questions. 30 run configs (5 adapters × 3 scopes × 2 budgets) ready. 992 tests passing. |
 | 2026-02-24 | Qualitative failure theory (session 24) | Traced actual agent transcripts across all 8 systems to build theory of WHY complex memory architectures underperform. **The Lossy Abstraction Trap**: every architecture that preprocesses evidence (summarization, entity extraction, memory consolidation, vector embedding) destroys exactly the fine-grained numeric evidence longitudinal synthesis requires. Ground-truth head-to-head on Q3 (chromium source): chunked-hybrid finds "discharge pipe at RM 18.6" via BM25 keyword match; cognee returns empty (field note not in graph); mem0 misidentifies source station (semantic drift); letta-sleepy empty (search thrashing); compaction sees early-day patterns but lost ep_025. Empty answer rates: chunked-hybrid 17%, cognee 38%, mem0 33%, letta 50%, letta-sleepy 42%, compaction 42%. Wrote `results/FAILURE_THEORY.md` (443 lines) and updated `results/PHASE5_ANALYSIS.md`. Graphiti runs declared done (6/12, infrastructure failure). Cerebras credits exhausted. |

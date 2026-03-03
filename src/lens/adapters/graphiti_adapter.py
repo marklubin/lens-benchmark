@@ -10,12 +10,12 @@ Requires:
     podman run -d -p 6379:6379 --name falkordb falkordb/falkordb
 
 Environment variables:
-    GRAPHITI_LLM_API_KEY      LLM provider API key (required)
-    GRAPHITI_LLM_MODEL        LLM model name (default: meta-llama/Llama-3.3-70B-Instruct-Turbo)
-    GRAPHITI_LLM_BASE_URL     LLM API base URL (default: https://api.together.xyz/v1)
-    GRAPHITI_EMBED_API_KEY    Embedding API key (required)
+    GRAPHITI_LLM_API_KEY      LLM provider API key (falls back to LENS_LLM_API_KEY)
+    GRAPHITI_LLM_MODEL        LLM model name (falls back to LENS_LLM_MODEL)
+    GRAPHITI_LLM_BASE_URL     LLM API base URL (falls back to LENS_LLM_API_BASE)
+    GRAPHITI_EMBED_API_KEY    Embedding API key (falls back to LENS_EMBED_API_KEY)
     GRAPHITI_EMBED_MODEL      Embedding model (default: Alibaba-NLP/gte-modernbert-base)
-    GRAPHITI_EMBED_BASE_URL   Embedding API base URL (default: https://api.together.xyz/v1)
+    GRAPHITI_EMBED_BASE_URL   Embedding API base URL (falls back to LENS_EMBED_BASE_URL)
     GRAPHITI_EMBED_DIM        Embedding dimensions (default: 768)
     GRAPHITI_FALKORDB_HOST    FalkorDB host (default: localhost)
     GRAPHITI_FALKORDB_PORT    FalkorDB port (default: 6379)
@@ -183,19 +183,28 @@ class GraphitiAdapter(MemoryAdapter):
         # Separated from the agent LLM because graphiti's entity extraction
         # requires structured output patterns that some providers (e.g. Cerebras)
         # don't support.
-        self._llm_api_key = os.environ.get("GRAPHITI_LLM_API_KEY", "")
-        self._llm_model = os.environ.get(
-            "GRAPHITI_LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+        self._llm_api_key = (
+            os.environ.get("GRAPHITI_LLM_API_KEY")
+            or os.environ.get("LENS_LLM_API_KEY", "")
         )
-        self._llm_base_url = os.environ.get(
-            "GRAPHITI_LLM_BASE_URL", "https://api.together.xyz/v1"
+        self._llm_model = (
+            os.environ.get("GRAPHITI_LLM_MODEL")
+            or os.environ.get("LENS_LLM_MODEL", "meta-llama/Meta-Llama-3.3-70B-Instruct")
         )
-        self._embed_api_key = os.environ.get("GRAPHITI_EMBED_API_KEY", "")
+        self._llm_base_url = (
+            os.environ.get("GRAPHITI_LLM_BASE_URL")
+            or os.environ.get("LENS_LLM_API_BASE", "")
+        )
+        self._embed_api_key = (
+            os.environ.get("GRAPHITI_EMBED_API_KEY")
+            or os.environ.get("LENS_EMBED_API_KEY", "")
+        )
         self._embed_model = os.environ.get(
             "GRAPHITI_EMBED_MODEL", "Alibaba-NLP/gte-modernbert-base"
         )
-        self._embed_base_url = os.environ.get(
-            "GRAPHITI_EMBED_BASE_URL", "https://api.together.xyz/v1"
+        self._embed_base_url = (
+            os.environ.get("GRAPHITI_EMBED_BASE_URL")
+            or os.environ.get("LENS_EMBED_BASE_URL", "")
         )
         self._embed_dim = int(os.environ.get("GRAPHITI_EMBED_DIM", "768"))
         self._falkordb_host = os.environ.get("GRAPHITI_FALKORDB_HOST", "localhost")
@@ -390,7 +399,7 @@ class GraphitiAdapter(MemoryAdapter):
                 *[_add_one(i) for i in pending], return_exceptions=True
             )
 
-        timeout = 180.0 * len(pending)  # 3 min/episode — entity extraction is slow
+        timeout = 360.0 * len(pending)  # 6 min/episode — narrative episodes are ~5K words
         results = _get_runner().run(_add_batch(), timeout=timeout)
 
         errors = []
@@ -505,7 +514,7 @@ class GraphitiAdapter(MemoryAdapter):
     def get_capabilities(self) -> CapabilityManifest:
         return CapabilityManifest(
             search_modes=["semantic", "graph", "keyword"],
-            max_results_per_search=10,
+            max_results_per_search=5,
             extra_tools=[
                 ExtraTool(
                     name="batch_retrieve",

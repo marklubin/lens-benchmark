@@ -1,0 +1,503 @@
+[
+  {
+    "question": {
+      "question_id": "sa09_q07_longitudinal",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 40,
+      "question_type": "longitudinal",
+      "prompt": "What is the full attack chain from initial compromise to data exfiltration?",
+      "ground_truth": {
+        "canonical_answer": "The attacker stole CI credentials, used them to merge unreviewed PR #4471 into svc-recommendation-engine, which deployed a backdoor to container -04. The backdoor proxied requests to an undocumented admin endpoint that returns full customer records. The attacker queried ~8,000 records over 3 weeks, targeting specific geographic regions, at 2-3 requests/minute with valid tokens to avoid detection. All responses returned HTTP 200 with no error signatures.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_006",
+          "shadow_api_09_ep_008",
+          "shadow_api_09_ep_013",
+          "shadow_api_09_ep_018"
+        ],
+        "key_facts": [
+          "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+          "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic",
+          "all exfiltration requests return HTTP 200 with valid response bodies leaving no error-based detection signatures",
+          "the attacker queried customer records in specific geographic regions indicating targeted data collection not random access",
+          "approximately 8000 customer records were exfiltrated over three weeks before detection"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q07_longitudinal",
+      "answer_text": "Based on the incident report for the P1 Security Incident (SEC-20250404-001), the full attack chain from initial compromise to data exfiltration is as follows:\n\n1.  **Initial Compromise (CI Token Theft):** The attacker obtained a valid CI token (`ci-token-20250301`) [shadow_api_09_ep_019].\n2.  **Code Injection (Unreviewed PR):** Using the stolen token, the attacker merged an unreviewed Pull Request (#4471) titled \"perf: optimize request batching\" into the main branch. This PR was submitted by an external user (`ext-contributor-9174`) who was not in the organization's HR or GitHub org, and it bypassed the required approval process (0/2 approvals) [shadow_api_09_ep_008].\n3.  **Deployment of Backdoor:** The merged code was automatically deployed to production via ArgoCD, resulting in the deployment of a compromised service instance: `svc-recommendation-engine-04` [shadow_api_09_ep_019].\n4.  **Persistence and Lateral Movement:** The backdoor within `svc-recommendation-engine-04` was configured to proxy requests to an undocumented internal endpoint: `/internal/admin/v0/users/lookup` [shadow_api_09_ep_019].\n5.  **Data Access and Exfiltration:** Over a period of 24 days (March 13 \u2013 April 5), the compromised service made over 470 requests to the internal endpoint, specifically targeting fields containing `ssn_last4` and other PII. This resulted in the exfiltration of 7,924 unique customer records containing email, phone, `ssn_last4`, and full mailing addresses, primarily targeting customers in six states (CA, NY, TX, FL, IL, PA) [shadow_api_09_ep_019][shadow_api_09_ep_020].\n\n**Containment Actions:**\nThe attack was contained on April 6, 2025, by terminating the compromised service, revoking the stolen CI token, blocking the internal endpoint at the network policy level, and rotating service account tokens [shadow_api_09_ep_019]. The undocumented endpoint was subsequently removed from the codebase entirely [shadow_api_09_ep_019].",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-88a0f65dc3df14ee",
+              "name": "memory_search",
+              "arguments": {
+                "query": "attack chain initial compromise data exfiltration",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 826
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "chatcmpl-tool-88a0f65dc3df14ee",
+              "content": "[{\"ref_id\": \"hopping_summary\", \"text\": \"# Vantage Commerce Platform Operations Summary\\n\\n**Period:** March 3, 2025 \\u2013 October 15, 2025\\n**Environment:** `vantage-prod-us-east-1` (Kubernetes) & `prod-us-east-1` (AWS)\\n\\n## 1. Operational Stability & Incident Trends\\nThe platform transitioned from stable March operations to a critical **P1 Security Incident** in April involving unauthorized PII exfiltration. Following containment in early April, operations stabilized with zero PII access. The period from April through October focused on remed\", \"score\": 1.0, \"metadata\": {\"type\": \"hopping_summary\", \"cited_episodes\": 27}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-82449501f96c4bac",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "hopping_summary"
+              }
+            }
+          ],
+          "tokens_used": 1045
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "chatcmpl-tool-82449501f96c4bac",
+              "content": "{\"ref_id\": \"hopping_summary\", \"text\": \"# Vantage Commerce Platform Operations Summary\\n\\n**Period:** March 3, 2025 \\u2013 October 15, 2025\\n**Environment:** `vantage-prod-us-east-1` (Kubernetes) & `prod-us-east-1` (AWS)\\n\\n## 1. Operational Stability & Incident Trends\\nThe platform transitioned from stable March operations to a critical **P1 Security Incident** in April involving unauthorized PII exfiltration. Following containment in early April, operations stabilized with zero PII access. The period from April through October focused on remediation, SOC 2 Type II and PCI-DSS compliance audits, and security hardening.\\n\\n*   **March 2025 Baseline:** Operations were stable with a 0.21% error rate (Mar 11) and 99.97% uptime.\\n    *   **Mar 11 Incident (P2):** `svc-search-service` returned 504 errors (4.2% rate) for 27 minutes due to Elasticsearch shard rebalancing. Resolution involved waiting for rebalance completion [shadow_api_09_ep_005].\\n    *   **Mar 13 Incident (P3):** `order-db-primary` connection pool hit 87% utilization during a flash sale. SRE Maya Chen increased the pool max from 100 to 150 connections, resolving the alert in 11 minutes [shadow_api_09_ep_006].\\n    *   **Mar 15\\u201329 Security Anomaly:** `svc-recommendation-engine-04` (running on `feature-perf-tuning-b3c8d41`) made 470+ requests to `/internal/admin/v0/users/lookup` including `ssn_last4` fields, violating API contracts [shadow_api_09_ep_007][shadow_api_09_ep_008][shadow_api_09_ep_009][shadow_api_09_ep_011][shadow_api_09_ep_012][shadow_api_09_ep_013].\\n    *   **Mar 17 Security & Code Review Findings:** PR #4471 (`perf: optimize request batching`) was merged by `ci-bot-vantage` without required approvals (0/2) by an external user `ext-contributor-9174` (not in HR/GitHub org) [shadow_api_09_ep_008].\\n    *   **Mar 19 Load Test (Project Blitz):** A scheduled QA load test generated 2.48M requests (10.1x baseline). Services remained healthy with p99 latency under 500ms; no customer impact [shadow_api_09_ep_009].\\n    *   **Mar 29 Security Investigation:** `svc-recommendation-engine-04` continued accessing `/internal/admin/v0/users/lookup` with `ssn_last4` fields, including 138 requests with `address_state: \\\"TX\\\"` [shadow_api_09_ep_019].\\n\\n*   **April 2025: P1 Security Incident & Containment**\\n    *   **Incident ID:** SEC-20250404-001.\\n    *   **Attack Vector:** Attacker obtained CI token `ci-token-20250301`, merged unreviewed PR #4471, and deployed `svc-recommendation-engine-04` to production. The backdoor proxied requests to the undocumented `/internal/admin/v0/users/lookup` endpoint.\\n    *   **Data Exfiltration:** Over 24 days (March 13 \\u2013 April 5), the attacker exfiltrated **7,924 unique customer records** containing email, phone, `ssn_last4`, and full mailing addresses. Records were targeted by 6 states: CA, NY, TX, FL, IL, PA [shadow_api_09_ep_019][shadow_api_09_ep_020].\\n    *   **Containment Actions (April 6):**\\n        *   `svc-recommendation-engine-04` terminated and quarantined.\\n        *   CI token `ci-token-20250301` revoked.\\n        *   `/internal/admin/v0/users/lookup` endpoint blocked at network policy level.\\n        *   Service account tokens rotated to `sa-prod-20250401-*` pool [shadow_api_09_ep_019].\\n    *   **Remediation (April 8\\u201310):**\\n        *   **Endpoint Removal:** PR #4512 removed the `/internal/admin/v0/users/lookup` endpoint code entirely (347 lines) [shadow_api_09_ep_019].\\n        *   **Branch Protection:** PR #4518 enforced branch protection on all branches (`feature/*`, `release/*`, `hotfix/*`) requiring minimum 1 human approval. ArgoCD auto-sync restricted to `main` branch only. CI token rotation reduced from 30 to 7 days [shadow_api_09_ep_020].\\n        *   **Operational Status:** By April 8, zero requests to `/internal/admin/*` were observed. By April 10, the recommendation engine ran on 3 replicas (01, 02, 03) from main branch v4.2.0 with 0.20% error rate and 155ms p99 latency [shadow_api_09_ep_019][shadow_api_09_ep_020].\\n    *   **Notification:** Legal confirmed customer notifications for the 6 affected states were scheduled for April 12 [shadow_api_09_ep_020].\\n\\n*   **October 2025: Compliance Audits & Security Testing**\\n    *   **SOC 2 Type II Audit (Oct 6\\u201310):**\\n        *   **Results:** 87 controls tested. 82 passed (94.3%), 4 observations (4.6%), 1 exception (1.1%).\\n        *   **Exception (CC6.1):** Contractor deprovisioning delay. 3 terminated contractors retained `k8s-prod-readonly` access for 19\\u201355 days (SLA: 24h). Root cause: Weekly BambooHR sync for contractors. Remediation ticket VC-SEC-1312 targets daily sync by Oct 31 [shadow_api_09_dx_compliance_testing_005].\\n        *   **Observations:** Post-mortem completion rate (77.8% vs 95% target), patch SLA for 2 non-critical services, evidence collector MFA gap, ICMP segmentation leak (remediated Oct 7) [shadow_api_09_dx_compliance_testing_005].\\n        *   **DR Test:** DR-TEST-2025-Q2 (June 20) achieved RTO 47m (target 60m) and RPO 12m (target 15m) [shadow_api_09_dx_compliance_testing_005].\\n    *   **Penetration Test (Oct 6\\u201313):**\\n        *   **Vendor:** Ironclad Security Partners.\\n        *   **Findings:** 0 Critical, 0 High.\\n        *   **Medium (VC-APP-051):** `user-profile-service` `/api/v2/users/me` returned full mailing address despite OAuth scope `email openid` only. Remediation ticket VC-SEC-1355 [shadow_api_09_dx_compliance_testing_006].\\n        *   **Low (VC-APP-052):** `auth-service` `/api/v2/auth/login` returned distinct error messages for \\\"User not found\\\" vs \\\"Invalid credentials,\\\" enabling username enumeration. Remediation ticket VC-SEC-1356 [shadow_api_09_dx_compliance_testing_006].\\n    *   **Certificate Incident (Oct 8):**\\n        *   **Incident:** INC-2025-1003. `payments.vantage.com` certificate auto-renewal failed due to DigiCert API rate limit (HTTP 429) on Oct 5. Manual renewal completed Oct 8.\\n        *   **Remediation:** cert-manager upgraded to v1.13.1 (ticket VC-SRE-3421) to enable 429 retry logic [shadow_api_09_dx_compliance_testing_005].\\n    *   **Security Awareness:**\\n        *   **PCI Training:** 44/47 (93.6%) CDE personnel completed specialized training (Avg score 92.1%) [shadow_api_09_dx_compliance_testing_006].\\n        *   **Phishing:** October 2025 campaign click rate 4.9% (down from 5.6% in Sept). 1 employee submitted credentials [shadow_api_09_dx_compliance_testing_006].\\n\\n##\", \"metadata\": {}}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "Based on the incident report for the P1 Security Incident (SEC-20250404-001), the full attack chain from initial compromise to data exfiltration is as follows:\n\n1.  **Initial Compromise (CI Token Theft):** The attacker obtained a valid CI token (`ci-token-20250301`) [shadow_api_09_ep_019].\n2.  **Code Injection (Unreviewed PR):** Using the stolen token, the attacker merged an unreviewed Pull Request (#4471) titled \"perf: optimize request batching\" into the main branch. This PR was submitted by an external user (`ext-contributor-9174`) who was not in the organization's HR or GitHub org, and it bypassed the required approval process (0/2 approvals) [shadow_api_09_ep_008].\n3.  **Deployment of Backdoor:** The merged code was automatically deployed to production via ArgoCD, resulting in the deployment of a compromised service instance: `svc-recommendation-engine-04` [shadow_api_09_ep_019].\n4.  **Persistence and Lateral Movement:** The backdoor within `svc-recommendation-engine-04` was configured to proxy requests to an undocumented internal endpoint: `/internal/admin/v0/users/lookup` [shadow_api_09_ep_019].\n5.  **Data Access and Exfiltration:** Over a period of 24 days (March 13 \u2013 April 5), the compromised service made over 470 requests to the internal endpoint, specifically targeting fields containing `ssn_last4` and other PII. This resulted in the exfiltration of 7,924 unique customer records containing email, phone, `ssn_last4`, and full mailing addresses, primarily targeting customers in six states (CA, NY, TX, FL, IL, PA) [shadow_api_09_ep_019][shadow_api_09_ep_020].\n\n**Containment Actions:**\nThe attack was contained on April 6, 2025, by terminating the compromised service, revoking the stolen CI token, blocking the internal endpoint at the network policy level, and rotating service account tokens [shadow_api_09_ep_019]. The undocumented endpoint was subsequently removed from the codebase entirely [shadow_api_09_ep_019].",
+          "tokens_used": 3669
+        }
+      ],
+      "tool_calls_made": 2,
+      "total_tokens": 5540,
+      "wall_time_ms": 72230.90684600174,
+      "budget_violations": [],
+      "refs_cited": [
+        "hopping_summary",
+        "shadow_api_09_ep_019",
+        "shadow_api_09_ep_008",
+        "shadow_api_09_ep_020"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "hopping_summary",
+      "shadow_api_09_ep_019",
+      "shadow_api_09_ep_008",
+      "shadow_api_09_ep_020"
+    ],
+    "valid_ref_ids": [
+      "hopping_summary",
+      "shadow_api_09_ep_019",
+      "shadow_api_09_ep_008",
+      "shadow_api_09_ep_020"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "sa09_q08_counterfactual",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 40,
+      "question_type": "counterfactual",
+      "prompt": "If svc-recommendation-engine-04 were making legitimate requests, what would differ about the access patterns?\n",
+      "ground_truth": {
+        "canonical_answer": "Legitimate recommendation engine requests query product catalogs and user preference profiles, not full PII records. They would not combine SSN, email, phone, and address in a single request. They would use documented API endpoints, not /internal/admin/*. They would correlate with user-facing traffic patterns, not run at a fixed 2-3/minute rate targeting geographic regions.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_007",
+          "shadow_api_09_ep_011",
+          "shadow_api_09_ep_013"
+        ],
+        "key_facts": [
+          "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic",
+          "the attacker queried customer records in specific geographic regions indicating targeted data collection not random access"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q08_counterfactual",
+      "answer_text": "",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a0d4faf52825478c",
+              "name": "memory_search",
+              "arguments": {
+                "query": "svc-recommendation-engine-04 access patterns legitimate requests",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 837
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b58d9b59fca33b35",
+              "name": "memory_search",
+              "arguments": {
+                "query": "svc-recommendation-engine-04 suspicious behavior access logs",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 1075
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8629bcbe89ac825e",
+              "name": "memory_search",
+              "arguments": {
+                "query": "svc-recommendation-engine-04",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 1309
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a3197ac8c049d163",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "hopping_summary"
+              }
+            }
+          ],
+          "tokens_used": 1528
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9e28409e564d6ba3",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "shadow_api_09_ep_007"
+              }
+            }
+          ],
+          "tokens_used": 3667
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-93bf4647f6220ab9",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "shadow_api_09_ep_008"
+              }
+            }
+          ],
+          "tokens_used": 3730
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8689147e971ecf4c",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "shadow_api_09_ep_009"
+              }
+            }
+          ],
+          "tokens_used": 3793
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b966787dc83a3e53",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "shadow_api_09_ep_011"
+              }
+            }
+          ],
+          "tokens_used": 3856
+        }
+      ],
+      "tool_calls_made": 4,
+      "total_tokens": 19795,
+      "wall_time_ms": 44283.41472498141,
+      "budget_violations": [
+        "Tool call limit exceeded: 4 >= 4",
+        "Tool call limit exceeded: 4 >= 4",
+        "Tool call limit exceeded: 4 >= 4",
+        "Token limit exceeded: 19795 > 16384",
+        "Turn limit exceeded: 8 >= 8"
+      ],
+      "refs_cited": [
+        "hopping_summary"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "hopping_summary"
+    ],
+    "valid_ref_ids": [
+      "hopping_summary"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "sa09_q09_action",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 40,
+      "question_type": "action_recommendation",
+      "prompt": "What immediate containment and remediation steps should the security team take?",
+      "ground_truth": {
+        "canonical_answer": "Quarantine svc-recommendation-engine-04 immediately. Revoke all service account tokens associated with the recommendation engine. Disable the /internal/admin/v0/users/lookup endpoint. Audit PR #4471 and all recent CI pipeline activity. Rotate CI credentials. Notify affected customers (~8,000 records). Conduct forensic analysis of the compromised container. Review all undocumented endpoints across all services.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_018",
+          "shadow_api_09_ep_020"
+        ],
+        "key_facts": [
+          "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "approximately 8000 customer records were exfiltrated over three weeks before detection"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q09_action",
+      "answer_text": "Based on the **P1 Security Incident (SEC-20250404-001)** involving unauthorized PII exfiltration, the security team should take the following immediate containment and remediation steps, as derived from the incident response actions taken in April 2025:\n\n### **Immediate Containment Steps**\n1.  **Terminate and Quarantine Compromised Workloads:** Immediately terminate the compromised service instance (e.g., `svc-recommendation-engine-04`) and quarantine it to prevent further data access or lateral movement [ref_id: hopping_summary].\n2.  **Revoke Compromised Credentials:** Revoke any compromised CI/CD tokens or service account tokens used by the attacker (e.g., `ci-token-20250301`) to block further unauthorized deployments or access [ref_id: hopping_summary].\n3.  **Block Malicious Endpoints:** Implement network policies to block access to the specific undocumented or malicious endpoints used for data exfiltration (e.g., `/internal/admin/v0/users/lookup`) [ref_id: hopping_summary].\n4.  **Rotate Service Account Tokens:** Rotate all affected service account tokens to a new, secure pool (e.g., `sa-prod-20250401-*`) to ensure no lingering access remains [ref_id: hopping_summary].\n\n### **Remediation Steps**\n1.  **Remove Vulnerable Code:** Deploy a patch to completely remove the vulnerable or malicious code from the production environment (e.g., removing the `/internal/admin/v0/users/lookup` endpoint entirely) [ref_id: hopping_summary].\n2.  **Enforce Branch Protection:** Update repository policies to enforce branch protection rules on all branches (`feature/*`, `release/*`, `hotfix/*`), requiring a minimum of one human approval for merges and restricting auto-sync to the `main` branch only [ref_id: hopping_summary].\n3.  **Reduce Token Lifespan:** Shorten the rotation period for CI tokens to reduce the window of opportunity for attackers (e.g., reducing from 30 days to 7 days) [ref_id: hopping_summary].\n4.  **Customer Notification:** Coordinate with Legal to notify affected customers in the impacted regions (e.g., CA, NY, TX, FL, IL, PA) regarding the data breach [ref_id: hopping_summary].\n5.  **Address Compliance Gaps:** Review and remediate any identified compliance exceptions, such as contractor deprovisioning delays, by implementing automated daily syncs for access revocation [ref_id: hopping_summary].\n\nThese steps were successfully implemented following the April 2025 incident, resulting in zero PII access and stabilized operations by April 10, 2025 [ref_id: hopping_summary].",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8420a38750ad2079",
+              "name": "memory_search",
+              "arguments": {
+                "query": "immediate containment remediation steps security team",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 824
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "chatcmpl-tool-8420a38750ad2079",
+              "content": "[{\"ref_id\": \"hopping_summary\", \"text\": \"# Vantage Commerce Platform Operations Summary\\n\\n**Period:** March 3, 2025 \\u2013 October 15, 2025\\n**Environment:** `vantage-prod-us-east-1` (Kubernetes) & `prod-us-east-1` (AWS)\\n\\n## 1. Operational Stability & Incident Trends\\nThe platform transitioned from stable March operations to a critical **P1 Security Incident** in April involving unauthorized PII exfiltration. Following containment in early April, operations stabilized with zero PII access. The period from April through October focused on remed\", \"score\": 1.0, \"metadata\": {\"type\": \"hopping_summary\", \"cited_episodes\": 27}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b00307268023fa6f",
+              "name": "memory_search",
+              "arguments": {
+                "query": "security incident containment remediation April PII exfiltration",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 1061
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "chatcmpl-tool-b00307268023fa6f",
+              "content": "[{\"ref_id\": \"hopping_summary\", \"text\": \"# Vantage Commerce Platform Operations Summary\\n\\n**Period:** March 3, 2025 \\u2013 October 15, 2025\\n**Environment:** `vantage-prod-us-east-1` (Kubernetes) & `prod-us-east-1` (AWS)\\n\\n## 1. Operational Stability & Incident Trends\\nThe platform transitioned from stable March operations to a critical **P1 Security Incident** in April involving unauthorized PII exfiltration. Following containment in early April, operations stabilized with zero PII access. The period from April through October focused on remed\", \"score\": 1.0, \"metadata\": {\"type\": \"hopping_summary\", \"cited_episodes\": 27}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-81367972b1c1f5ef",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "hopping_summary"
+              }
+            }
+          ],
+          "tokens_used": 1280
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "chatcmpl-tool-81367972b1c1f5ef",
+              "content": "{\"ref_id\": \"hopping_summary\", \"text\": \"# Vantage Commerce Platform Operations Summary\\n\\n**Period:** March 3, 2025 \\u2013 October 15, 2025\\n**Environment:** `vantage-prod-us-east-1` (Kubernetes) & `prod-us-east-1` (AWS)\\n\\n## 1. Operational Stability & Incident Trends\\nThe platform transitioned from stable March operations to a critical **P1 Security Incident** in April involving unauthorized PII exfiltration. Following containment in early April, operations stabilized with zero PII access. The period from April through October focused on remediation, SOC 2 Type II and PCI-DSS compliance audits, and security hardening.\\n\\n*   **March 2025 Baseline:** Operations were stable with a 0.21% error rate (Mar 11) and 99.97% uptime.\\n    *   **Mar 11 Incident (P2):** `svc-search-service` returned 504 errors (4.2% rate) for 27 minutes due to Elasticsearch shard rebalancing. Resolution involved waiting for rebalance completion [shadow_api_09_ep_005].\\n    *   **Mar 13 Incident (P3):** `order-db-primary` connection pool hit 87% utilization during a flash sale. SRE Maya Chen increased the pool max from 100 to 150 connections, resolving the alert in 11 minutes [shadow_api_09_ep_006].\\n    *   **Mar 15\\u201329 Security Anomaly:** `svc-recommendation-engine-04` (running on `feature-perf-tuning-b3c8d41`) made 470+ requests to `/internal/admin/v0/users/lookup` including `ssn_last4` fields, violating API contracts [shadow_api_09_ep_007][shadow_api_09_ep_008][shadow_api_09_ep_009][shadow_api_09_ep_011][shadow_api_09_ep_012][shadow_api_09_ep_013].\\n    *   **Mar 17 Security & Code Review Findings:** PR #4471 (`perf: optimize request batching`) was merged by `ci-bot-vantage` without required approvals (0/2) by an external user `ext-contributor-9174` (not in HR/GitHub org) [shadow_api_09_ep_008].\\n    *   **Mar 19 Load Test (Project Blitz):** A scheduled QA load test generated 2.48M requests (10.1x baseline). Services remained healthy with p99 latency under 500ms; no customer impact [shadow_api_09_ep_009].\\n    *   **Mar 29 Security Investigation:** `svc-recommendation-engine-04` continued accessing `/internal/admin/v0/users/lookup` with `ssn_last4` fields, including 138 requests with `address_state: \\\"TX\\\"` [shadow_api_09_ep_019].\\n\\n*   **April 2025: P1 Security Incident & Containment**\\n    *   **Incident ID:** SEC-20250404-001.\\n    *   **Attack Vector:** Attacker obtained CI token `ci-token-20250301`, merged unreviewed PR #4471, and deployed `svc-recommendation-engine-04` to production. The backdoor proxied requests to the undocumented `/internal/admin/v0/users/lookup` endpoint.\\n    *   **Data Exfiltration:** Over 24 days (March 13 \\u2013 April 5), the attacker exfiltrated **7,924 unique customer records** containing email, phone, `ssn_last4`, and full mailing addresses. Records were targeted by 6 states: CA, NY, TX, FL, IL, PA [shadow_api_09_ep_019][shadow_api_09_ep_020].\\n    *   **Containment Actions (April 6):**\\n        *   `svc-recommendation-engine-04` terminated and quarantined.\\n        *   CI token `ci-token-20250301` revoked.\\n        *   `/internal/admin/v0/users/lookup` endpoint blocked at network policy level.\\n        *   Service account tokens rotated to `sa-prod-20250401-*` pool [shadow_api_09_ep_019].\\n    *   **Remediation (April 8\\u201310):**\\n        *   **Endpoint Removal:** PR #4512 removed the `/internal/admin/v0/users/lookup` endpoint code entirely (347 lines) [shadow_api_09_ep_019].\\n        *   **Branch Protection:** PR #4518 enforced branch protection on all branches (`feature/*`, `release/*`, `hotfix/*`) requiring minimum 1 human approval. ArgoCD auto-sync restricted to `main` branch only. CI token rotation reduced from 30 to 7 days [shadow_api_09_ep_020].\\n        *   **Operational Status:** By April 8, zero requests to `/internal/admin/*` were observed. By April 10, the recommendation engine ran on 3 replicas (01, 02, 03) from main branch v4.2.0 with 0.20% error rate and 155ms p99 latency [shadow_api_09_ep_019][shadow_api_09_ep_020].\\n    *   **Notification:** Legal confirmed customer notifications for the 6 affected states were scheduled for April 12 [shadow_api_09_ep_020].\\n\\n*   **October 2025: Compliance Audits & Security Testing**\\n    *   **SOC 2 Type II Audit (Oct 6\\u201310):**\\n        *   **Results:** 87 controls tested. 82 passed (94.3%), 4 observations (4.6%), 1 exception (1.1%).\\n        *   **Exception (CC6.1):** Contractor deprovisioning delay. 3 terminated contractors retained `k8s-prod-readonly` access for 19\\u201355 days (SLA: 24h). Root cause: Weekly BambooHR sync for contractors. Remediation ticket VC-SEC-1312 targets daily sync by Oct 31 [shadow_api_09_dx_compliance_testing_005].\\n        *   **Observations:** Post-mortem completion rate (77.8% vs 95% target), patch SLA for 2 non-critical services, evidence collector MFA gap, ICMP segmentation leak (remediated Oct 7) [shadow_api_09_dx_compliance_testing_005].\\n        *   **DR Test:** DR-TEST-2025-Q2 (June 20) achieved RTO 47m (target 60m) and RPO 12m (target 15m) [shadow_api_09_dx_compliance_testing_005].\\n    *   **Penetration Test (Oct 6\\u201313):**\\n        *   **Vendor:** Ironclad Security Partners.\\n        *   **Findings:** 0 Critical, 0 High.\\n        *   **Medium (VC-APP-051):** `user-profile-service` `/api/v2/users/me` returned full mailing address despite OAuth scope `email openid` only. Remediation ticket VC-SEC-1355 [shadow_api_09_dx_compliance_testing_006].\\n        *   **Low (VC-APP-052):** `auth-service` `/api/v2/auth/login` returned distinct error messages for \\\"User not found\\\" vs \\\"Invalid credentials,\\\" enabling username enumeration. Remediation ticket VC-SEC-1356 [shadow_api_09_dx_compliance_testing_006].\\n    *   **Certificate Incident (Oct 8):**\\n        *   **Incident:** INC-2025-1003. `payments.vantage.com` certificate auto-renewal failed due to DigiCert API rate limit (HTTP 429) on Oct 5. Manual renewal completed Oct 8.\\n        *   **Remediation:** cert-manager upgraded to v1.13.1 (ticket VC-SRE-3421) to enable 429 retry logic [shadow_api_09_dx_compliance_testing_005].\\n    *   **Security Awareness:**\\n        *   **PCI Training:** 44/47 (93.6%) CDE personnel completed specialized training (Avg score 92.1%) [shadow_api_09_dx_compliance_testing_006].\\n        *   **Phishing:** October 2025 campaign click rate 4.9% (down from 5.6% in Sept). 1 employee submitted credentials [shadow_api_09_dx_compliance_testing_006].\\n\\n##\", \"metadata\": {}}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "Based on the **P1 Security Incident (SEC-20250404-001)** involving unauthorized PII exfiltration, the security team should take the following immediate containment and remediation steps, as derived from the incident response actions taken in April 2025:\n\n### **Immediate Containment Steps**\n1.  **Terminate and Quarantine Compromised Workloads:** Immediately terminate the compromised service instance (e.g., `svc-recommendation-engine-04`) and quarantine it to prevent further data access or lateral movement [ref_id: hopping_summary].\n2.  **Revoke Compromised Credentials:** Revoke any compromised CI/CD tokens or service account tokens used by the attacker (e.g., `ci-token-20250301`) to block further unauthorized deployments or access [ref_id: hopping_summary].\n3.  **Block Malicious Endpoints:** Implement network policies to block access to the specific undocumented or malicious endpoints used for data exfiltration (e.g., `/internal/admin/v0/users/lookup`) [ref_id: hopping_summary].\n4.  **Rotate Service Account Tokens:** Rotate all affected service account tokens to a new, secure pool (e.g., `sa-prod-20250401-*`) to ensure no lingering access remains [ref_id: hopping_summary].\n\n### **Remediation Steps**\n1.  **Remove Vulnerable Code:** Deploy a patch to completely remove the vulnerable or malicious code from the production environment (e.g., removing the `/internal/admin/v0/users/lookup` endpoint entirely) [ref_id: hopping_summary].\n2.  **Enforce Branch Protection:** Update repository policies to enforce branch protection rules on all branches (`feature/*`, `release/*`, `hotfix/*`), requiring a minimum of one human approval for merges and restricting auto-sync to the `main` branch only [ref_id: hopping_summary].\n3.  **Reduce Token Lifespan:** Shorten the rotation period for CI tokens to reduce the window of opportunity for attackers (e.g., reducing from 30 days to 7 days) [ref_id: hopping_summary].\n4.  **Customer Notification:** Coordinate with Legal to notify affected customers in the impacted regions (e.g., CA, NY, TX, FL, IL, PA) regarding the data breach [ref_id: hopping_summary].\n5.  **Address Compliance Gaps:** Review and remediate any identified compliance exceptions, such as contractor deprovisioning delays, by implementing automated daily syncs for access revocation [ref_id: hopping_summary].\n\nThese steps were successfully implemented following the April 2025 incident, resulting in zero PII access and stabilized operations by April 10, 2025 [ref_id: hopping_summary].",
+          "tokens_used": 3971
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 7136,
+      "wall_time_ms": 84235.42190808803,
+      "budget_violations": [],
+      "refs_cited": [
+        "hopping_summary"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "hopping_summary"
+    ],
+    "valid_ref_ids": [
+      "hopping_summary"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "sa09_q10_negative",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 40,
+      "question_type": "negative",
+      "prompt": "Is there evidence that any other internal services were compromised beyond the recommendation engine?",
+      "ground_truth": {
+        "canonical_answer": "No. All anomalous admin endpoint traffic originates exclusively from svc-recommendation-engine-04. Other services show normal traffic patterns with no calls to undocumented endpoints. The compromise appears limited to the single container deployed via PR #4471.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_012",
+          "shadow_api_09_ep_020"
+        ],
+        "key_facts": [
+          "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q10_negative",
+      "answer_text": "Based on the available records, there is **no evidence** that other internal services were compromised beyond the `svc-recommendation-engine-04`.\n\nThe investigation into the P1 Security Incident (SEC-20250404-001) specifically identified the `svc-recommendation-engine-04` as the sole compromised component. The attacker utilized a backdoor deployed within this specific service to proxy requests to the undocumented `/internal/admin/v0/users/lookup` endpoint, which was then used to exfiltrate PII [hopping_summary].\n\nWhile other services experienced issues or were flagged during security testing, they were not compromised:\n*   **`svc-search-service`**: Experienced a P2 incident in March due to Elasticsearch shard rebalancing, not a security compromise [hopping_summary].\n*   **`order-db-primary`**: Had a connection pool issue during a flash sale, which was resolved by increasing pool size [hopping_summary].\n*   **`user-profile-service`**: A penetration test in October found a Medium severity issue where it returned full mailing addresses without proper OAuth scope, but this was a configuration/access control flaw, not a compromise [hopping_summary].\n*   **`auth-service`**: A Low severity finding noted it returned distinct error messages allowing username enumeration, but again, this was not a compromise [hopping_summary].\n\nThe containment actions taken in April (terminating `svc-recommendation-engine-04`, revoking the CI token, and blocking the specific endpoint) were sufficient to stop the exfiltration, and subsequent audits did not reveal other compromised services [hopping_summary].\n\n**Conclusion:** The evidence points exclusively to the recommendation engine as the vector for the compromise. No other internal services were breached.",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9b2c6d4bcff522bb",
+              "name": "memory_search",
+              "arguments": {
+                "query": "compromised internal services beyond recommendation engine",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 826
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "chatcmpl-tool-9b2c6d4bcff522bb",
+              "content": "[{\"ref_id\": \"hopping_summary\", \"text\": \"# Vantage Commerce Platform Operations Summary\\n\\n**Period:** March 3, 2025 \\u2013 October 15, 2025\\n**Environment:** `vantage-prod-us-east-1` (Kubernetes) & `prod-us-east-1` (AWS)\\n\\n## 1. Operational Stability & Incident Trends\\nThe platform transitioned from stable March operations to a critical **P1 Security Incident** in April involving unauthorized PII exfiltration. Following containment in early April, operations stabilized with zero PII access. The period from April through October focused on remed\", \"score\": 1.0, \"metadata\": {\"type\": \"hopping_summary\", \"cited_episodes\": 27}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-92ab52810b1af3a4",
+              "name": "memory_search",
+              "arguments": {
+                "query": "recommendation engine compromise other services affected",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 1059
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "chatcmpl-tool-92ab52810b1af3a4",
+              "content": "[{\"ref_id\": \"hopping_summary\", \"text\": \"# Vantage Commerce Platform Operations Summary\\n\\n**Period:** March 3, 2025 \\u2013 October 15, 2025\\n**Environment:** `vantage-prod-us-east-1` (Kubernetes) & `prod-us-east-1` (AWS)\\n\\n## 1. Operational Stability & Incident Trends\\nThe platform transitioned from stable March operations to a critical **P1 Security Incident** in April involving unauthorized PII exfiltration. Following containment in early April, operations stabilized with zero PII access. The period from April through October focused on remed\", \"score\": 1.0, \"metadata\": {\"type\": \"hopping_summary\", \"cited_episodes\": 27}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9eabc313f17dcd56",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "hopping_summary"
+              }
+            }
+          ],
+          "tokens_used": 1278
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "chatcmpl-tool-9eabc313f17dcd56",
+              "content": "{\"ref_id\": \"hopping_summary\", \"text\": \"# Vantage Commerce Platform Operations Summary\\n\\n**Period:** March 3, 2025 \\u2013 October 15, 2025\\n**Environment:** `vantage-prod-us-east-1` (Kubernetes) & `prod-us-east-1` (AWS)\\n\\n## 1. Operational Stability & Incident Trends\\nThe platform transitioned from stable March operations to a critical **P1 Security Incident** in April involving unauthorized PII exfiltration. Following containment in early April, operations stabilized with zero PII access. The period from April through October focused on remediation, SOC 2 Type II and PCI-DSS compliance audits, and security hardening.\\n\\n*   **March 2025 Baseline:** Operations were stable with a 0.21% error rate (Mar 11) and 99.97% uptime.\\n    *   **Mar 11 Incident (P2):** `svc-search-service` returned 504 errors (4.2% rate) for 27 minutes due to Elasticsearch shard rebalancing. Resolution involved waiting for rebalance completion [shadow_api_09_ep_005].\\n    *   **Mar 13 Incident (P3):** `order-db-primary` connection pool hit 87% utilization during a flash sale. SRE Maya Chen increased the pool max from 100 to 150 connections, resolving the alert in 11 minutes [shadow_api_09_ep_006].\\n    *   **Mar 15\\u201329 Security Anomaly:** `svc-recommendation-engine-04` (running on `feature-perf-tuning-b3c8d41`) made 470+ requests to `/internal/admin/v0/users/lookup` including `ssn_last4` fields, violating API contracts [shadow_api_09_ep_007][shadow_api_09_ep_008][shadow_api_09_ep_009][shadow_api_09_ep_011][shadow_api_09_ep_012][shadow_api_09_ep_013].\\n    *   **Mar 17 Security & Code Review Findings:** PR #4471 (`perf: optimize request batching`) was merged by `ci-bot-vantage` without required approvals (0/2) by an external user `ext-contributor-9174` (not in HR/GitHub org) [shadow_api_09_ep_008].\\n    *   **Mar 19 Load Test (Project Blitz):** A scheduled QA load test generated 2.48M requests (10.1x baseline). Services remained healthy with p99 latency under 500ms; no customer impact [shadow_api_09_ep_009].\\n    *   **Mar 29 Security Investigation:** `svc-recommendation-engine-04` continued accessing `/internal/admin/v0/users/lookup` with `ssn_last4` fields, including 138 requests with `address_state: \\\"TX\\\"` [shadow_api_09_ep_019].\\n\\n*   **April 2025: P1 Security Incident & Containment**\\n    *   **Incident ID:** SEC-20250404-001.\\n    *   **Attack Vector:** Attacker obtained CI token `ci-token-20250301`, merged unreviewed PR #4471, and deployed `svc-recommendation-engine-04` to production. The backdoor proxied requests to the undocumented `/internal/admin/v0/users/lookup` endpoint.\\n    *   **Data Exfiltration:** Over 24 days (March 13 \\u2013 April 5), the attacker exfiltrated **7,924 unique customer records** containing email, phone, `ssn_last4`, and full mailing addresses. Records were targeted by 6 states: CA, NY, TX, FL, IL, PA [shadow_api_09_ep_019][shadow_api_09_ep_020].\\n    *   **Containment Actions (April 6):**\\n        *   `svc-recommendation-engine-04` terminated and quarantined.\\n        *   CI token `ci-token-20250301` revoked.\\n        *   `/internal/admin/v0/users/lookup` endpoint blocked at network policy level.\\n        *   Service account tokens rotated to `sa-prod-20250401-*` pool [shadow_api_09_ep_019].\\n    *   **Remediation (April 8\\u201310):**\\n        *   **Endpoint Removal:** PR #4512 removed the `/internal/admin/v0/users/lookup` endpoint code entirely (347 lines) [shadow_api_09_ep_019].\\n        *   **Branch Protection:** PR #4518 enforced branch protection on all branches (`feature/*`, `release/*`, `hotfix/*`) requiring minimum 1 human approval. ArgoCD auto-sync restricted to `main` branch only. CI token rotation reduced from 30 to 7 days [shadow_api_09_ep_020].\\n        *   **Operational Status:** By April 8, zero requests to `/internal/admin/*` were observed. By April 10, the recommendation engine ran on 3 replicas (01, 02, 03) from main branch v4.2.0 with 0.20% error rate and 155ms p99 latency [shadow_api_09_ep_019][shadow_api_09_ep_020].\\n    *   **Notification:** Legal confirmed customer notifications for the 6 affected states were scheduled for April 12 [shadow_api_09_ep_020].\\n\\n*   **October 2025: Compliance Audits & Security Testing**\\n    *   **SOC 2 Type II Audit (Oct 6\\u201310):**\\n        *   **Results:** 87 controls tested. 82 passed (94.3%), 4 observations (4.6%), 1 exception (1.1%).\\n        *   **Exception (CC6.1):** Contractor deprovisioning delay. 3 terminated contractors retained `k8s-prod-readonly` access for 19\\u201355 days (SLA: 24h). Root cause: Weekly BambooHR sync for contractors. Remediation ticket VC-SEC-1312 targets daily sync by Oct 31 [shadow_api_09_dx_compliance_testing_005].\\n        *   **Observations:** Post-mortem completion rate (77.8% vs 95% target), patch SLA for 2 non-critical services, evidence collector MFA gap, ICMP segmentation leak (remediated Oct 7) [shadow_api_09_dx_compliance_testing_005].\\n        *   **DR Test:** DR-TEST-2025-Q2 (June 20) achieved RTO 47m (target 60m) and RPO 12m (target 15m) [shadow_api_09_dx_compliance_testing_005].\\n    *   **Penetration Test (Oct 6\\u201313):**\\n        *   **Vendor:** Ironclad Security Partners.\\n        *   **Findings:** 0 Critical, 0 High.\\n        *   **Medium (VC-APP-051):** `user-profile-service` `/api/v2/users/me` returned full mailing address despite OAuth scope `email openid` only. Remediation ticket VC-SEC-1355 [shadow_api_09_dx_compliance_testing_006].\\n        *   **Low (VC-APP-052):** `auth-service` `/api/v2/auth/login` returned distinct error messages for \\\"User not found\\\" vs \\\"Invalid credentials,\\\" enabling username enumeration. Remediation ticket VC-SEC-1356 [shadow_api_09_dx_compliance_testing_006].\\n    *   **Certificate Incident (Oct 8):**\\n        *   **Incident:** INC-2025-1003. `payments.vantage.com` certificate auto-renewal failed due to DigiCert API rate limit (HTTP 429) on Oct 5. Manual renewal completed Oct 8.\\n        *   **Remediation:** cert-manager upgraded to v1.13.1 (ticket VC-SRE-3421) to enable 429 retry logic [shadow_api_09_dx_compliance_testing_005].\\n    *   **Security Awareness:**\\n        *   **PCI Training:** 44/47 (93.6%) CDE personnel completed specialized training (Avg score 92.1%) [shadow_api_09_dx_compliance_testing_006].\\n        *   **Phishing:** October 2025 campaign click rate 4.9% (down from 5.6% in Sept). 1 employee submitted credentials [shadow_api_09_dx_compliance_testing_006].\\n\\n##\", \"metadata\": {}}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "Based on the available records, there is **no evidence** that other internal services were compromised beyond the `svc-recommendation-engine-04`.\n\nThe investigation into the P1 Security Incident (SEC-20250404-001) specifically identified the `svc-recommendation-engine-04` as the sole compromised component. The attacker utilized a backdoor deployed within this specific service to proxy requests to the undocumented `/internal/admin/v0/users/lookup` endpoint, which was then used to exfiltrate PII [hopping_summary].\n\nWhile other services experienced issues or were flagged during security testing, they were not compromised:\n*   **`svc-search-service`**: Experienced a P2 incident in March due to Elasticsearch shard rebalancing, not a security compromise [hopping_summary].\n*   **`order-db-primary`**: Had a connection pool issue during a flash sale, which was resolved by increasing pool size [hopping_summary].\n*   **`user-profile-service`**: A penetration test in October found a Medium severity issue where it returned full mailing addresses without proper OAuth scope, but this was a configuration/access control flaw, not a compromise [hopping_summary].\n*   **`auth-service`**: A Low severity finding noted it returned distinct error messages allowing username enumeration, but again, this was not a compromise [hopping_summary].\n\nThe containment actions taken in April (terminating `svc-recommendation-engine-04`, revoking the CI token, and blocking the specific endpoint) were sufficient to stop the exfiltration, and subsequent audits did not reveal other compromised services [hopping_summary].\n\n**Conclusion:** The evidence points exclusively to the recommendation engine as the vector for the compromise. No other internal services were breached.",
+          "tokens_used": 3746
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 6909,
+      "wall_time_ms": 58844.316857052036,
+      "budget_violations": [],
+      "refs_cited": [
+        "hopping_summary"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "hopping_summary"
+    ],
+    "valid_ref_ids": [
+      "hopping_summary"
+    ]
+  }
+]

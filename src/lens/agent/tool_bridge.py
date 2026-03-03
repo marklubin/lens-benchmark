@@ -27,7 +27,7 @@ def build_tool_definitions(adapter) -> list[ToolDefinition]:
     if filter_properties:
         filter_desc = f" Available filter fields: {', '.join(filter_properties.keys())}."
 
-    max_results = 10
+    max_results = 5
     if hasattr(manifest, "max_results_per_search") and manifest.max_results_per_search:
         max_results = manifest.max_results_per_search
 
@@ -106,6 +106,16 @@ def dispatch_tool_call(
             query = tool_call.arguments.get("query", "")
             filters = tool_call.arguments.get("filters")
             limit = tool_call.arguments.get("limit")
+            if limit is not None:
+                try:
+                    limit = int(limit)
+                except (ValueError, TypeError):
+                    limit = None
+            # Enforce max_results_per_search cap from adapter manifest
+            manifest = adapter.get_capabilities()
+            max_results = getattr(manifest, "max_results_per_search", 5) or 5
+            if limit is not None:
+                limit = min(limit, max_results)
             results = adapter.search(query, filters, limit)
             payload = json.dumps(results, default=_serialize)
         elif tool_call.name == "memory_retrieve":

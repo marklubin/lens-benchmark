@@ -370,22 +370,36 @@ class RunEngine:
 
         question_results: list[QuestionResult] = []
 
+        # Check if adapter handles Q&A directly (e.g. Letta V4)
+        adapter_answers = hasattr(adapter, "answer_question")
+
         def _answer_one(question: Question) -> tuple[QuestionResult, float]:
             self.logger.verbose(f"    Question: {question.question_id}")
             t0 = time.monotonic()
-            answer = harness.answer(
-                question_prompt=question.prompt,
-                adapter=adapter,
-                question_id=question.question_id,
-            )
+            if adapter_answers:
+                answer = adapter.answer_question(
+                    prompt=question.prompt,
+                    question_id=question.question_id,
+                )
+            else:
+                answer = harness.answer(
+                    question_prompt=question.prompt,
+                    adapter=adapter,
+                    question_id=question.question_id,
+                )
             q_ms = (time.monotonic() - t0) * 1000
             retrieved = answer.refs_cited
-            valid = [r for r in retrieved if self.vault.has(r)]
+            ep_map = answer.ref_episode_map
+            valid = [
+                r for r in retrieved
+                if self.vault.has(ep_map.get(r, r))
+            ]
             return QuestionResult(
                 question=question,
                 answer=answer,
                 retrieved_ref_ids=retrieved,
                 valid_ref_ids=valid,
+                ref_episode_map=ep_map,
             ), q_ms
 
         max_workers = min(self.config.parallel_questions, len(questions)) if questions else 1

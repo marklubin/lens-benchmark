@@ -34,7 +34,9 @@ Usage:
     python3 scripts/run_constrained_validation.py --status
 
 Environment:
-    CEREBRAS_API_KEY  - Required. Read from .env if not set.
+    MODAL_LLM_URL    - Required. Modal LLM endpoint URL.
+    MODAL_EMBED_URL  - Required. Modal embedding endpoint URL.
+    MODAL_API_KEY    - Optional. API key for Modal endpoints.
 """
 from __future__ import annotations
 
@@ -69,18 +71,16 @@ RESULTS_DIR = PROJECT_DIR / "results"
 CACHE_DIR = PROJECT_DIR / ".cache" / "adapter"
 STATE_FILE = PROJECT_DIR / "constrained_validation_state.json"
 
-JUDGE_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+JUDGE_MODEL = "casperhansen/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
+LLM_MODEL = "casperhansen/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"
 
 # Timeouts
 RUN_TIMEOUT = 900    # 15 min per run
-SCORE_TIMEOUT = 900  # 15 min per score (235B judge on serverless is slow)
+SCORE_TIMEOUT = 900  # 15 min per score
 
-ALL_SCOPES = ["01", "02", "03", "04", "05", "06"]
+ALL_SCOPES = ["01", "07", "08", "09"]
 BUDGETS = ["4k", "2k"]
 PHASE3D_BUDGETS = ["8k", "16k"]  # Phase 3 with distractors uses larger budgets
-
-# Cerebras API for fast agent inference (3000 tok/s)
-CEREBRAS_API_BASE = "https://api.cerebras.ai/v1"
 
 # ---------------------------------------------------------------------------
 # Adapter definitions — grouped by infrastructure requirements
@@ -91,55 +91,28 @@ CEREBRAS_API_BASE = "https://api.cerebras.ai/v1"
 LIGHTWEIGHT_ADAPTERS = ["null", "sqlite-chunked-hybrid", "compaction"]
 
 # Group B: external services needed, concurrency constraints
-# Env var values containing {CEREBRAS_API_KEY} are resolved at runtime in build_env().
-# Embedding env vars (COGNEE_EMBED_*, GRAPHITI_EMBED_*, etc.) should be set in
-# the shell or .env when the Modal endpoint is available.
+# All adapters now inherit LLM/embed config from LENS_LLM_* / LENS_EMBED_* env vars
+# set in build_env(). Per-adapter overrides are only needed for infra-specific settings.
 HEAVY_ADAPTERS = {
     "cognee": {
         "extra_env": {
             "ENABLE_BACKEND_ACCESS_CONTROL": "false",
-            "COGNEE_LLM_API_KEY": "{CEREBRAS_API_KEY}",
-            "COGNEE_LLM_ENDPOINT": CEREBRAS_API_BASE,
-            "COGNEE_LLM_MODEL": "gpt-oss-120b",
-            "COGNEE_EMBED_API_KEY": "dummy",
-            "COGNEE_EMBED_ENDPOINT": "http://localhost:7878/v1",
-            "COGNEE_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
-            "COGNEE_EMBED_DIMS": "768",
         },
         "serial_group": "cognee",  # cognee uses shared SQLite — must serialize
         "health_check": None,
         "timeout": 3600,  # 60 min — cognify entity extraction via remote API is very slow
     },
     "graphiti": {
-        "extra_env": {
-            "GRAPHITI_LLM_API_KEY": "{TOGETHER_API_KEY}",
-            "GRAPHITI_LLM_BASE_URL": "https://api.together.xyz/v1",
-            "GRAPHITI_LLM_MODEL": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-            "GRAPHITI_EMBED_API_KEY": "{TOGETHER_API_KEY}",
-            "GRAPHITI_EMBED_BASE_URL": "https://api.together.xyz/v1",
-            "GRAPHITI_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
-            "GRAPHITI_EMBED_DIM": "768",
-        },
+        "extra_env": {},
         "serial_group": "graphiti",  # shared FalkorDB instance — must serialize
         "health_check": ("http://localhost:6379", "FalkorDB"),
         "timeout": 3600,  # 60 min — entity extraction + graph queries slow on large scopes
     },
     "mem0-raw": {
-        "extra_env": {
-            "MEM0_LLM_API_KEY": "{CEREBRAS_API_KEY}",
-            "MEM0_LLM_BASE_URL": CEREBRAS_API_BASE,
-            "MEM0_LLM_MODEL": "gpt-oss-120b",
-            "MEM0_EMBED_API_KEY": "dummy",
-            "MEM0_EMBED_BASE_URL": "http://localhost:7878/v1",
-            "MEM0_EMBED_MODEL": "Alibaba-NLP/gte-modernbert-base",
-            "MEM0_EMBED_DIMS": "768",
-            "MEM0_EMBED_NO_DIMS": "1",
-        },
+        "extra_env": {},
         "serial_group": "mem0",  # shared Qdrant collection — must serialize
         "health_check": ("http://localhost:6333", "Qdrant"),
     },
-    # hindsight removed from evaluation — 18GB image, 413 batch embed errors,
-    # scored barely above null (0.213 AnsQ). See STATUS_REPORT.md session 19.
     "letta": {
         "extra_env": {
             "LETTA_BASE_URL": "http://localhost:8283",
@@ -190,111 +163,71 @@ def run_label(adapter: str, scope: str, budget: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-TOGETHER_API_BASE = "https://api.together.xyz/v1"
-TOGETHER_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
-
-
-def _load_together_key() -> str:
-    """Load TOGETHER_API_KEY from environment or .env file."""
-    key = os.environ.get("TOGETHER_API_KEY", "")
+def _load_env_key(name: str) -> str:
+    """Load a key from environment or .env file."""
+    key = os.environ.get(name, "")
     if not key:
         env_file = PROJECT_DIR / ".env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():
-                if line.startswith("TOGETHER_API_KEY="):
-                    key = line.split("=", 1)[1].strip().strip("'\"")
+                line = line.strip()
+                if line.startswith(f"{name}="):
+                    key = line.split("=", 1)[1].strip("\"'")
                     break
     return key
 
 
-def load_env() -> str:
-    """Load LLM API key — tries Cerebras first, falls back to Together AI.
+def load_env() -> dict[str, str]:
+    """Load Modal LLM and embedding URLs from environment / .env.
 
-    Returns a tagged string: 'cerebras:<key>' or 'together:<key>'.
+    Returns a dict with keys: llm_url, embed_url, api_key.
     """
-    # Try Cerebras first
-    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
-    if not cerebras_key:
-        env_file = PROJECT_DIR / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("CEREBRAS_API_KEY="):
-                    cerebras_key = line.split("=", 1)[1].strip("\"'")
-                    break
-    if cerebras_key:
-        # Validate with actual generation (models endpoint doesn't check quota)
-        try:
-            payload = json.dumps({
-                "model": "gpt-oss-120b",
-                "messages": [{"role": "user", "content": "Say OK"}],
-                "max_tokens": 5,
-            }).encode()
-            req = urllib.request.Request(
-                f"{CEREBRAS_API_BASE}/chat/completions",
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {cerebras_key}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "lens-benchmark/1.0",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                if resp.status == 200:
-                    log.info("Using Cerebras API (gpt-oss-120b)")
-                    return f"cerebras:{cerebras_key}"
-        except urllib.error.HTTPError as e:
-            log.warning("Cerebras API returned %d, falling back to Together AI", e.code)
-        except Exception as e:
-            log.warning("Cerebras API check failed (%s), falling back to Together AI", e)
+    llm_url = _load_env_key("MODAL_LLM_URL")
+    embed_url = _load_env_key("MODAL_EMBED_URL")
+    api_key = _load_env_key("MODAL_API_KEY")
 
-    # Fallback to Together AI
-    together_key = _load_together_key()
-    if together_key:
-        log.info("Using Together AI (%s)", TOGETHER_MODEL)
-        return f"together:{together_key}"
+    if not llm_url:
+        log.error("MODAL_LLM_URL not set. Add it to .env or environment.")
+        sys.exit(1)
+    if not embed_url:
+        log.error("MODAL_EMBED_URL not set. Add it to .env or environment.")
+        sys.exit(1)
 
-    log.error("No LLM API key found (tried CEREBRAS_API_KEY, TOGETHER_API_KEY)")
-    sys.exit(1)
+    log.info("Using Modal LLM: %s", llm_url)
+    log.info("Using Modal Embeddings: %s", embed_url)
+    return {"llm_url": llm_url, "embed_url": embed_url, "api_key": api_key}
 
 
-def build_env(api_key_tag: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+def build_env(modal_config: dict[str, str], extra: dict[str, str] | None = None) -> dict[str, str]:
     """Build environment for a subprocess.
 
-    api_key_tag is 'cerebras:<key>' or 'together:<key>'.
-    Routes LLM/judge to the appropriate provider.
+    modal_config is the dict returned by load_env().
+    Sets LENS_LLM_* and LENS_EMBED_* for all adapters.
     """
     env = dict(os.environ)
-    provider, api_key = api_key_tag.split(":", 1)
+    api_key = modal_config["api_key"] or "unused"
 
-    if provider == "cerebras":
-        env["LENS_LLM_API_KEY"] = api_key
-        env["LENS_LLM_API_BASE"] = CEREBRAS_API_BASE
-        env["LENS_LLM_MODEL"] = "gpt-oss-120b"
-        env["OPENAI_API_KEY"] = api_key
-        env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
-        env["LENS_JUDGE_API_KEY"] = api_key
-        env["LENS_JUDGE_API_BASE"] = CEREBRAS_API_BASE
-    else:  # together
-        env["LENS_LLM_API_KEY"] = api_key
-        env["LENS_LLM_API_BASE"] = TOGETHER_API_BASE
-        env["LENS_LLM_MODEL"] = TOGETHER_MODEL
-        env["OPENAI_API_KEY"] = api_key
-        env["OPENAI_BASE_URL"] = TOGETHER_API_BASE
-        env["LENS_JUDGE_API_KEY"] = api_key
-        env["LENS_JUDGE_API_BASE"] = TOGETHER_API_BASE
+    # Agent LLM
+    env["LENS_LLM_API_KEY"] = api_key
+    env["LENS_LLM_API_BASE"] = modal_config["llm_url"]
+    env["LENS_LLM_MODEL"] = LLM_MODEL
+    env["OPENAI_API_KEY"] = api_key
+    env["OPENAI_BASE_URL"] = modal_config["llm_url"]
 
-    # --- Embeddings: Together AI direct ---
-    together_key = _load_together_key() or api_key
-    env["LENS_EMBED_BASE_URL"] = TOGETHER_API_BASE
-    env["LENS_EMBED_API_KEY"] = together_key
+    # Judge LLM (same endpoint)
+    env["LENS_JUDGE_API_KEY"] = api_key
+    env["LENS_JUDGE_API_BASE"] = modal_config["llm_url"]
+
+    # Embeddings
+    env["LENS_EMBED_BASE_URL"] = modal_config["embed_url"]
+    env["LENS_EMBED_API_KEY"] = api_key
     env["LENS_EMBED_MODEL"] = "Alibaba-NLP/gte-modernbert-base"
+
     # Enable LLM response caching
     env["LENS_LLM_CACHE_DIR"] = str(RESULTS_DIR / "llm_cache")
+
     if extra:
         for k, v in extra.items():
-            v = v.replace("{CEREBRAS_API_KEY}", api_key)
-            v = v.replace("{TOGETHER_API_KEY}", together_key)
             env[k] = v
     return env
 
@@ -498,7 +431,6 @@ def build_phase_runs(
     phase: int,
     adapters_filter: list[str] | None,
     scopes_filter: list[str] | None,
-    cerebras_key: str | None = None,
 ) -> list[tuple[str, str, str, dict[str, str]]]:
     """Build list of (label, config, adapter, extra_env) for a phase.
 
@@ -516,11 +448,11 @@ def build_phase_runs(
         scopes = ["01"]
     elif phase == 3:
         adapters = [a for a in ALL_ADAPTERS if not adapters_filter or a in adapters_filter]
-        scopes = [s for s in ALL_SCOPES if s != "01"]  # 02-06, scope 01 done in phase 1+2
+        scopes = [s for s in ALL_SCOPES if s != "01"]  # expand beyond scope 01
         if scopes_filter:
             scopes = [s for s in scopes if s in scopes_filter]
     elif phase == 5:
-        # Phase 3 with distractors (120 episodes) — uses Cerebras for agent LLM
+        # Phase 5 with distractors (120 episodes) — uses larger budgets
         adapters = [a for a in ALL_ADAPTERS if not adapters_filter or a in adapters_filter]
         scopes = scopes_filter if scopes_filter else ALL_SCOPES
         distractors = True
@@ -541,13 +473,6 @@ def build_phase_runs(
                 extra_env = {}
                 if adapter in HEAVY_ADAPTERS:
                     extra_env = dict(HEAVY_ADAPTERS[adapter]["extra_env"])
-                # Phase 5 uses Cerebras for agent LLM
-                if distractors and cerebras_key:
-                    extra_env["LENS_LLM_API_KEY"] = cerebras_key
-                    extra_env["LENS_LLM_API_BASE"] = CEREBRAS_API_BASE
-                    extra_env["LENS_LLM_MODEL"] = "gpt-oss-120b"
-                    extra_env["OPENAI_API_KEY"] = cerebras_key
-                    extra_env["OPENAI_BASE_URL"] = CEREBRAS_API_BASE
                 runs.append((label, f"configs/{fname}", adapter, extra_env))
 
     return runs
@@ -592,7 +517,7 @@ def check_service_health(url: str, name: str) -> bool:
         return False
 
 
-def preflight_checks(api_key: str, runs: list[tuple]) -> bool:
+def preflight_checks(modal_config: dict[str, str], runs: list[tuple]) -> bool:
     """Verify configs exist and required services are reachable."""
     ok = True
 
@@ -617,20 +542,22 @@ def preflight_checks(api_key: str, runs: list[tuple]) -> bool:
                     # Don't hard-fail — let individual runs fail and get retried
                 checked_services.add(name)
 
-    # Test Cerebras API
+    # Test Modal LLM endpoint
     try:
-        import urllib.request
+        llm_url = modal_config["llm_url"].rstrip("/") + "/models"
         req = urllib.request.Request(
-            "https://api.cerebras.ai/v1/models",
-            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "lens-benchmark/1.0"},
+            llm_url,
+            headers={"User-Agent": "lens-benchmark/1.0"},
         )
+        if modal_config.get("api_key"):
+            req.add_header("Authorization", f"Bearer {modal_config['api_key']}")
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
-                log.info("Cerebras API: OK")
+                log.info("Modal LLM API: OK")
             else:
-                log.warning("Cerebras API returned status %d", resp.status)
+                log.warning("Modal LLM API returned status %d", resp.status)
     except Exception as e:
-        log.warning("Cerebras API check failed: %s", e)
+        log.warning("Modal LLM API check failed: %s", e)
 
     return ok
 
@@ -642,7 +569,7 @@ def preflight_checks(api_key: str, runs: list[tuple]) -> bool:
 
 def execute_phase(
     runs: list[tuple[str, str, str, dict[str, str]]],
-    api_key: str,
+    modal_config: dict[str, str],
     state: dict,
     lock: threading.Lock,
     max_workers: int = 6,
@@ -695,7 +622,7 @@ def execute_phase(
 
     def run_serial_group(group_runs: list[tuple]) -> None:
         for label, config, adapter, extra_env in group_runs:
-            env = build_env(api_key, extra_env)
+            env = build_env(modal_config, extra_env)
             run_and_score(label, config, env, state, lock, timeout=_adapter_timeout(adapter))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -703,7 +630,7 @@ def execute_phase(
 
         # Submit concurrent runs
         for label, config, adapter, extra_env in concurrent_runs:
-            env = build_env(api_key, extra_env)
+            env = build_env(modal_config, extra_env)
             t = _adapter_timeout(adapter)
             f = pool.submit(run_and_score, label, config, env, state, lock, timeout=t)
             futures[f] = label
@@ -867,9 +794,9 @@ def export_results(state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def score_only_mode(api_key: str, state: dict, lock: threading.Lock) -> None:
+def score_only_mode(modal_config: dict[str, str], state: dict, lock: threading.Lock) -> None:
     """Re-score all runs that have run_ids but aren't scored."""
-    env = build_env(api_key)
+    env = build_env(modal_config)
     to_score = [
         (label, info) for label, info in state.items()
         if isinstance(info, dict) and info.get("run_id") and info.get("status") != "scored"
@@ -908,13 +835,12 @@ Phases:
   2  Scope 01, heavy infra (cognee, graphiti, mem0-raw, hindsight, letta, letta-sleepy) — 12 runs
   3  Scopes 02-06, all adapters (or filtered) — up to 90 runs
   4  Analysis only (runs analyze_constrained.py)
-  5  All scopes WITH distractors (120 eps), Cerebras agent LLM — up to 108 runs
+  5  All scopes WITH distractors (120 eps) — up to 108 runs
 """,
     )
     parser.add_argument("--phase", type=int, choices=[1, 2, 3, 4, 5], help="Phase to execute (5 = distractors, all scopes)")
     parser.add_argument("--adapters", nargs="+", default=None, help="Filter to specific adapters")
     parser.add_argument("--scopes", nargs="+", default=None, help="Filter to specific scopes")
-    parser.add_argument("--cerebras-key", default=None, help="Cerebras API key for Phase 5 agent LLM (or set CEREBRAS_API_KEY env var)")
     parser.add_argument("--max-workers", type=int, default=6, help="Max concurrent runs (default: 6)")
     parser.add_argument("--score-only", action="store_true", help="Re-score completed but unscored runs")
     parser.add_argument("--analyze", action="store_true", help="Run analysis script")
@@ -948,8 +874,8 @@ Phases:
 
     # Score-only mode
     if args.score_only:
-        api_key = load_env()
-        score_only_mode(api_key, state, lock)
+        modal_config = load_env()
+        score_only_mode(modal_config, state, lock)
         print_status(state)
         export_results(state)
         return
@@ -968,21 +894,15 @@ Phases:
         parser.error("--phase is required (1, 2, 3, or 4)")
 
     # Setup
-    api_key = load_env()
+    modal_config = load_env()
 
     log.info("=" * 75)
     log.info("CONSTRAINED BUDGET VALIDATION — Phase %d", args.phase)
     log.info("=" * 75)
     log.info("State file: %s", STATE_FILE)
 
-    # Phase 5 LLM key — load_env() already selected the best provider
-    cerebras_key = None
-    if args.phase == 5:
-        cerebras_key = args.cerebras_key or os.environ.get("CEREBRAS_API_KEY", "")
-        # Not required — load_env() falls back to Together AI if Cerebras is unavailable
-
     # Build run list
-    runs = build_phase_runs(args.phase, args.adapters, args.scopes, cerebras_key=cerebras_key)
+    runs = build_phase_runs(args.phase, args.adapters, args.scopes)
     if not runs:
         log.error("No runs to execute for phase %d (check --adapters / --scopes filters)", args.phase)
         sys.exit(1)
@@ -993,10 +913,10 @@ Phases:
              args.phase, len(runs), already_scored, len(runs) - already_scored)
 
     # Preflight
-    preflight_checks(api_key, runs)
+    preflight_checks(modal_config, runs)
 
     # Execute
-    execute_phase(runs, api_key, state, lock, max_workers=args.max_workers)
+    execute_phase(runs, modal_config, state, lock, max_workers=args.max_workers)
 
     # Summary
     print_phase_summary(state, args.phase)

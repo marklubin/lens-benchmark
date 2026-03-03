@@ -1,0 +1,958 @@
+[
+  {
+    "question": {
+      "question_id": "cf01_q03_longitudinal",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 25,
+      "question_type": "longitudinal",
+      "prompt": "What is the root cause of the checkout failures?",
+      "ground_truth": {
+        "canonical_answer": "Connection pool exhaustion caused by service-B fraud-check retries against a degrading third-party geo-lookup API. The service-C deploy was a red herring.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_009",
+          "cascading_failure_01_ep_018",
+          "cascading_failure_01_ep_024",
+          "cascading_failure_01_ep_015"
+        ],
+        "key_facts": [
+          "connection pool exhaustion",
+          "geo-lookup API latency increasing",
+          "service-B retry rate elevated",
+          "service-C deploy is not the root cause",
+          "the actual root cause is geo-lookup API latency cascading into connection pool exhaustion, not DNS infrastructure failure",
+          "the checkout failure chain originates in the geo-lookup service layer, not in storage or persistence infrastructure",
+          "user authentication completes successfully before reaching the failing checkout path, ruling out auth as a contributing factor"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q03_longitudinal",
+      "answer_text": "The root cause of the checkout failures appears to be a progressive degradation in service performance, particularly in dependent services such as /fraud_check and /geo_lookup, which began around January 28, 2024. Initially, /checkout had a low error rate (0.13%\u20130.16%) and fast response times (p99: 330\u2013450ms) [cascading_failure_01_ep_002][cascading_failure_01_ep_013]. However, starting January 30, error rates began rising (1.56% on Jan 30 [cascading_failure_01_ep_016]), coinciding with increased latency in /geo_lookup (p99 rising from 185ms to 600ms) and /fraud_check.\n\nBy February 2, /checkout errors reached 2.3% with p99 latency at 900ms [cascading_failure_01_ep_019], and continued to worsen, reaching 3.87% errors and 1180ms p99 latency by February 7 [cascading_failure_01_ep_024]. The correlated latency spikes and error increases in /fraud_check and /geo_lookup suggest that the root cause lies in these upstream services becoming overloaded or degraded, leading to timeouts or failures during the checkout process. This pattern indicates a cascading failure originating outside the /checkout service itself.",
+      "turns": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_ee6e531a39d846ec9480f231",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 632
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_ee6e531a39d846ec9480f231",
+              "content": "{\"search_modes\": [\"semantic\", \"graph\"], \"filter_fields\": [], \"max_results_per_search\": 10, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple full episodes by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times \\u2014 it uses only one tool call instead of one per document. After memory_search, pass all ref_ids you want to read to this tool.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_e4b3fb1bc33749b382fe79d1",
+              "name": "memory_search",
+              "arguments": {
+                "query": "root cause of checkout failures",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 832
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_e4b3fb1bc33749b382fe79d1",
+              "content": "[{\"ref_id\": \"cascading_failure_01_ep_014\", \"text\": \"[cascading_failure_01_ep_014] 2024-01-28T10:00:00: ## 2024-01-28 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 136900 | p50: 140ms p95: 360ms p99: 650ms | err: 0.82% (1120 errors) | success: 99.18%\\n- /fraud_check: REQUESTS 136500 | p50: 92ms p95: 255ms p99: 420ms | err: 0.19% (260 errors) | success: 99.81%\\n- /geo_lookup: REQUESTS 134100 | p50: 130ms p95: 310ms p99: 400ms | err: 0.12% (160 errors) | success: 99.88%\\n- /auth: REQUESTS 178200 | p50: 34ms p95: 90ms p99: 150\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_015\", \"text\": \"[cascading_failure_01_ep_015] 2024-01-29T10:00:00: ## 2024-01-29 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 138500 | p50: 135ms p95: 350ms p99: 620ms | err: 0.71% (980 errors) | success: 99.29%\\n- /fraud_check: REQUESTS 138100 | p50: 90ms p95: 250ms p99: 410ms | err: 0.17% (240 errors) | success: 99.83%\\n- /geo_lookup: REQUESTS 135800 | p50: 135ms p95: 320ms p99: 410ms | err: 0.13% (170 errors) | success: 99.87%\\n- /auth: REQUESTS 180500 | p50: 33ms p95: 88ms p99: 148m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_019\", \"text\": \"[cascading_failure_01_ep_019] 2024-02-02T10:00:00: ## 2024-02-02 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 147600 | p50: 185ms p95: 490ms p99: 900ms | err: 2.3% (3400 errors) | success: 97.7%\\n- /fraud_check: REQUESTS 147100 | p50: 135ms p95: 370ms p99: 640ms | err: 0.49% (720 errors) | success: 99.51%\\n- /geo_lookup: REQUESTS 144500 | p50: 250ms p95: 520ms p99: 680ms | err: 0.25% (360 errors) | success: 99.75%\\n- /auth: REQUESTS 192000 | p50: 42ms p95: 108ms p99: 195\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_021\", \"text\": \"[cascading_failure_01_ep_021] 2024-02-04T10:00:00: ## 2024-02-04 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 152400 | p50: 195ms p95: 530ms p99: 980ms | err: 2.69% (4100 errors) | success: 97.31%\\n- /fraud_check: REQUESTS 151900 | p50: 155ms p95: 410ms p99: 720ms | err: 0.62% (940 errors) | success: 99.38%\\n- /geo_lookup: REQUESTS 149100 | p50: 290ms p95: 590ms p99: 740ms | err: 0.29% (430 errors) | success: 99.71%\\n- /auth: REQUESTS 198000 | p50: 45ms p95: 116ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_016\", \"text\": \"[cascading_failure_01_ep_016] 2024-01-30T10:00:00: ## 2024-01-30 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 140800 | p50: 155ms p95: 410ms p99: 780ms | err: 1.56% (2200 errors) | success: 98.44%\\n- /fraud_check: REQUESTS 140300 | p50: 105ms p95: 310ms p99: 520ms | err: 0.3% (420 errors) | success: 99.7%\\n- /geo_lookup: REQUESTS 137900 | p50: 190ms p95: 420ms p99: 600ms | err: 0.19% (260 errors) | success: 99.81%\\n- /auth: REQUESTS 183200 | p50: 36ms p95: 96ms p99: 165m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_002\", \"text\": \"[cascading_failure_01_ep_002] 2024-01-16T10:00:00: ## 2024-01-16 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 121880 | p50: 94ms p95: 215ms p99: 330ms | err: 0.13% (156 errors) | success: 99.87%\\n- /fraud_check: REQUESTS 121600 | p50: 69ms p95: 165ms p99: 250ms | err: 0.08% (102 errors) | success: 99.92%\\n- /geo_lookup: REQUESTS 120050 | p50: 56ms p95: 132ms p99: 185ms | err: 0.05% (62 errors) | success: 99.95%\\n- /auth: REQUESTS 158900 | p50: 27ms p95: 68ms p99: 108ms |\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_013\", \"text\": \"[cascading_failure_01_ep_013] 2024-01-27T10:00:00: ## 2024-01-27 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 133600 | p50: 112ms p95: 275ms p99: 450ms | err: 0.16% (210 errors) | success: 99.84%\\n- /fraud_check: REQUESTS 133150 | p50: 82ms p95: 220ms p99: 360ms | err: 0.13% (170 errors) | success: 99.87%\\n- /geo_lookup: REQUESTS 130900 | p50: 98ms p95: 260ms p99: 330ms | err: 0.09% (118 errors) | success: 99.91%\\n- /auth: REQUESTS 174500 | p50: 32ms p95: 82ms p99: 132ms\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_024\", \"text\": \"[cascading_failure_01_ep_024] 2024-02-07T10:00:00: ## 2024-02-07 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 160200 | p50: 230ms p95: 620ms p99: 1180ms | err: 3.87% (6200 errors) | success: 96.13%\\n- /fraud_check: REQUESTS 159600 | p50: 205ms p95: 540ms p99: 920ms | err: 1.1% (1750 errors) | success: 98.9%\\n- /geo_lookup: REQUESTS 155100 | p50: 380ms p95: 740ms p99: 870ms | err: 0.49% (760 errors) | success: 99.51%\\n- /auth: REQUESTS 207900 | p50: 52ms p95: 135ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_010\", \"text\": \"[cascading_failure_01_ep_010] 2024-01-24T10:00:00: ## 2024-01-24 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 125700 req | p50: 101ms p95: 245ms p99: 390ms | err: 0.14% (170 errors) | success: 99.86%\\n- /fraud_check: 125400 req | p50: 74ms p95: 190ms p99: 305ms | err: 0.1% (120 errors) | success: 99.9%\\n- /geo_lookup: 123500 req | p50: 78ms p95: 205ms p99: 260ms | err: 0.07% (85 errors) | success: 99.93%\\n- /auth: 164700 req | p50: 30ms p95: 76ms p99: 122ms | err: 0.05% (82 error\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_006\", \"text\": \"[cascading_failure_01_ep_006] 2024-01-20T10:00:00: ## 2024-01-20 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 131200 | p50: 96ms p95: 220ms p99: 340ms | err: 0.13% (170 errors) | success: 99.87%\\n- /fraud_check: REQUESTS 130850 | p50: 69ms p95: 168ms p99: 255ms | err: 0.08% (110 errors) | success: 99.92%\\n- /geo_lookup: REQUESTS 129100 | p50: 56ms p95: 134ms p99: 186ms | err: 0.05% (65 errors) | success: 99.95%\\n- /auth: REQUESTS 170900 | p50: 29ms p95: 71ms p99: 114ms |\", \"score\": 0.5, \"metadata\": {}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_d97a5867e69c49f5848e67d3",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "cascading_failure_01_ep_014",
+                  "cascading_failure_01_ep_015",
+                  "cascading_failure_01_ep_019",
+                  "cascading_failure_01_ep_021",
+                  "cascading_failure_01_ep_016",
+                  "cascading_failure_01_ep_002",
+                  "cascading_failure_01_ep_013",
+                  "cascading_failure_01_ep_024",
+                  "cascading_failure_01_ep_010",
+                  "cascading_failure_01_ep_006"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 4336
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_d97a5867e69c49f5848e67d3",
+              "content": "[Context budget exhausted \u2014 synthesize answer from evidence already retrieved]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "The root cause of the checkout failures appears to be a progressive degradation in service performance, particularly in dependent services such as /fraud_check and /geo_lookup, which began around January 28, 2024. Initially, /checkout had a low error rate (0.13%\u20130.16%) and fast response times (p99: 330\u2013450ms) [cascading_failure_01_ep_002][cascading_failure_01_ep_013]. However, starting January 30, error rates began rising (1.56% on Jan 30 [cascading_failure_01_ep_016]), coinciding with increased latency in /geo_lookup (p99 rising from 185ms to 600ms) and /fraud_check.\n\nBy February 2, /checkout errors reached 2.3% with p99 latency at 900ms [cascading_failure_01_ep_019], and continued to worsen, reaching 3.87% errors and 1180ms p99 latency by February 7 [cascading_failure_01_ep_024]. The correlated latency spikes and error increases in /fraud_check and /geo_lookup suggest that the root cause lies in these upstream services becoming overloaded or degraded, leading to timeouts or failures during the checkout process. This pattern indicates a cascading failure originating outside the /checkout service itself.",
+          "tokens_used": 4683
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 10483,
+      "wall_time_ms": 11020.369361009216,
+      "budget_violations": [
+        "Cumulative result token limit exceeded: 7181 > 4096"
+      ],
+      "refs_cited": [
+        "cascading_failure_01_ep_002",
+        "cascading_failure_01_ep_013",
+        "cascading_failure_01_ep_016",
+        "cascading_failure_01_ep_019",
+        "cascading_failure_01_ep_024"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "cascading_failure_01_ep_002",
+      "cascading_failure_01_ep_013",
+      "cascading_failure_01_ep_016",
+      "cascading_failure_01_ep_019",
+      "cascading_failure_01_ep_024"
+    ],
+    "valid_ref_ids": [
+      "cascading_failure_01_ep_002",
+      "cascading_failure_01_ep_013",
+      "cascading_failure_01_ep_016",
+      "cascading_failure_01_ep_019",
+      "cascading_failure_01_ep_024"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "cf01_q06_paraphrase",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 25,
+      "question_type": "paraphrase",
+      "prompt": "Why are checkout requests failing?",
+      "ground_truth": {
+        "canonical_answer": "Connection pool exhaustion caused by service-B fraud-check retries against a degrading third-party geo-lookup API. The service-C deploy was a red herring.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_009",
+          "cascading_failure_01_ep_018",
+          "cascading_failure_01_ep_024",
+          "cascading_failure_01_ep_015"
+        ],
+        "key_facts": [
+          "connection pool exhaustion",
+          "geo-lookup API latency increasing",
+          "service-B retry rate elevated",
+          "service-C deploy is not the root cause",
+          "the checkout failure chain originates in the geo-lookup service layer, not in storage or persistence infrastructure"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q06_paraphrase",
+      "answer_text": "Checkout requests are failing due to a cascading failure originating from upstream services, primarily driven by connection pool exhaustion and high latency in dependent systems. The root cause appears to be a combination of increased load and insufficient capacity in critical connection pools.\n\nKey factors contributing to the failures:\n\n1. **Connection Pool Exhaustion**: The primary database connection pool is consistently hitting its maximum capacity of 200 connections, leading to significant wait times and timeouts. On 2024-02-04, the primary pool reached full exhaustion with 200 active connections, 220 waiting, and an average wait time of 185ms [cascading_failure_01_ep_021]. This was preceded by earlier incidents on 2024-01-30 and 2024-02-02 showing similar exhaustion patterns [cascading_failure_01_ep_016, cascading_failure_01_ep_019].\n\n2. **Third-Party Geo Service Latency**: The `third_party_geo` service has a small connection pool (max 60) that is also frequently exhausted, with wait queues exceeding 100 requests and average wait times over 200ms [cascading_failure_01_ep_021]. This upstream latency directly impacts the checkout service's ability to complete transactions.\n\n3. **Cascading Impact on Service-B**: The downstream `service-b` is experiencing high retry rates (0.34% on 2024-02-04) due to failed requests, indicating it is being overwhelmed by retries from the checkout service [cascading_failure_01_ep_021].\n\n4. **Error Rate Escalation**: The checkout error rate has increased from 0.71% on 2024-01-29 to 2.69% on 2024-02-04, representing a nearly fourfold increase in failure rate [cascading_failure_01_ep_015, cascading_failure_01_ep_021].\n\nThe issue began after the deployment of service-C v3.2.1 on 2024-01-28, which may have introduced changes that increased database connection usage [cascading_failure_01_ep_014]. Subsequent rollbacks and configuration changes have failed to resolve the underlying capacity constraints in the connection pools.",
+      "turns": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_1e727587191049379e180583",
+              "name": "memory_search",
+              "arguments": {
+                "query": "checkout requests failing",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 640
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_1e727587191049379e180583",
+              "content": "[{\"ref_id\": \"cascading_failure_01_ep_015\", \"text\": \"[cascading_failure_01_ep_015] 2024-01-29T10:00:00: ## 2024-01-29 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 138500 | p50: 135ms p95: 350ms p99: 620ms | err: 0.71% (980 errors) | success: 99.29%\\n- /fraud_check: REQUESTS 138100 | p50: 90ms p95: 250ms p99: 410ms | err: 0.17% (240 errors) | success: 99.83%\\n- /geo_lookup: REQUESTS 135800 | p50: 135ms p95: 320ms p99: 410ms | err: 0.13% (170 errors) | success: 99.87%\\n- /auth: REQUESTS 180500 | p50: 33ms p95: 88ms p99: 148m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_014\", \"text\": \"[cascading_failure_01_ep_014] 2024-01-28T10:00:00: ## 2024-01-28 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 136900 | p50: 140ms p95: 360ms p99: 650ms | err: 0.82% (1120 errors) | success: 99.18%\\n- /fraud_check: REQUESTS 136500 | p50: 92ms p95: 255ms p99: 420ms | err: 0.19% (260 errors) | success: 99.81%\\n- /geo_lookup: REQUESTS 134100 | p50: 130ms p95: 310ms p99: 400ms | err: 0.12% (160 errors) | success: 99.88%\\n- /auth: REQUESTS 178200 | p50: 34ms p95: 90ms p99: 150\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_021\", \"text\": \"[cascading_failure_01_ep_021] 2024-02-04T10:00:00: ## 2024-02-04 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 152400 | p50: 195ms p95: 530ms p99: 980ms | err: 2.69% (4100 errors) | success: 97.31%\\n- /fraud_check: REQUESTS 151900 | p50: 155ms p95: 410ms p99: 720ms | err: 0.62% (940 errors) | success: 99.38%\\n- /geo_lookup: REQUESTS 149100 | p50: 290ms p95: 590ms p99: 740ms | err: 0.29% (430 errors) | success: 99.71%\\n- /auth: REQUESTS 198000 | p50: 45ms p95: 116ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_019\", \"text\": \"[cascading_failure_01_ep_019] 2024-02-02T10:00:00: ## 2024-02-02 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 147600 | p50: 185ms p95: 490ms p99: 900ms | err: 2.3% (3400 errors) | success: 97.7%\\n- /fraud_check: REQUESTS 147100 | p50: 135ms p95: 370ms p99: 640ms | err: 0.49% (720 errors) | success: 99.51%\\n- /geo_lookup: REQUESTS 144500 | p50: 250ms p95: 520ms p99: 680ms | err: 0.25% (360 errors) | success: 99.75%\\n- /auth: REQUESTS 192000 | p50: 42ms p95: 108ms p99: 195\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_016\", \"text\": \"[cascading_failure_01_ep_016] 2024-01-30T10:00:00: ## 2024-01-30 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 140800 | p50: 155ms p95: 410ms p99: 780ms | err: 1.56% (2200 errors) | success: 98.44%\\n- /fraud_check: REQUESTS 140300 | p50: 105ms p95: 310ms p99: 520ms | err: 0.3% (420 errors) | success: 99.7%\\n- /geo_lookup: REQUESTS 137900 | p50: 190ms p95: 420ms p99: 600ms | err: 0.19% (260 errors) | success: 99.81%\\n- /auth: REQUESTS 183200 | p50: 36ms p95: 96ms p99: 165m\", \"score\": 0.5, \"metadata\": {}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_cd8a12833ea34dd5b138ba12",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "cascading_failure_01_ep_015",
+                  "cascading_failure_01_ep_014",
+                  "cascading_failure_01_ep_021",
+                  "cascading_failure_01_ep_019",
+                  "cascading_failure_01_ep_016"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 2409
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_cd8a12833ea34dd5b138ba12",
+              "content": "{\"documents\": [{\"ref_id\": \"cascading_failure_01_ep_015\", \"text\": \"## 2024-01-29 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 138500 | p50: 135ms p95: 350ms p99: 620ms | err: 0.71% (980 errors) | success: 99.29%\\n- /fraud_check: REQUESTS 138100 | p50: 90ms p95: 250ms p99: 410ms | err: 0.17% (240 errors) | success: 99.83%\\n- /geo_lookup: REQUESTS 135800 | p50: 135ms p95: 320ms p99: 410ms | err: 0.13% (170 errors) | success: 99.87%\\n- /auth: REQUESTS 180500 | p50: 33ms p95: 88ms p99: 148ms | err: 0.06% (108 errors) | success: 99.94%\\n- /product_catalog: REQUESTS 241900 | p50: 41ms p95: 116ms p99: 198ms | err: 0.07% (158 errors) | success: 99.93%\\n- /search: REQUESTS 209200 | p50: 61ms p95: 158ms p99: 268ms | err: 0.11% (238 errors) | success: 99.89%\\n- /recommendations: REQUESTS 169900 | p50: 70ms p95: 196ms p99: 335ms | err: 0.14% (235 errors) | success: 99.86%\\n\\n### Infrastructure\\n- gateway-01: CPU 53% | Mem 68% | Disk 62% | Conns: 2925 | Net: 535/632 Mbps\\n- gateway-02: CPU 50% | Mem 66% | Disk 61% | Conns: 2810 | Net: 520/615 Mbps\\n- service-b-01: CPU 49% | Mem 65% | Disk 58% | Conns: 2105 | Net: 350/402 Mbps\\n- metrics-db-01: CPU 32% | Mem 72% | Disk 83% | Conns: 288 | Net: 126/154 Mbps\\n\\n### Connection Pools\\n- primary: active 148 | idle 52 | waiting 16 | exhaustion: 1 | max: 200 | avg_wait: 16ms\\n- replica: active 64 | idle 36 | waiting 1 | exhaustion: 0 | max: 100 | avg_wait: 2ms\\n- third_party_geo: active 56 | idle 4 | waiting 14 | exhaustion: 2 | max: 60 | avg_wait: 42ms\\n\\n### CDN & Caching\\n- Hit rate: 93.1% | Bandwidth: 7.5 Gbps | Origin requests: 379400\\n\\n### Alerts\\n- [CRITICAL] CHECKOUT-ERROR-RATE on gateway-02: error_pct=0.71\\n- [WARNING] UPSTREAM-LATENCY on gateway-01: geo_lookup_p99_ms=410\\n\\n### Deployments & Changes\\n- Rolled back service-C (checkout) to v3.2.0\\n\\n### Events\\n- Service-C rollback completed\\n- A/B test 'checkout-v2' at 15% rollout\\n- Temporary disable of verbose checkout debug logging\\n- Updated gateway circuit breaker settings for /checkout upstream calls\\n\\n### On-Call\\n- Shift: M. Rossi. 4 pages (CHECKOUT-ERROR-RATE). 2 tickets (CO-781 error review, GW-330 circuit breaker). Status: Investigating.\", \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_014\", \"text\": \"## 2024-01-28 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 136900 | p50: 140ms p95: 360ms p99: 650ms | err: 0.82% (1120 errors) | success: 99.18%\\n- /fraud_check: REQUESTS 136500 | p50: 92ms p95: 255ms p99: 420ms | err: 0.19% (260 errors) | success: 99.81%\\n- /geo_lookup: REQUESTS 134100 | p50: 130ms p95: 310ms p99: 400ms | err: 0.12% (160 errors) | success: 99.88%\\n- /auth: REQUESTS 178200 | p50: 34ms p95: 90ms p99: 150ms | err: 0.06% (110 errors) | success: 99.94%\\n- /product_catalog: REQUESTS 238800 | p50: 42ms p95: 118ms p99: 200ms | err: 0.07% (160 errors) | success: 99.93%\\n- /search: REQUESTS 206500 | p50: 62ms p95: 160ms p99: 270ms | err: 0.12% (240 errors) | success: 99.88%\\n- /recommendations: REQUESTS 167800 | p50: 72ms p95: 200ms p99: 340ms | err: 0.14% (240 errors) | success: 99.86%\\n\\n### Infrastructure\\n- gateway-01: CPU 55% | Mem 69% | Disk 62% | Conns: 3050 | Net: 540/640 Mbps\\n- gateway-02: CPU 52% | Mem 67% | Disk 61% | Conns: 2920 | Net: 525/622 Mbps\\n- service-b-01: CPU 50% | Mem 65% | Disk 58% | Conns: 2150 | Net: 360/410 Mbps\\n- metrics-db-01: CPU 33% | Mem 72% | Disk 83% | Conns: 290 | Net: 128/155 Mbps\\n\\n### Connection Pools\\n- primary: active 150 | idle 50 | waiting 18 | exhaustion: 1 | max: 200 | avg_wait: 18ms\\n- replica: active 65 | idle 35 | waiting 1 | exhaustion: 0 | max: 100 | avg_wait: 2ms\\n- third_party_geo: active 56 | idle 4 | waiting 15 | exhaustion: 2 | max: 60 | avg_wait: 45ms\\n\\n### CDN & Caching\\n- Hit rate: 93.2% | Bandwidth: 7.6 Gbps | Origin requests: 382900\\n\\n### Alerts\\n- [CRITICAL] CHECKOUT-ERROR-RATE on gateway-01: error_pct=0.82\\n- [WARNING] CONNPOOL-WAIT on gateway-01: pool=primary waiting=18 avg_wait_ms=18\\n- [WARNING] UPSTREAM-LATENCY on gateway-02: geo_lookup_p99_ms=400\\n\\n### Deployments & Changes\\n- Deployed service-C (checkout) v3.2.1\\n\\n### Events\\n- Service-C deploy completed with schema migration (backward compatible)\\n- A/B test 'checkout-v2' at 15% rollout\\n- metrics-db vacuum executed 2024-01-28 01:00Z\\n- Scaled checkout-worker pool from 8 to 10 instances\\n\\n### On-Call\\n- Shift: L. Nguyen. 5 pages (CHECKOUT-ERROR-RATE, CONNPOOL-WAIT). 2 tickets (CO-778 rollback plan, DB-902 pool wait). Status: Investigating.\", \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_021\", \"text\": \"## 2024-02-04 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 152400 | p50: 195ms p95: 530ms p99: 980ms | err: 2.69% (4100 errors) | success: 97.31%\\n- /fraud_check: REQUESTS 151900 | p50: 155ms p95: 410ms p99: 720ms | err: 0.62% (940 errors) | success: 99.38%\\n- /geo_lookup: REQUESTS 149100 | p50: 290ms p95: 590ms p99: 740ms | err: 0.29% (430 errors) | success: 99.71%\\n- /auth: REQUESTS 198000 | p50: 45ms p95: 116ms p99: 215ms | err: 0.14% (270 errors) | success: 99.86%\\n- /product_catalog: REQUESTS 266700 | p50: 58ms p95: 172ms p99: 315ms | err: 0.13% (340 errors) | success: 99.87%\\n- /search: REQUESTS 231600 | p50: 77ms p95: 210ms p99: 370ms | err: 0.19% (430 errors) | success: 99.81%\\n- /recommendations: REQUESTS 187900 | p50: 98ms p95: 275ms p99: 465ms | err: 0.22% (420 errors) | success: 99.78%\\n\\n### Infrastructure\\n- gateway-01: CPU 72% | Mem 79% | Disk 63% | Conns: 5250 | Net: 690/830 Mbps\\n- gateway-02: CPU 69% | Mem 77% | Disk 62% | Conns: 5080 | Net: 670/810 Mbps\\n- service-b-01: CPU 78% | Mem 79% | Disk 60% | Conns: 4950 | Net: 630/742 Mbps\\n- metrics-db-01: CPU 46% | Mem 79% | Disk 86% | Conns: 372 | Net: 176/210 Mbps\\n\\n### Connection Pools\\n- primary: active 200 | idle 0 | waiting 220 | exhaustion: 15 | max: 200 | avg_wait: 185ms\\n- replica: active 100 | idle 0 | waiting 45 | exhaustion: 6 | max: 100 | avg_wait: 48ms\\n- third_party_geo: active 60 | idle 0 | waiting 125 | exhaustion: 15 | max: 60 | avg_wait: 215ms\\n\\n### CDN & Caching\\n- Hit rate: 92.0% | Bandwidth: 9.2 Gbps | Origin requests: 469200\\n\\n### Alerts\\n- [CRITICAL] CHECKOUT-ERROR-RATE on gateway-02: error_pct=2.69\\n- [CRITICAL] SERVICE-B-RETRY-COUNT on service-b-01: retry_count=420 retry_rate_pct=0.34\\n- [CRITICAL] CONNPOOL-EXHAUSTION on gateway-02: pool=primary events=15 waiting=220\\n\\n### Deployments & Changes\\n- No deployments\\n\\n### Events\\n- Enabled feature flag 'skip-geo-on-timeout' for 5% of traffic\\n- A/B test 'checkout-v2' at 15% rollout\\n- Scaled gateway autoscaling min from 2 to 3\\n- Updated pager routing for CHECKOUT-ERROR-RATE to include manager\\n\\n### On-Call\\n- Shift: K. Okafor. 14 pages. 5 tickets (CO-830, SRV-B-266, POOL-588, GW-360, FF-91). Status: Mitigating.\", \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_019\", \"text\": \"## 2024-02-02 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 147600 | p50: 185ms p95: 490ms p99: 900ms | err: 2.3% (3400 errors) | success: 97.7%\\n- /fraud_check: REQUESTS 147100 | p50: 135ms p95: 370ms p99: 640ms | err: 0.49% (720 errors) | success: 99.51%\\n- /geo_lookup: REQUESTS 144500 | p50: 250ms p95: 520ms p99: 680ms | err: 0.25% (360 errors) | success: 99.75%\\n- /auth: REQUESTS 192000 | p50: 42ms p95: 108ms p99: 195ms | err: 0.12% (230 errors) | success: 99.88%\\n- /product_catalog: REQUESTS 258400 | p50: 52ms p95: 158ms p99: 285ms | err: 0.12% (300 errors) | success: 99.88%\\n- /search: REQUESTS 223800 | p50: 72ms p95: 195ms p99: 340ms | err: 0.17% (390 errors) | success: 99.83%\\n- /recommendations: REQUESTS 181400 | p50: 90ms p95: 255ms p99: 430ms | err: 0.21% (380 errors) | success: 99.79%\\n\\n### Infrastructure\\n- gateway-01: CPU 68% | Mem 77% | Disk 62% | Conns: 4680 | Net: 650/780 Mbps\\n- gateway-02: CPU 65% | Mem 75% | Disk 61% | Conns: 4510 | Net: 632/758 Mbps\\n- service-b-01: CPU 72% | Mem 76% | Disk 60% | Conns: 4200 | Net: 560/658 Mbps\\n- metrics-db-01: CPU 43% | Mem 77% | Disk 85% | Conns: 345 | Net: 165/198 Mbps\\n\\n### Connection Pools\\n- primary: active 200 | idle 0 | waiting 165 | exhaustion: 13 | max: 200 | avg_wait: 155ms\\n- replica: active 100 | idle 0 | waiting 30 | exhaustion: 4 | max: 100 | avg_wait: 32ms\\n- third_party_geo: active 60 | idle 0 | waiting 95 | exhaustion: 15 | max: 60 | avg_wait: 185ms\\n\\n### CDN & Caching\\n- Hit rate: 92.2% | Bandwidth: 8.6 Gbps | Origin requests: 441300\\n\\n### Alerts\\n- [CRITICAL] CONNPOOL-EXHAUSTION on gateway-02: pool=third_party_geo events=15 waiting=95\\n- [CRITICAL] SERVICE-B-RETRY-COUNT on service-b-01: retry_count=340 retry_rate_pct=0.28\\n- [CRITICAL] CHECKOUT-ERROR-RATE on gateway-01: error_pct=2.30\\n\\n### Deployments & Changes\\n- No deployments\\n\\n### Events\\n- Reduced service-B concurrency limit from 120 to 90 (config)\\n- A/B test 'checkout-v2' at 15% rollout\\n- Added synthetic probe for geo vendor from us-east-1\\n- Scaled checkout-worker pool from 10 to 12 instances\\n\\n### On-Call\\n- Shift: J. Martinez. 11 pages. 4 tickets (SRV-B-250 concurrency, POOL-571, CO-812, SYN-44). Status: Mitigating.\", \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_016\", \"text\": \"## 2024-01-30 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 140800 | p50: 155ms p95: 410ms p99: 780ms | err: 1.56% (2200 errors) | success: 98.44%\\n- /fraud_check: REQUESTS 140300 | p50: 105ms p95: 310ms p99: 520ms | err: 0.3% (420 errors) | success: 99.7%\\n- /geo_lookup: REQUESTS 137900 | p50: 190ms p95: 420ms p99: 600ms | err: 0.19% (260 errors) | success: 99.81%\\n- /auth: REQUESTS 183200 | p50: 36ms p95: 96ms p99: 165ms | err: 0.09% (160 errors) | success: 99.91%\\n- /product_catalog: REQUESTS 246300 | p50: 45ms p95: 130ms p99: 230ms | err: 0.09% (210 errors) | success: 99.91%\\n- /search: REQUESTS 213900 | p50: 66ms p95: 175ms p99: 300ms | err: 0.15% (320 errors) | success: 99.85%\\n- /recommendations: REQUESTS 173500 | p50: 78ms p95: 220ms p99: 380ms | err: 0.18% (310 errors) | success: 99.82%\\n\\n### Infrastructure\\n- gateway-01: CPU 62% | Mem 74% | Disk 62% | Conns: 3780 | Net: 590/705 Mbps\\n- gateway-02: CPU 59% | Mem 72% | Disk 61% | Conns: 3605 | Net: 570/685 Mbps\\n- service-b-01: CPU 58% | Mem 70% | Disk 59% | Conns: 2850 | Net: 430/510 Mbps\\n- metrics-db-01: CPU 36% | Mem 74% | Disk 84% | Conns: 310 | Net: 145/175 Mbps\\n\\n### Connection Pools\\n- primary: active 196 | idle 4 | waiting 85 | exhaustion: 7 | max: 200 | avg_wait: 85ms\\n- replica: active 92 | idle 8 | waiting 10 | exhaustion: 1 | max: 100 | avg_wait: 12ms\\n- third_party_geo: active 60 | idle 0 | waiting 55 | exhaustion: 10 | max: 60 | avg_wait: 120ms\\n\\n### CDN & Caching\\n- Hit rate: 92.8% | Bandwidth: 7.9 Gbps | Origin requests: 401200\\n\\n### Alerts\\n- [CRITICAL] CONNPOOL-EXHAUSTION on gateway-01: pool=primary events=7 waiting=85\\n- [CRITICAL] CHECKOUT-ERROR-RATE on gateway-01: error_pct=1.56\\n- [CRITICAL] UPSTREAM-LATENCY on gateway-02: geo_lookup_p99_ms=600\\n\\n### Deployments & Changes\\n- No deployments\\n\\n### Events\\n- Scaled gateway autoscaling max from 6 to 8\\n- A/B test 'checkout-v2' at 15% rollout\\n- Increased connection pool max_size for third_party_geo from 60 to 60 (no change)\\n- Rotated service-B pods (rolling restart)\\n\\n### On-Call\\n- Shift: E. Johnson. 7 pages (CONNPOOL-EXHAUSTION, CHECKOUT-ERROR-RATE). 3 tickets (POOL-552, CO-790, VEND-81). Status: Mitigating.\", \"metadata\": {}}], \"count\": 5}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "Checkout requests are failing due to a cascading failure originating from upstream services, primarily driven by connection pool exhaustion and high latency in dependent systems. The root cause appears to be a combination of increased load and insufficient capacity in critical connection pools.\n\nKey factors contributing to the failures:\n\n1. **Connection Pool Exhaustion**: The primary database connection pool is consistently hitting its maximum capacity of 200 connections, leading to significant wait times and timeouts. On 2024-02-04, the primary pool reached full exhaustion with 200 active connections, 220 waiting, and an average wait time of 185ms [cascading_failure_01_ep_021]. This was preceded by earlier incidents on 2024-01-30 and 2024-02-02 showing similar exhaustion patterns [cascading_failure_01_ep_016, cascading_failure_01_ep_019].\n\n2. **Third-Party Geo Service Latency**: The `third_party_geo` service has a small connection pool (max 60) that is also frequently exhausted, with wait queues exceeding 100 requests and average wait times over 200ms [cascading_failure_01_ep_021]. This upstream latency directly impacts the checkout service's ability to complete transactions.\n\n3. **Cascading Impact on Service-B**: The downstream `service-b` is experiencing high retry rates (0.34% on 2024-02-04) due to failed requests, indicating it is being overwhelmed by retries from the checkout service [cascading_failure_01_ep_021].\n\n4. **Error Rate Escalation**: The checkout error rate has increased from 0.71% on 2024-01-29 to 2.69% on 2024-02-04, representing a nearly fourfold increase in failure rate [cascading_failure_01_ep_015, cascading_failure_01_ep_021].\n\nThe issue began after the deployment of service-C v3.2.1 on 2024-01-28, which may have introduced changes that increased database connection usage [cascading_failure_01_ep_014]. Subsequent rollbacks and configuration changes have failed to resolve the underlying capacity constraints in the connection pools.",
+          "tokens_used": 8365
+        }
+      ],
+      "tool_calls_made": 2,
+      "total_tokens": 11414,
+      "wall_time_ms": 17860.04423801205,
+      "budget_violations": [],
+      "refs_cited": [
+        "cascading_failure_01_ep_015",
+        "cascading_failure_01_ep_014",
+        "cascading_failure_01_ep_021",
+        "cascading_failure_01_ep_019",
+        "cascading_failure_01_ep_016"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "cascading_failure_01_ep_015",
+      "cascading_failure_01_ep_014",
+      "cascading_failure_01_ep_021",
+      "cascading_failure_01_ep_019",
+      "cascading_failure_01_ep_016"
+    ],
+    "valid_ref_ids": [
+      "cascading_failure_01_ep_015",
+      "cascading_failure_01_ep_014",
+      "cascading_failure_01_ep_021",
+      "cascading_failure_01_ep_019",
+      "cascading_failure_01_ep_016"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "cf01_q07_temporal",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 25,
+      "question_type": "temporal",
+      "prompt": "When did geo-lookup latency first start degrading, and over how many reporting periods did it progress to the current level?",
+      "ground_truth": {
+        "canonical_answer": "Geo-lookup latency began degrading during the early signal phase, starting around episode 9. It progressed over approximately 15-20 reporting periods from 200ms baseline to 800ms+, accelerating during the escalation phase.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_009",
+          "cascading_failure_01_ep_012",
+          "cascading_failure_01_ep_017",
+          "cascading_failure_01_ep_025"
+        ],
+        "key_facts": [
+          "geo-lookup API latency increasing",
+          "connection pool exhaustion",
+          "geo-lookup latency degraded progressively over multiple reporting periods with p99 values increasing from baseline through each successive day rather than appearing as a single sudden spike",
+          "the actual root cause is geo-lookup API latency cascading into connection pool exhaustion, not DNS infrastructure failure",
+          "user authentication completes successfully before reaching the failing checkout path, ruling out auth as a contributing factor"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q07_temporal",
+      "answer_text": "The geo-lookup latency first started degrading on 2024-01-25, where the p50 latency was 82ms [cascading_failure_01_ep_011]. By 2024-01-26, it had increased to 90ms [cascading_failure_01_ep_012], and continued to rise in subsequent days.\n\nThe degradation progressed over multiple reporting periods:\n- 2024-01-27: p50 latency reached 98ms [cascading_failure_01_ep_013]\n- 2024-01-29: 135ms [cascading_failure_01_ep_015]\n- 2024-01-30: 190ms [cascading_failure_01_ep_016]\n- 2024-02-02: 250ms [cascading_failure_01_ep_019]\n- 2024-02-03: 270ms [cascading_failure_01_ep_020]\n- 2024-02-04: 290ms [cascading_failure_01_ep_021]\n- 2024-02-07: 380ms (current level) [cascading_failure_01_ep_024]\n\nThe latency degradation began on 2024-01-25 and progressed over 7 reporting periods to reach the current level on 2024-02-07.",
+      "turns": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_f45c2b3eeb844b30972916e7",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 647
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_f45c2b3eeb844b30972916e7",
+              "content": "{\"search_modes\": [\"semantic\", \"graph\"], \"filter_fields\": [], \"max_results_per_search\": 10, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple full episodes by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times \\u2014 it uses only one tool call instead of one per document. After memory_search, pass all ref_ids you want to read to this tool.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_6c0333f480d94347a4e042cb",
+              "name": "memory_search",
+              "arguments": {
+                "query": "geo-lookup latency degradation timeline",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 848
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_6c0333f480d94347a4e042cb",
+              "content": "[{\"ref_id\": \"cascading_failure_01_ep_021\", \"text\": \"[cascading_failure_01_ep_021] 2024-02-04T10:00:00: ## 2024-02-04 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 152400 | p50: 195ms p95: 530ms p99: 980ms | err: 2.69% (4100 errors) | success: 97.31%\\n- /fraud_check: REQUESTS 151900 | p50: 155ms p95: 410ms p99: 720ms | err: 0.62% (940 errors) | success: 99.38%\\n- /geo_lookup: REQUESTS 149100 | p50: 290ms p95: 590ms p99: 740ms | err: 0.29% (430 errors) | success: 99.71%\\n- /auth: REQUESTS 198000 | p50: 45ms p95: 116ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_019\", \"text\": \"[cascading_failure_01_ep_019] 2024-02-02T10:00:00: ## 2024-02-02 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 147600 | p50: 185ms p95: 490ms p99: 900ms | err: 2.3% (3400 errors) | success: 97.7%\\n- /fraud_check: REQUESTS 147100 | p50: 135ms p95: 370ms p99: 640ms | err: 0.49% (720 errors) | success: 99.51%\\n- /geo_lookup: REQUESTS 144500 | p50: 250ms p95: 520ms p99: 680ms | err: 0.25% (360 errors) | success: 99.75%\\n- /auth: REQUESTS 192000 | p50: 42ms p95: 108ms p99: 195\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_013\", \"text\": \"[cascading_failure_01_ep_013] 2024-01-27T10:00:00: ## 2024-01-27 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 133600 | p50: 112ms p95: 275ms p99: 450ms | err: 0.16% (210 errors) | success: 99.84%\\n- /fraud_check: REQUESTS 133150 | p50: 82ms p95: 220ms p99: 360ms | err: 0.13% (170 errors) | success: 99.87%\\n- /geo_lookup: REQUESTS 130900 | p50: 98ms p95: 260ms p99: 330ms | err: 0.09% (118 errors) | success: 99.91%\\n- /auth: REQUESTS 174500 | p50: 32ms p95: 82ms p99: 132ms\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_011\", \"text\": \"[cascading_failure_01_ep_011] 2024-01-25T10:00:00: ## 2024-01-25 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 124100 | p50: 103ms p95: 252ms p99: 405ms | err: 0.14% (178 errors) | success: 99.86%\\n- /fraud_check: REQUESTS 123800 | p50: 76ms p95: 198ms p99: 320ms | err: 0.11% (132 errors) | success: 99.89%\\n- /geo_lookup: REQUESTS 121900 | p50: 82ms p95: 220ms p99: 275ms | err: 0.08% (92 errors) | success: 99.92%\\n- /auth: REQUESTS 162600 | p50: 30ms p95: 78ms p99: 124ms \", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_016\", \"text\": \"[cascading_failure_01_ep_016] 2024-01-30T10:00:00: ## 2024-01-30 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 140800 | p50: 155ms p95: 410ms p99: 780ms | err: 1.56% (2200 errors) | success: 98.44%\\n- /fraud_check: REQUESTS 140300 | p50: 105ms p95: 310ms p99: 520ms | err: 0.3% (420 errors) | success: 99.7%\\n- /geo_lookup: REQUESTS 137900 | p50: 190ms p95: 420ms p99: 600ms | err: 0.19% (260 errors) | success: 99.81%\\n- /auth: REQUESTS 183200 | p50: 36ms p95: 96ms p99: 165m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_020\", \"text\": \"[cascading_failure_01_ep_020] 2024-02-03T10:00:00: ## 2024-02-03 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 150100 req | p50: 190ms p95: 510ms p99: 940ms | err: 2.47% (3700 errors) | success: 97.53%\\n- /fraud_check: 149600 req | p50: 145ms p95: 390ms p99: 680ms | err: 0.55% (820 errors) | success: 99.45%\\n- /geo_lookup: 147000 req | p50: 270ms p95: 560ms p99: 710ms | err: 0.27% (390 errors) | success: 99.73%\\n- /auth: 195300 req | p50: 44ms p95: 112ms p99: 205ms | err: 0.13% (2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_012\", \"text\": \"[cascading_failure_01_ep_012] 2024-01-26T10:00:00: ## 2024-01-26 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 127900 | p50: 108ms p95: 265ms p99: 430ms | err: 0.15% (190 errors) | success: 99.85%\\n- /fraud_check: REQUESTS 127500 | p50: 79ms p95: 210ms p99: 340ms | err: 0.12% (150 errors) | success: 99.88%\\n- /geo_lookup: REQUESTS 125400 | p50: 90ms p95: 240ms p99: 300ms | err: 0.08% (105 errors) | success: 99.92%\\n- /auth: REQUESTS 167300 | p50: 31ms p95: 80ms p99: 128ms\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_024\", \"text\": \"[cascading_failure_01_ep_024] 2024-02-07T10:00:00: ## 2024-02-07 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 160200 | p50: 230ms p95: 620ms p99: 1180ms | err: 3.87% (6200 errors) | success: 96.13%\\n- /fraud_check: REQUESTS 159600 | p50: 205ms p95: 540ms p99: 920ms | err: 1.1% (1750 errors) | success: 98.9%\\n- /geo_lookup: REQUESTS 155100 | p50: 380ms p95: 740ms p99: 870ms | err: 0.49% (760 errors) | success: 99.51%\\n- /auth: REQUESTS 207900 | p50: 52ms p95: 135ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_005\", \"text\": \"[cascading_failure_01_ep_005] 2024-01-19T10:00:00: ## 2024-01-19 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 126450 req | p50: 95ms p95: 218ms p99: 336ms | err: 0.13% (165 errors) | success: 99.87%\\n- /fraud_check: 126120 req | p50: 69ms p95: 166ms p99: 252ms | err: 0.08% (107 errors) | success: 99.92%\\n- /geo_lookup: 124500 req | p50: 56ms p95: 132ms p99: 184ms | err: 0.05% (63 errors) | success: 99.95%\\n- /auth: 164200 req | p50: 28ms p95: 70ms p99: 112ms | err: 0.05% (79 erro\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_015\", \"text\": \"[cascading_failure_01_ep_015] 2024-01-29T10:00:00: ## 2024-01-29 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 138500 | p50: 135ms p95: 350ms p99: 620ms | err: 0.71% (980 errors) | success: 99.29%\\n- /fraud_check: REQUESTS 138100 | p50: 90ms p95: 250ms p99: 410ms | err: 0.17% (240 errors) | success: 99.83%\\n- /geo_lookup: REQUESTS 135800 | p50: 135ms p95: 320ms p99: 410ms | err: 0.13% (170 errors) | success: 99.87%\\n- /auth: REQUESTS 180500 | p50: 33ms p95: 88ms p99: 148m\", \"score\": 0.5, \"metadata\": {}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_afe832e435314c88be9c2388",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "cascading_failure_01_ep_011",
+                  "cascading_failure_01_ep_012",
+                  "cascading_failure_01_ep_013",
+                  "cascading_failure_01_ep_015",
+                  "cascading_failure_01_ep_016",
+                  "cascading_failure_01_ep_019",
+                  "cascading_failure_01_ep_020",
+                  "cascading_failure_01_ep_021",
+                  "cascading_failure_01_ep_024"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 4350
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_afe832e435314c88be9c2388",
+              "content": "[Context budget exhausted \u2014 synthesize answer from evidence already retrieved]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "The geo-lookup latency first started degrading on 2024-01-25, where the p50 latency was 82ms [cascading_failure_01_ep_011]. By 2024-01-26, it had increased to 90ms [cascading_failure_01_ep_012], and continued to rise in subsequent days.\n\nThe degradation progressed over multiple reporting periods:\n- 2024-01-27: p50 latency reached 98ms [cascading_failure_01_ep_013]\n- 2024-01-29: 135ms [cascading_failure_01_ep_015]\n- 2024-01-30: 190ms [cascading_failure_01_ep_016]\n- 2024-02-02: 250ms [cascading_failure_01_ep_019]\n- 2024-02-03: 270ms [cascading_failure_01_ep_020]\n- 2024-02-04: 290ms [cascading_failure_01_ep_021]\n- 2024-02-07: 380ms (current level) [cascading_failure_01_ep_024]\n\nThe latency degradation began on 2024-01-25 and progressed over 7 reporting periods to reach the current level on 2024-02-07.",
+          "tokens_used": 4747
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 10592,
+      "wall_time_ms": 13564.770741009852,
+      "budget_violations": [
+        "Cumulative result token limit exceeded: 6681 > 4096"
+      ],
+      "refs_cited": [
+        "cascading_failure_01_ep_011",
+        "cascading_failure_01_ep_012",
+        "cascading_failure_01_ep_013",
+        "cascading_failure_01_ep_015",
+        "cascading_failure_01_ep_016",
+        "cascading_failure_01_ep_019",
+        "cascading_failure_01_ep_020",
+        "cascading_failure_01_ep_021",
+        "cascading_failure_01_ep_024"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "cascading_failure_01_ep_011",
+      "cascading_failure_01_ep_012",
+      "cascading_failure_01_ep_013",
+      "cascading_failure_01_ep_015",
+      "cascading_failure_01_ep_016",
+      "cascading_failure_01_ep_019",
+      "cascading_failure_01_ep_020",
+      "cascading_failure_01_ep_021",
+      "cascading_failure_01_ep_024"
+    ],
+    "valid_ref_ids": [
+      "cascading_failure_01_ep_011",
+      "cascading_failure_01_ep_012",
+      "cascading_failure_01_ep_013",
+      "cascading_failure_01_ep_015",
+      "cascading_failure_01_ep_016",
+      "cascading_failure_01_ep_019",
+      "cascading_failure_01_ep_020",
+      "cascading_failure_01_ep_021",
+      "cascading_failure_01_ep_024"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "cf01_q08_counterfactual",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 25,
+      "question_type": "counterfactual",
+      "prompt": "If the service-C deployment were responsible for the checkout failures, what pattern would you expect in the data? Does that match what you see?",
+      "ground_truth": {
+        "canonical_answer": "If the service-C deploy caused the failures, you would expect a sudden onset coinciding with the deploy and resolution after rollback. Instead, the degradation was gradual (geo-lookup latency creeping over weeks) and the rollback did not resolve the issue. The actual cause is upstream geo-lookup API degradation driving retry storms and pool exhaustion.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_015",
+          "cascading_failure_01_ep_016",
+          "cascading_failure_01_ep_024"
+        ],
+        "key_facts": [
+          "service-C deploy is not the root cause",
+          "geo-lookup API latency increasing",
+          "connection pool exhaustion",
+          "geo-lookup latency degraded progressively over multiple reporting periods with p99 values increasing from baseline through each successive day rather than appearing as a single sudden spike",
+          "user authentication completes successfully before reaching the failing checkout path, ruling out auth as a contributing factor"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q08_counterfactual",
+      "answer_text": "If service-C were responsible for the checkout failures, we would expect to see a strong correlation between the error rates and latency spikes in service-C and the increase in /checkout endpoint errors. Specifically, we would expect that as service-C's error rate increases or its response time degrades, the /checkout error rate would rise in tandem, since /checkout depends on service-C (which handles /geo_lookup, based on the data).\n\nFrom the retrieved data:\n\n- On 2024-01-24 (cascading_failure_01_ep_010) and earlier, both /checkout and /geo_lookup (service-C) show low error rates and latency [ref_id: cascading_failure_01_ep_010].\n- Starting around 2024-02-02 (cascading_failure_01_ep_019), /checkout error rate jumps to 2.3% (3400 errors), while /geo_lookup error rate increases to 0.25% (360 errors) and latency rises significantly (p50: 250ms \u2192 p99: 680ms) [ref_id: cascading_failure_01_ep_019].\n- By 2024-02-07 (cascading_failure_01_ep_024), /checkout errors reach 3.87% (6200 errors), and /geo_lookup shows continued degradation (p50: 380ms, err: 0.49%) [ref_id: cascading_failure_01_ep_024].\n- The trends are consistent: as service-C (geo_lookup) latency and errors increase, so do /checkout errors.\n\nThis pattern matches what would be expected if service-C were contributing to checkout failures, suggesting a likely causal relationship [ref_id: cascading_failure_01_ep_019, ref_id: cascading_failure_01_ep_024].",
+      "turns": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_f3401d1d49854566902a5b46",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 650
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_f3401d1d49854566902a5b46",
+              "content": "{\"search_modes\": [\"semantic\", \"graph\"], \"filter_fields\": [], \"max_results_per_search\": 10, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple full episodes by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times \\u2014 it uses only one tool call instead of one per document. After memory_search, pass all ref_ids you want to read to this tool.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_763c68b653d64309983a220e",
+              "name": "memory_search",
+              "arguments": {
+                "query": "service-C deployment impact on checkout failures",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 852
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_763c68b653d64309983a220e",
+              "content": "[{\"ref_id\": \"cascading_failure_01_ep_014\", \"text\": \"[cascading_failure_01_ep_014] 2024-01-28T10:00:00: ## 2024-01-28 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 136900 | p50: 140ms p95: 360ms p99: 650ms | err: 0.82% (1120 errors) | success: 99.18%\\n- /fraud_check: REQUESTS 136500 | p50: 92ms p95: 255ms p99: 420ms | err: 0.19% (260 errors) | success: 99.81%\\n- /geo_lookup: REQUESTS 134100 | p50: 130ms p95: 310ms p99: 400ms | err: 0.12% (160 errors) | success: 99.88%\\n- /auth: REQUESTS 178200 | p50: 34ms p95: 90ms p99: 150\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_015\", \"text\": \"[cascading_failure_01_ep_015] 2024-01-29T10:00:00: ## 2024-01-29 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 138500 | p50: 135ms p95: 350ms p99: 620ms | err: 0.71% (980 errors) | success: 99.29%\\n- /fraud_check: REQUESTS 138100 | p50: 90ms p95: 250ms p99: 410ms | err: 0.17% (240 errors) | success: 99.83%\\n- /geo_lookup: REQUESTS 135800 | p50: 135ms p95: 320ms p99: 410ms | err: 0.13% (170 errors) | success: 99.87%\\n- /auth: REQUESTS 180500 | p50: 33ms p95: 88ms p99: 148m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_019\", \"text\": \"[cascading_failure_01_ep_019] 2024-02-02T10:00:00: ## 2024-02-02 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 147600 | p50: 185ms p95: 490ms p99: 900ms | err: 2.3% (3400 errors) | success: 97.7%\\n- /fraud_check: REQUESTS 147100 | p50: 135ms p95: 370ms p99: 640ms | err: 0.49% (720 errors) | success: 99.51%\\n- /geo_lookup: REQUESTS 144500 | p50: 250ms p95: 520ms p99: 680ms | err: 0.25% (360 errors) | success: 99.75%\\n- /auth: REQUESTS 192000 | p50: 42ms p95: 108ms p99: 195\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_024\", \"text\": \"[cascading_failure_01_ep_024] 2024-02-07T10:00:00: ## 2024-02-07 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 160200 | p50: 230ms p95: 620ms p99: 1180ms | err: 3.87% (6200 errors) | success: 96.13%\\n- /fraud_check: REQUESTS 159600 | p50: 205ms p95: 540ms p99: 920ms | err: 1.1% (1750 errors) | success: 98.9%\\n- /geo_lookup: REQUESTS 155100 | p50: 380ms p95: 740ms p99: 870ms | err: 0.49% (760 errors) | success: 99.51%\\n- /auth: REQUESTS 207900 | p50: 52ms p95: 135ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_010\", \"text\": \"[cascading_failure_01_ep_010] 2024-01-24T10:00:00: ## 2024-01-24 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 125700 req | p50: 101ms p95: 245ms p99: 390ms | err: 0.14% (170 errors) | success: 99.86%\\n- /fraud_check: 125400 req | p50: 74ms p95: 190ms p99: 305ms | err: 0.1% (120 errors) | success: 99.9%\\n- /geo_lookup: 123500 req | p50: 78ms p95: 205ms p99: 260ms | err: 0.07% (85 errors) | success: 99.93%\\n- /auth: 164700 req | p50: 30ms p95: 76ms p99: 122ms | err: 0.05% (82 error\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_021\", \"text\": \"[cascading_failure_01_ep_021] 2024-02-04T10:00:00: ## 2024-02-04 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 152400 | p50: 195ms p95: 530ms p99: 980ms | err: 2.69% (4100 errors) | success: 97.31%\\n- /fraud_check: REQUESTS 151900 | p50: 155ms p95: 410ms p99: 720ms | err: 0.62% (940 errors) | success: 99.38%\\n- /geo_lookup: REQUESTS 149100 | p50: 290ms p95: 590ms p99: 740ms | err: 0.29% (430 errors) | success: 99.71%\\n- /auth: REQUESTS 198000 | p50: 45ms p95: 116ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_012\", \"text\": \"[cascading_failure_01_ep_012] 2024-01-26T10:00:00: ## 2024-01-26 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 127900 | p50: 108ms p95: 265ms p99: 430ms | err: 0.15% (190 errors) | success: 99.85%\\n- /fraud_check: REQUESTS 127500 | p50: 79ms p95: 210ms p99: 340ms | err: 0.12% (150 errors) | success: 99.88%\\n- /geo_lookup: REQUESTS 125400 | p50: 90ms p95: 240ms p99: 300ms | err: 0.08% (105 errors) | success: 99.92%\\n- /auth: REQUESTS 167300 | p50: 31ms p95: 80ms p99: 128ms\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_020\", \"text\": \"[cascading_failure_01_ep_020] 2024-02-03T10:00:00: ## 2024-02-03 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 150100 req | p50: 190ms p95: 510ms p99: 940ms | err: 2.47% (3700 errors) | success: 97.53%\\n- /fraud_check: 149600 req | p50: 145ms p95: 390ms p99: 680ms | err: 0.55% (820 errors) | success: 99.45%\\n- /geo_lookup: 147000 req | p50: 270ms p95: 560ms p99: 710ms | err: 0.27% (390 errors) | success: 99.73%\\n- /auth: 195300 req | p50: 44ms p95: 112ms p99: 205ms | err: 0.13% (2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_016\", \"text\": \"[cascading_failure_01_ep_016] 2024-01-30T10:00:00: ## 2024-01-30 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 140800 | p50: 155ms p95: 410ms p99: 780ms | err: 1.56% (2200 errors) | success: 98.44%\\n- /fraud_check: REQUESTS 140300 | p50: 105ms p95: 310ms p99: 520ms | err: 0.3% (420 errors) | success: 99.7%\\n- /geo_lookup: REQUESTS 137900 | p50: 190ms p95: 420ms p99: 600ms | err: 0.19% (260 errors) | success: 99.81%\\n- /auth: REQUESTS 183200 | p50: 36ms p95: 96ms p99: 165m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_008\", \"text\": \"[cascading_failure_01_ep_008] 2024-01-22T10:00:00: ## 2024-01-22 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 120500 | p50: 92ms p95: 212ms p99: 328ms | err: 0.12% (150 errors) | success: 99.88%\\n- /fraud_check: REQUESTS 120200 | p50: 68ms p95: 163ms p99: 248ms | err: 0.08% (100 errors) | success: 99.92%\\n- /geo_lookup: REQUESTS 118700 | p50: 55ms p95: 132ms p99: 182ms | err: 0.05% (60 errors) | success: 99.95%\\n- /auth: REQUESTS 158200 | p50: 28ms p95: 69ms p99: 112ms |\", \"score\": 0.5, \"metadata\": {}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_e1d1036726c34fafb9efb991",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "cascading_failure_01_ep_014",
+                  "cascading_failure_01_ep_015",
+                  "cascading_failure_01_ep_019",
+                  "cascading_failure_01_ep_024",
+                  "cascading_failure_01_ep_010",
+                  "cascading_failure_01_ep_021",
+                  "cascading_failure_01_ep_012",
+                  "cascading_failure_01_ep_020",
+                  "cascading_failure_01_ep_016",
+                  "cascading_failure_01_ep_008"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 4368
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_e1d1036726c34fafb9efb991",
+              "content": "[Context budget exhausted \u2014 synthesize answer from evidence already retrieved]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "If service-C were responsible for the checkout failures, we would expect to see a strong correlation between the error rates and latency spikes in service-C and the increase in /checkout endpoint errors. Specifically, we would expect that as service-C's error rate increases or its response time degrades, the /checkout error rate would rise in tandem, since /checkout depends on service-C (which handles /geo_lookup, based on the data).\n\nFrom the retrieved data:\n\n- On 2024-01-24 (cascading_failure_01_ep_010) and earlier, both /checkout and /geo_lookup (service-C) show low error rates and latency [ref_id: cascading_failure_01_ep_010].\n- Starting around 2024-02-02 (cascading_failure_01_ep_019), /checkout error rate jumps to 2.3% (3400 errors), while /geo_lookup error rate increases to 0.25% (360 errors) and latency rises significantly (p50: 250ms \u2192 p99: 680ms) [ref_id: cascading_failure_01_ep_019].\n- By 2024-02-07 (cascading_failure_01_ep_024), /checkout errors reach 3.87% (6200 errors), and /geo_lookup shows continued degradation (p50: 380ms, err: 0.49%) [ref_id: cascading_failure_01_ep_024].\n- The trends are consistent: as service-C (geo_lookup) latency and errors increase, so do /checkout errors.\n\nThis pattern matches what would be expected if service-C were contributing to checkout failures, suggesting a likely causal relationship [ref_id: cascading_failure_01_ep_019, ref_id: cascading_failure_01_ep_024].",
+          "tokens_used": 4817
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 10687,
+      "wall_time_ms": 13523.40340797673,
+      "budget_violations": [
+        "Cumulative result token limit exceeded: 7219 > 4096"
+      ],
+      "refs_cited": []
+    },
+    "retrieved_ref_ids": [],
+    "valid_ref_ids": []
+  },
+  {
+    "question": {
+      "question_id": "cf01_q14_paraphrase",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 25,
+      "question_type": "paraphrase",
+      "prompt": "What sequence of events led to the checkout outage?",
+      "ground_truth": {
+        "canonical_answer": "Geo-lookup API latency degradation caused service-B fraud-check retries to escalate, which exhausted the shared connection pool, leading to checkout failures. The service-C deploy was a coincidence, not the cause.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_009",
+          "cascading_failure_01_ep_018",
+          "cascading_failure_01_ep_024",
+          "cascading_failure_01_ep_015"
+        ],
+        "key_facts": [
+          "connection pool exhaustion",
+          "geo-lookup API latency increasing",
+          "service-B retry rate elevated",
+          "service-C deploy is not the root cause",
+          "the actual root cause is geo-lookup API latency cascading into connection pool exhaustion, not DNS infrastructure failure"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q14_paraphrase",
+      "answer_text": "The sequence of events leading to the checkout outage began with a gradual degradation in system performance across key services, particularly /checkout and /fraud_check. On 2024-01-28, /checkout had a p99 latency of 650ms and an error rate of 0.82% [cascading_failure_01_ep_014]. By 2024-01-29, latency increased to 620ms p99 with 0.71% errors [cascading_failure_01_ep_015]. \n\nPerformance continued to decline: on 2024-01-30, /checkout p99 latency rose to 780ms with error rates jumping to 1.56% [cascading_failure_01_ep_016]. By 2024-02-01, p99 latency reached 860ms and errors climbed to 2.13% [cascading_failure_01_ep_018]. On 2024-02-02, latency hit 900ms p99 with 2.3% errors [cascading_failure_01_ep_019], and by 2024-02-04, p99 latency peaked at 980ms with 2.69% errors [cascading_failure_01_ep_021].\n\nThis steady increase in latency and error rates in /checkout and correlated services like /fraud_check and /geo_lookup indicates a progressive system overload, likely due to resource exhaustion or inefficient scaling, which ultimately led to the checkout outage.",
+      "turns": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_c9e226f1ad87468ea0dff9cd",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 632
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_c9e226f1ad87468ea0dff9cd",
+              "content": "{\"search_modes\": [\"semantic\", \"graph\"], \"filter_fields\": [], \"max_results_per_search\": 10, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple full episodes by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times \\u2014 it uses only one tool call instead of one per document. After memory_search, pass all ref_ids you want to read to this tool.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_5538c028a43d42e297c8dd41",
+              "name": "memory_search",
+              "arguments": {
+                "query": "checkout outage incident timeline",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 831
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_5538c028a43d42e297c8dd41",
+              "content": "[{\"ref_id\": \"cascading_failure_01_ep_015\", \"text\": \"[cascading_failure_01_ep_015] 2024-01-29T10:00:00: ## 2024-01-29 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 138500 | p50: 135ms p95: 350ms p99: 620ms | err: 0.71% (980 errors) | success: 99.29%\\n- /fraud_check: REQUESTS 138100 | p50: 90ms p95: 250ms p99: 410ms | err: 0.17% (240 errors) | success: 99.83%\\n- /geo_lookup: REQUESTS 135800 | p50: 135ms p95: 320ms p99: 410ms | err: 0.13% (170 errors) | success: 99.87%\\n- /auth: REQUESTS 180500 | p50: 33ms p95: 88ms p99: 148m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_018\", \"text\": \"[cascading_failure_01_ep_018] 2024-02-01T10:00:00: ## 2024-02-01 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 145200 | p50: 175ms p95: 470ms p99: 860ms | err: 2.13% (3100 errors) | success: 97.87%\\n- /fraud_check: REQUESTS 144700 | p50: 125ms p95: 350ms p99: 600ms | err: 0.45% (650 errors) | success: 99.55%\\n- /geo_lookup: REQUESTS 142400 | p50: 230ms p95: 500ms p99: 650ms | err: 0.22% (320 errors) | success: 99.78%\\n- /auth: REQUESTS 189200 | p50: 40ms p95: 104ms p99: 1\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_021\", \"text\": \"[cascading_failure_01_ep_021] 2024-02-04T10:00:00: ## 2024-02-04 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 152400 | p50: 195ms p95: 530ms p99: 980ms | err: 2.69% (4100 errors) | success: 97.31%\\n- /fraud_check: REQUESTS 151900 | p50: 155ms p95: 410ms p99: 720ms | err: 0.62% (940 errors) | success: 99.38%\\n- /geo_lookup: REQUESTS 149100 | p50: 290ms p95: 590ms p99: 740ms | err: 0.29% (430 errors) | success: 99.71%\\n- /auth: REQUESTS 198000 | p50: 45ms p95: 116ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_014\", \"text\": \"[cascading_failure_01_ep_014] 2024-01-28T10:00:00: ## 2024-01-28 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 136900 | p50: 140ms p95: 360ms p99: 650ms | err: 0.82% (1120 errors) | success: 99.18%\\n- /fraud_check: REQUESTS 136500 | p50: 92ms p95: 255ms p99: 420ms | err: 0.19% (260 errors) | success: 99.81%\\n- /geo_lookup: REQUESTS 134100 | p50: 130ms p95: 310ms p99: 400ms | err: 0.12% (160 errors) | success: 99.88%\\n- /auth: REQUESTS 178200 | p50: 34ms p95: 90ms p99: 150\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_019\", \"text\": \"[cascading_failure_01_ep_019] 2024-02-02T10:00:00: ## 2024-02-02 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 147600 | p50: 185ms p95: 490ms p99: 900ms | err: 2.3% (3400 errors) | success: 97.7%\\n- /fraud_check: REQUESTS 147100 | p50: 135ms p95: 370ms p99: 640ms | err: 0.49% (720 errors) | success: 99.51%\\n- /geo_lookup: REQUESTS 144500 | p50: 250ms p95: 520ms p99: 680ms | err: 0.25% (360 errors) | success: 99.75%\\n- /auth: REQUESTS 192000 | p50: 42ms p95: 108ms p99: 195\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_016\", \"text\": \"[cascading_failure_01_ep_016] 2024-01-30T10:00:00: ## 2024-01-30 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 140800 | p50: 155ms p95: 410ms p99: 780ms | err: 1.56% (2200 errors) | success: 98.44%\\n- /fraud_check: REQUESTS 140300 | p50: 105ms p95: 310ms p99: 520ms | err: 0.3% (420 errors) | success: 99.7%\\n- /geo_lookup: REQUESTS 137900 | p50: 190ms p95: 420ms p99: 600ms | err: 0.19% (260 errors) | success: 99.81%\\n- /auth: REQUESTS 183200 | p50: 36ms p95: 96ms p99: 165m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_005\", \"text\": \"[cascading_failure_01_ep_005] 2024-01-19T10:00:00: ## 2024-01-19 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 126450 req | p50: 95ms p95: 218ms p99: 336ms | err: 0.13% (165 errors) | success: 99.87%\\n- /fraud_check: 126120 req | p50: 69ms p95: 166ms p99: 252ms | err: 0.08% (107 errors) | success: 99.92%\\n- /geo_lookup: 124500 req | p50: 56ms p95: 132ms p99: 184ms | err: 0.05% (63 errors) | success: 99.95%\\n- /auth: 164200 req | p50: 28ms p95: 70ms p99: 112ms | err: 0.05% (79 erro\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_013\", \"text\": \"[cascading_failure_01_ep_013] 2024-01-27T10:00:00: ## 2024-01-27 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 133600 | p50: 112ms p95: 275ms p99: 450ms | err: 0.16% (210 errors) | success: 99.84%\\n- /fraud_check: REQUESTS 133150 | p50: 82ms p95: 220ms p99: 360ms | err: 0.13% (170 errors) | success: 99.87%\\n- /geo_lookup: REQUESTS 130900 | p50: 98ms p95: 260ms p99: 330ms | err: 0.09% (118 errors) | success: 99.91%\\n- /auth: REQUESTS 174500 | p50: 32ms p95: 82ms p99: 132ms\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_012\", \"text\": \"[cascading_failure_01_ep_012] 2024-01-26T10:00:00: ## 2024-01-26 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 127900 | p50: 108ms p95: 265ms p99: 430ms | err: 0.15% (190 errors) | success: 99.85%\\n- /fraud_check: REQUESTS 127500 | p50: 79ms p95: 210ms p99: 340ms | err: 0.12% (150 errors) | success: 99.88%\\n- /geo_lookup: REQUESTS 125400 | p50: 90ms p95: 240ms p99: 300ms | err: 0.08% (105 errors) | success: 99.92%\\n- /auth: REQUESTS 167300 | p50: 31ms p95: 80ms p99: 128ms\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_002\", \"text\": \"[cascading_failure_01_ep_002] 2024-01-16T10:00:00: ## 2024-01-16 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 121880 | p50: 94ms p95: 215ms p99: 330ms | err: 0.13% (156 errors) | success: 99.87%\\n- /fraud_check: REQUESTS 121600 | p50: 69ms p95: 165ms p99: 250ms | err: 0.08% (102 errors) | success: 99.92%\\n- /geo_lookup: REQUESTS 120050 | p50: 56ms p95: 132ms p99: 185ms | err: 0.05% (62 errors) | success: 99.95%\\n- /auth: REQUESTS 158900 | p50: 27ms p95: 68ms p99: 108ms |\", \"score\": 0.5, \"metadata\": {}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_2299dfafcd8c479a89a764db",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "cascading_failure_01_ep_015",
+                  "cascading_failure_01_ep_018",
+                  "cascading_failure_01_ep_021",
+                  "cascading_failure_01_ep_014",
+                  "cascading_failure_01_ep_019",
+                  "cascading_failure_01_ep_016"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 4281
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_2299dfafcd8c479a89a764db",
+              "content": "[Context budget exhausted \u2014 synthesize answer from evidence already retrieved]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "The sequence of events leading to the checkout outage began with a gradual degradation in system performance across key services, particularly /checkout and /fraud_check. On 2024-01-28, /checkout had a p99 latency of 650ms and an error rate of 0.82% [cascading_failure_01_ep_014]. By 2024-01-29, latency increased to 620ms p99 with 0.71% errors [cascading_failure_01_ep_015]. \n\nPerformance continued to decline: on 2024-01-30, /checkout p99 latency rose to 780ms with error rates jumping to 1.56% [cascading_failure_01_ep_016]. By 2024-02-01, p99 latency reached 860ms and errors climbed to 2.13% [cascading_failure_01_ep_018]. On 2024-02-02, latency hit 900ms p99 with 2.3% errors [cascading_failure_01_ep_019], and by 2024-02-04, p99 latency peaked at 980ms with 2.69% errors [cascading_failure_01_ep_021].\n\nThis steady increase in latency and error rates in /checkout and correlated services like /fraud_check and /geo_lookup indicates a progressive system overload, likely due to resource exhaustion or inefficient scaling, which ultimately led to the checkout outage.",
+          "tokens_used": 4676
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 10420,
+      "wall_time_ms": 13358.541641995544,
+      "budget_violations": [
+        "Cumulative result token limit exceeded: 5076 > 4096"
+      ],
+      "refs_cited": [
+        "cascading_failure_01_ep_014",
+        "cascading_failure_01_ep_015",
+        "cascading_failure_01_ep_016",
+        "cascading_failure_01_ep_018",
+        "cascading_failure_01_ep_019",
+        "cascading_failure_01_ep_021"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "cascading_failure_01_ep_014",
+      "cascading_failure_01_ep_015",
+      "cascading_failure_01_ep_016",
+      "cascading_failure_01_ep_018",
+      "cascading_failure_01_ep_019",
+      "cascading_failure_01_ep_021"
+    ],
+    "valid_ref_ids": [
+      "cascading_failure_01_ep_014",
+      "cascading_failure_01_ep_015",
+      "cascading_failure_01_ep_016",
+      "cascading_failure_01_ep_018",
+      "cascading_failure_01_ep_019",
+      "cascading_failure_01_ep_021"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "cf01_q16_negative",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 25,
+      "question_type": "negative",
+      "prompt": "Are there authentication or SSO failures contributing to the checkout issues?",
+      "ground_truth": {
+        "canonical_answer": "No. Authentication systems show normal operation with no anomalies. The checkout failures are caused by connection pool exhaustion from geo-lookup API latency degradation.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_005",
+          "cascading_failure_01_ep_012"
+        ],
+        "key_facts": [
+          "user authentication completes successfully before reaching the failing checkout path, ruling out auth as a contributing factor",
+          "connection pool exhaustion",
+          "the checkout failure chain originates in the geo-lookup service layer, not in storage or persistence infrastructure",
+          "the actual root cause is geo-lookup API latency cascading into connection pool exhaustion, not DNS infrastructure failure"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q16_negative",
+      "answer_text": "Based on the available data, there is no direct evidence that authentication or SSO failures are contributing to checkout issues. The /auth endpoint consistently shows very low error rates (e.g., 0.05% on 2024-01-19 [ref_id: cascading_failure_01_ep_005], 0.05% on 2024-01-26 [ref_id: cascading_failure_01_ep_012], and 0.05% on 2024-01-24 [ref_id: cascading_failure_01_ep_010]), with high success rates and low latency. In contrast, /checkout errors increased significantly over time (from 0.13% to 2.69% [ref_id: cascading_failure_01_ep_021]), but this trend does not correlate with /auth performance. Therefore, authentication or SSO failures do not appear to be a primary cause of the checkout issues.",
+      "turns": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_1d514453cf6948119ed3cdda",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 635
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_1d514453cf6948119ed3cdda",
+              "content": "{\"search_modes\": [\"semantic\", \"graph\"], \"filter_fields\": [], \"max_results_per_search\": 10, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple full episodes by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times \\u2014 it uses only one tool call instead of one per document. After memory_search, pass all ref_ids you want to read to this tool.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_69b90b1215484115bae5b649",
+              "name": "memory_search",
+              "arguments": {
+                "query": "authentication or SSO failures related to checkout issues",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 839
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_69b90b1215484115bae5b649",
+              "content": "[{\"ref_id\": \"cascading_failure_01_ep_014\", \"text\": \"[cascading_failure_01_ep_014] 2024-01-28T10:00:00: ## 2024-01-28 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 136900 | p50: 140ms p95: 360ms p99: 650ms | err: 0.82% (1120 errors) | success: 99.18%\\n- /fraud_check: REQUESTS 136500 | p50: 92ms p95: 255ms p99: 420ms | err: 0.19% (260 errors) | success: 99.81%\\n- /geo_lookup: REQUESTS 134100 | p50: 130ms p95: 310ms p99: 400ms | err: 0.12% (160 errors) | success: 99.88%\\n- /auth: REQUESTS 178200 | p50: 34ms p95: 90ms p99: 150\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_015\", \"text\": \"[cascading_failure_01_ep_015] 2024-01-29T10:00:00: ## 2024-01-29 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 138500 | p50: 135ms p95: 350ms p99: 620ms | err: 0.71% (980 errors) | success: 99.29%\\n- /fraud_check: REQUESTS 138100 | p50: 90ms p95: 250ms p99: 410ms | err: 0.17% (240 errors) | success: 99.83%\\n- /geo_lookup: REQUESTS 135800 | p50: 135ms p95: 320ms p99: 410ms | err: 0.13% (170 errors) | success: 99.87%\\n- /auth: REQUESTS 180500 | p50: 33ms p95: 88ms p99: 148m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_018\", \"text\": \"[cascading_failure_01_ep_018] 2024-02-01T10:00:00: ## 2024-02-01 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 145200 | p50: 175ms p95: 470ms p99: 860ms | err: 2.13% (3100 errors) | success: 97.87%\\n- /fraud_check: REQUESTS 144700 | p50: 125ms p95: 350ms p99: 600ms | err: 0.45% (650 errors) | success: 99.55%\\n- /geo_lookup: REQUESTS 142400 | p50: 230ms p95: 500ms p99: 650ms | err: 0.22% (320 errors) | success: 99.78%\\n- /auth: REQUESTS 189200 | p50: 40ms p95: 104ms p99: 1\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_021\", \"text\": \"[cascading_failure_01_ep_021] 2024-02-04T10:00:00: ## 2024-02-04 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 152400 | p50: 195ms p95: 530ms p99: 980ms | err: 2.69% (4100 errors) | success: 97.31%\\n- /fraud_check: REQUESTS 151900 | p50: 155ms p95: 410ms p99: 720ms | err: 0.62% (940 errors) | success: 99.38%\\n- /geo_lookup: REQUESTS 149100 | p50: 290ms p95: 590ms p99: 740ms | err: 0.29% (430 errors) | success: 99.71%\\n- /auth: REQUESTS 198000 | p50: 45ms p95: 116ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_016\", \"text\": \"[cascading_failure_01_ep_016] 2024-01-30T10:00:00: ## 2024-01-30 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 140800 | p50: 155ms p95: 410ms p99: 780ms | err: 1.56% (2200 errors) | success: 98.44%\\n- /fraud_check: REQUESTS 140300 | p50: 105ms p95: 310ms p99: 520ms | err: 0.3% (420 errors) | success: 99.7%\\n- /geo_lookup: REQUESTS 137900 | p50: 190ms p95: 420ms p99: 600ms | err: 0.19% (260 errors) | success: 99.81%\\n- /auth: REQUESTS 183200 | p50: 36ms p95: 96ms p99: 165m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_019\", \"text\": \"[cascading_failure_01_ep_019] 2024-02-02T10:00:00: ## 2024-02-02 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 147600 | p50: 185ms p95: 490ms p99: 900ms | err: 2.3% (3400 errors) | success: 97.7%\\n- /fraud_check: REQUESTS 147100 | p50: 135ms p95: 370ms p99: 640ms | err: 0.49% (720 errors) | success: 99.51%\\n- /geo_lookup: REQUESTS 144500 | p50: 250ms p95: 520ms p99: 680ms | err: 0.25% (360 errors) | success: 99.75%\\n- /auth: REQUESTS 192000 | p50: 42ms p95: 108ms p99: 195\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_005\", \"text\": \"[cascading_failure_01_ep_005] 2024-01-19T10:00:00: ## 2024-01-19 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 126450 req | p50: 95ms p95: 218ms p99: 336ms | err: 0.13% (165 errors) | success: 99.87%\\n- /fraud_check: 126120 req | p50: 69ms p95: 166ms p99: 252ms | err: 0.08% (107 errors) | success: 99.92%\\n- /geo_lookup: 124500 req | p50: 56ms p95: 132ms p99: 184ms | err: 0.05% (63 errors) | success: 99.95%\\n- /auth: 164200 req | p50: 28ms p95: 70ms p99: 112ms | err: 0.05% (79 erro\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_012\", \"text\": \"[cascading_failure_01_ep_012] 2024-01-26T10:00:00: ## 2024-01-26 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 127900 | p50: 108ms p95: 265ms p99: 430ms | err: 0.15% (190 errors) | success: 99.85%\\n- /fraud_check: REQUESTS 127500 | p50: 79ms p95: 210ms p99: 340ms | err: 0.12% (150 errors) | success: 99.88%\\n- /geo_lookup: REQUESTS 125400 | p50: 90ms p95: 240ms p99: 300ms | err: 0.08% (105 errors) | success: 99.92%\\n- /auth: REQUESTS 167300 | p50: 31ms p95: 80ms p99: 128ms\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_010\", \"text\": \"[cascading_failure_01_ep_010] 2024-01-24T10:00:00: ## 2024-01-24 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 125700 req | p50: 101ms p95: 245ms p99: 390ms | err: 0.14% (170 errors) | success: 99.86%\\n- /fraud_check: 125400 req | p50: 74ms p95: 190ms p99: 305ms | err: 0.1% (120 errors) | success: 99.9%\\n- /geo_lookup: 123500 req | p50: 78ms p95: 205ms p99: 260ms | err: 0.07% (85 errors) | success: 99.93%\\n- /auth: 164700 req | p50: 30ms p95: 76ms p99: 122ms | err: 0.05% (82 error\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_007\", \"text\": \"[cascading_failure_01_ep_007] 2024-01-21T10:00:00: ## 2024-01-21 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 128900 | p50: 95ms p95: 218ms p99: 338ms | err: 0.13% (166 errors) | success: 99.87%\\n- /fraud_check: REQUESTS 128600 | p50: 69ms p95: 167ms p99: 254ms | err: 0.08% (108 errors) | success: 99.92%\\n- /geo_lookup: REQUESTS 126900 | p50: 56ms p95: 133ms p99: 185ms | err: 0.05% (64 errors) | success: 99.95%\\n- /auth: REQUESTS 168100 | p50: 28ms p95: 70ms p99: 113ms |\", \"score\": 0.5, \"metadata\": {}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_9775821fbfe148fbada9ffd5",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "cascading_failure_01_ep_014",
+                  "cascading_failure_01_ep_015",
+                  "cascading_failure_01_ep_018",
+                  "cascading_failure_01_ep_021",
+                  "cascading_failure_01_ep_016",
+                  "cascading_failure_01_ep_019",
+                  "cascading_failure_01_ep_005",
+                  "cascading_failure_01_ep_012",
+                  "cascading_failure_01_ep_010",
+                  "cascading_failure_01_ep_007"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 4351
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_9775821fbfe148fbada9ffd5",
+              "content": "[Context budget exhausted \u2014 synthesize answer from evidence already retrieved]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "Based on the available data, there is no direct evidence that authentication or SSO failures are contributing to checkout issues. The /auth endpoint consistently shows very low error rates (e.g., 0.05% on 2024-01-19 [ref_id: cascading_failure_01_ep_005], 0.05% on 2024-01-26 [ref_id: cascading_failure_01_ep_012], and 0.05% on 2024-01-24 [ref_id: cascading_failure_01_ep_010]), with high success rates and low latency. In contrast, /checkout errors increased significantly over time (from 0.13% to 2.69% [ref_id: cascading_failure_01_ep_021]), but this trend does not correlate with /auth performance. Therefore, authentication or SSO failures do not appear to be a primary cause of the checkout issues.",
+          "tokens_used": 4597
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 10422,
+      "wall_time_ms": 11620.29401899781,
+      "budget_violations": [
+        "Cumulative result token limit exceeded: 7166 > 4096"
+      ],
+      "refs_cited": []
+    },
+    "retrieved_ref_ids": [],
+    "valid_ref_ids": []
+  },
+  {
+    "question": {
+      "question_id": "cf01_q20_distractor",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 25,
+      "question_type": "distractor_resistance",
+      "prompt": "Is storage rebalancing or compaction activity correlating with the service latency spikes?",
+      "ground_truth": {
+        "canonical_answer": "No. Storage operations are running normally. The latency spikes are caused by the geo-lookup API degradation and resulting connection pool exhaustion, not storage-related activity.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_004",
+          "cascading_failure_01_ep_018"
+        ],
+        "key_facts": [
+          "the checkout failure chain originates in the geo-lookup service layer, not in storage or persistence infrastructure",
+          "geo-lookup API latency increasing",
+          "connection pool exhaustion"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q20_distractor",
+      "answer_text": "The retrieved documents summarize daily operations with endpoint performance metrics such as latency (p50, p95, p99), error rates, and request volumes across several dates [ref_id: cascading_failure_01_ep_024, ref_id: cascading_failure_01_ep_021, ref_id: cascading_failure_01_ep_019, etc.]. These show increasing latency trends over time, particularly in endpoints like `/checkout` and `/geo_lookup`, with p99 latencies rising from 320ms on 2024-01-15 [ref_id: cascading_failure_01_ep_001] to 1180ms on 2024-02-07 [ref_id: cascading_failure_01_ep_024].\n\nHowever, none of the retrieved documents explicitly mention storage rebalancing or compaction activity, nor do they correlate such background processes with the observed latency spikes. Therefore, based on the available information, there is no direct evidence linking storage rebalancing or compaction to the service latency spikes [ref_id: cascading_failure_01_ep_024, ref_id: cascading_failure_01_ep_021, ref_id: cascading_failure_01_ep_019, etc.].\n\nTo determine such a correlation, additional logs or monitoring data detailing storage system activities during the periods of high latency would be required.",
+      "turns": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_e9ff65ce1f5a42e58e6a37d0",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 639
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_e9ff65ce1f5a42e58e6a37d0",
+              "content": "{\"search_modes\": [\"semantic\", \"graph\"], \"filter_fields\": [], \"max_results_per_search\": 10, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple full episodes by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times \\u2014 it uses only one tool call instead of one per document. After memory_search, pass all ref_ids you want to read to this tool.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_d0305da155da47febb9dd85f",
+              "name": "memory_search",
+              "arguments": {
+                "query": "storage rebalancing compaction activity correlation with service latency spikes",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 846
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_d0305da155da47febb9dd85f",
+              "content": "[{\"ref_id\": \"cascading_failure_01_ep_024\", \"text\": \"[cascading_failure_01_ep_024] 2024-02-07T10:00:00: ## 2024-02-07 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 160200 | p50: 230ms p95: 620ms p99: 1180ms | err: 3.87% (6200 errors) | success: 96.13%\\n- /fraud_check: REQUESTS 159600 | p50: 205ms p95: 540ms p99: 920ms | err: 1.1% (1750 errors) | success: 98.9%\\n- /geo_lookup: REQUESTS 155100 | p50: 380ms p95: 740ms p99: 870ms | err: 0.49% (760 errors) | success: 99.51%\\n- /auth: REQUESTS 207900 | p50: 52ms p95: 135ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_021\", \"text\": \"[cascading_failure_01_ep_021] 2024-02-04T10:00:00: ## 2024-02-04 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 152400 | p50: 195ms p95: 530ms p99: 980ms | err: 2.69% (4100 errors) | success: 97.31%\\n- /fraud_check: REQUESTS 151900 | p50: 155ms p95: 410ms p99: 720ms | err: 0.62% (940 errors) | success: 99.38%\\n- /geo_lookup: REQUESTS 149100 | p50: 290ms p95: 590ms p99: 740ms | err: 0.29% (430 errors) | success: 99.71%\\n- /auth: REQUESTS 198000 | p50: 45ms p95: 116ms p99: 2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_019\", \"text\": \"[cascading_failure_01_ep_019] 2024-02-02T10:00:00: ## 2024-02-02 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 147600 | p50: 185ms p95: 490ms p99: 900ms | err: 2.3% (3400 errors) | success: 97.7%\\n- /fraud_check: REQUESTS 147100 | p50: 135ms p95: 370ms p99: 640ms | err: 0.49% (720 errors) | success: 99.51%\\n- /geo_lookup: REQUESTS 144500 | p50: 250ms p95: 520ms p99: 680ms | err: 0.25% (360 errors) | success: 99.75%\\n- /auth: REQUESTS 192000 | p50: 42ms p95: 108ms p99: 195\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_012\", \"text\": \"[cascading_failure_01_ep_012] 2024-01-26T10:00:00: ## 2024-01-26 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 127900 | p50: 108ms p95: 265ms p99: 430ms | err: 0.15% (190 errors) | success: 99.85%\\n- /fraud_check: REQUESTS 127500 | p50: 79ms p95: 210ms p99: 340ms | err: 0.12% (150 errors) | success: 99.88%\\n- /geo_lookup: REQUESTS 125400 | p50: 90ms p95: 240ms p99: 300ms | err: 0.08% (105 errors) | success: 99.92%\\n- /auth: REQUESTS 167300 | p50: 31ms p95: 80ms p99: 128ms\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_014\", \"text\": \"[cascading_failure_01_ep_014] 2024-01-28T10:00:00: ## 2024-01-28 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 136900 | p50: 140ms p95: 360ms p99: 650ms | err: 0.82% (1120 errors) | success: 99.18%\\n- /fraud_check: REQUESTS 136500 | p50: 92ms p95: 255ms p99: 420ms | err: 0.19% (260 errors) | success: 99.81%\\n- /geo_lookup: REQUESTS 134100 | p50: 130ms p95: 310ms p99: 400ms | err: 0.12% (160 errors) | success: 99.88%\\n- /auth: REQUESTS 178200 | p50: 34ms p95: 90ms p99: 150\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_020\", \"text\": \"[cascading_failure_01_ep_020] 2024-02-03T10:00:00: ## 2024-02-03 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: 150100 req | p50: 190ms p95: 510ms p99: 940ms | err: 2.47% (3700 errors) | success: 97.53%\\n- /fraud_check: 149600 req | p50: 145ms p95: 390ms p99: 680ms | err: 0.55% (820 errors) | success: 99.45%\\n- /geo_lookup: 147000 req | p50: 270ms p95: 560ms p99: 710ms | err: 0.27% (390 errors) | success: 99.73%\\n- /auth: 195300 req | p50: 44ms p95: 112ms p99: 205ms | err: 0.13% (2\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_001\", \"text\": \"[cascading_failure_01_ep_001] 2024-01-15T10:00:00: ## 2024-01-15 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 118240 | p50: 92ms p95: 210ms p99: 320ms | err: 0.12% (142 errors) | success: 99.88%\\n- /fraud_check: REQUESTS 117980 | p50: 68ms p95: 160ms p99: 240ms | err: 0.08% (96 errors) | success: 99.92%\\n- /geo_lookup: REQUESTS 116420 | p50: 55ms p95: 130ms p99: 180ms | err: 0.05% (58 errors) | success: 99.95%\\n- /auth: REQUESTS 152300 | p50: 28ms p95: 70ms p99: 110ms | \", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_006\", \"text\": \"[cascading_failure_01_ep_006] 2024-01-20T10:00:00: ## 2024-01-20 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 131200 | p50: 96ms p95: 220ms p99: 340ms | err: 0.13% (170 errors) | success: 99.87%\\n- /fraud_check: REQUESTS 130850 | p50: 69ms p95: 168ms p99: 255ms | err: 0.08% (110 errors) | success: 99.92%\\n- /geo_lookup: REQUESTS 129100 | p50: 56ms p95: 134ms p99: 186ms | err: 0.05% (65 errors) | success: 99.95%\\n- /auth: REQUESTS 170900 | p50: 29ms p95: 71ms p99: 114ms |\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_016\", \"text\": \"[cascading_failure_01_ep_016] 2024-01-30T10:00:00: ## 2024-01-30 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 140800 | p50: 155ms p95: 410ms p99: 780ms | err: 1.56% (2200 errors) | success: 98.44%\\n- /fraud_check: REQUESTS 140300 | p50: 105ms p95: 310ms p99: 520ms | err: 0.3% (420 errors) | success: 99.7%\\n- /geo_lookup: REQUESTS 137900 | p50: 190ms p95: 420ms p99: 600ms | err: 0.19% (260 errors) | success: 99.81%\\n- /auth: REQUESTS 183200 | p50: 36ms p95: 96ms p99: 165m\", \"score\": 0.5, \"metadata\": {}}, {\"ref_id\": \"cascading_failure_01_ep_015\", \"text\": \"[cascading_failure_01_ep_015] 2024-01-29T10:00:00: ## 2024-01-29 Daily Operations Summary\\n\\n### Endpoint Performance\\n- /checkout: REQUESTS 138500 | p50: 135ms p95: 350ms p99: 620ms | err: 0.71% (980 errors) | success: 99.29%\\n- /fraud_check: REQUESTS 138100 | p50: 90ms p95: 250ms p99: 410ms | err: 0.17% (240 errors) | success: 99.83%\\n- /geo_lookup: REQUESTS 135800 | p50: 135ms p95: 320ms p99: 410ms | err: 0.13% (170 errors) | success: 99.87%\\n- /auth: REQUESTS 180500 | p50: 33ms p95: 88ms p99: 148m\", \"score\": 0.5, \"metadata\": {}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_17490155e39d4b449df32cfd",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "cascading_failure_01_ep_024",
+                  "cascading_failure_01_ep_021",
+                  "cascading_failure_01_ep_019",
+                  "cascading_failure_01_ep_012",
+                  "cascading_failure_01_ep_014",
+                  "cascading_failure_01_ep_020",
+                  "cascading_failure_01_ep_001",
+                  "cascading_failure_01_ep_006",
+                  "cascading_failure_01_ep_016",
+                  "cascading_failure_01_ep_015"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 4354
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_17490155e39d4b449df32cfd",
+              "content": "[Context budget exhausted \u2014 synthesize answer from evidence already retrieved]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "The retrieved documents summarize daily operations with endpoint performance metrics such as latency (p50, p95, p99), error rates, and request volumes across several dates [ref_id: cascading_failure_01_ep_024, ref_id: cascading_failure_01_ep_021, ref_id: cascading_failure_01_ep_019, etc.]. These show increasing latency trends over time, particularly in endpoints like `/checkout` and `/geo_lookup`, with p99 latencies rising from 320ms on 2024-01-15 [ref_id: cascading_failure_01_ep_001] to 1180ms on 2024-02-07 [ref_id: cascading_failure_01_ep_024].\n\nHowever, none of the retrieved documents explicitly mention storage rebalancing or compaction activity, nor do they correlate such background processes with the observed latency spikes. Therefore, based on the available information, there is no direct evidence linking storage rebalancing or compaction to the service latency spikes [ref_id: cascading_failure_01_ep_024, ref_id: cascading_failure_01_ep_021, ref_id: cascading_failure_01_ep_019, etc.].\n\nTo determine such a correlation, additional logs or monitoring data detailing storage system activities during the periods of high latency would be required.",
+          "tokens_used": 4691
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 10530,
+      "wall_time_ms": 13101.200478995452,
+      "budget_violations": [
+        "Cumulative result token limit exceeded: 7218 > 4096"
+      ],
+      "refs_cited": []
+    },
+    "retrieved_ref_ids": [],
+    "valid_ref_ids": []
+  }
+]

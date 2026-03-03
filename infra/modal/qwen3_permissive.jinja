@@ -1,0 +1,178 @@
+{#- Qwen3.5 chat template — permissive system-message ordering + Qwen3-Coder tool support.
+
+    Collects ALL system messages from any position and prepends them as a single
+    block before the remaining conversation turns.  Avoids the
+    "System message must be at the beginning" error from cognee/litellm.
+
+    Tool definitions rendered in Qwen3-Coder XML format so vLLM's qwen3_coder
+    tool-call parser can detect structured <function=...> blocks.
+-#}
+
+{%- set ns = namespace(enable_thinking=false) -%}
+{%- if enable_thinking is defined -%}
+  {%- set ns.enable_thinking = enable_thinking -%}
+{%- endif -%}
+
+{#- Macro: render JSON schema keys not in handled_keys as XML elements -#}
+{%- macro render_extra_keys(obj, handled_keys) -%}
+  {%- if obj is mapping -%}
+    {%- for key in obj -%}
+      {%- if key not in handled_keys -%}
+        {%- set value = obj[key] -%}
+        {{- '\n<' ~ key ~ '>' ~ (value | tojson if value is mapping or (value is iterable and value is not string) else value) ~ '</' ~ key ~ '>' }}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endmacro -%}
+
+{#- Check for system messages -#}
+{%- set ns.has_system = false -%}
+{%- for msg in messages if msg.role == 'system' -%}
+  {%- set ns.has_system = true -%}
+{%- endfor -%}
+
+{#- Check for tools -#}
+{%- set ns.has_tools = false -%}
+{%- if tools is defined and tools is iterable and tools | length > 0 -%}
+  {%- set ns.has_tools = true -%}
+{%- endif -%}
+
+{#- === SYSTEM BLOCK (combined system messages + tool definitions) === -#}
+{%- if ns.has_system or ns.has_tools -%}
+<|im_start|>system
+{%- if ns.has_system %}
+{%- for msg in messages if msg.role == 'system' %}
+{% if not loop.first %}
+
+{% endif %}{{ msg.content }}
+{%- endfor %}
+{%- endif %}
+{%- if ns.has_tools %}
+
+# Tools
+
+You have access to the following functions:
+
+<tools>
+{%- for tool in tools %}
+{%- if tool.function is defined %}
+{%- set tool = tool.function %}
+{%- endif %}
+<function>
+<name>{{ tool.name }}</name>
+{%- if tool.description is defined %}
+<description>{{ tool.description | trim }}</description>
+{%- endif %}
+<parameters>
+{%- if tool.parameters is defined and tool.parameters is mapping and tool.parameters.properties is defined and tool.parameters.properties is mapping %}
+{%- for param_name in tool.parameters.properties %}
+{%- set param_fields = tool.parameters.properties[param_name] %}
+<parameter>
+<name>{{ param_name }}</name>
+{%- if param_fields.type is defined %}
+<type>{{ param_fields.type }}</type>
+{%- endif %}
+{%- if param_fields.description is defined %}
+<description>{{ param_fields.description | trim }}</description>
+{%- endif %}
+{{- render_extra_keys(param_fields, ['type', 'description', 'name']) }}
+</parameter>
+{%- endfor %}
+{%- endif %}
+{{- render_extra_keys(tool.parameters, ['type', 'properties']) }}
+</parameters>
+{{- render_extra_keys(tool, ['type', 'name', 'description', 'parameters']) }}
+</function>
+{%- endfor %}
+</tools>
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+</tool_call>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags
+- Required parameters MUST be specified
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after
+- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
+</IMPORTANT>
+{%- endif %}
+<|im_end|>
+{% endif -%}
+
+{#- === NON-SYSTEM MESSAGES === -#}
+{%- for message in messages if message.role != 'system' -%}
+
+{%- if message.role == 'user' %}
+<|im_start|>user
+{{ message.content }}<|im_end|>
+{% elif message.role == 'assistant' %}
+<|im_start|>assistant
+{%- if ns.enable_thinking %}
+{%- if message.reasoning_content is defined and message.reasoning_content %}
+<think>
+{{ message.reasoning_content }}
+</think>
+{%- else %}
+<think>
+</think>
+{%- endif %}
+{%- endif %}
+{%- if message.content is defined and message.content %}
+{{ message.content }}
+{%- endif %}
+{%- if message.tool_calls is defined and message.tool_calls %}
+{%- for tool_call in message.tool_calls %}
+{%- if tool_call.function is defined %}
+{%- set tool_call = tool_call.function %}
+{%- endif %}
+<tool_call>
+<function={{ tool_call.name }}>
+{%- if tool_call.arguments is defined and tool_call.arguments is mapping %}
+{%- for args_name in tool_call.arguments %}
+{%- set args_value = tool_call.arguments[args_name] %}
+<parameter={{ args_name }}>
+{{ args_value | tojson if args_value is mapping or (args_value is iterable and args_value is not string) else args_value }}
+</parameter>
+{%- endfor %}
+{%- endif %}
+</function>
+</tool_call>
+{%- endfor %}
+{%- endif %}
+<|im_end|>
+{% elif message.role == 'tool' %}
+{%- if not loop.previtem is defined or loop.previtem.role != 'tool' %}
+<|im_start|>user
+{% endif -%}
+<tool_response>
+{{ message.content }}
+</tool_response>
+{%- if loop.last or loop.nextitem.role != 'tool' %}
+
+<|im_end|>
+{% endif -%}
+{%- endif -%}
+
+{%- endfor -%}
+
+{#- === GENERATION PROMPT === -#}
+{%- if add_generation_prompt %}
+<|im_start|>assistant
+{%- if ns.enable_thinking %}
+<think>
+
+{%- endif -%}
+{%- endif -%}

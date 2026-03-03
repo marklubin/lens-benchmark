@@ -1,0 +1,126 @@
+[
+  {
+    "question": {
+      "question_id": "cf01_q04_action",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 30,
+      "question_type": "action_recommendation",
+      "prompt": "What actions should the team take to prevent this from recurring?",
+      "ground_truth": {
+        "canonical_answer": "Separate connection pools for fraud checks and checkout. Add circuit breaker on geo-lookup calls. Monitor third-party API latency with alerting.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_018",
+          "cascading_failure_01_ep_024",
+          "cascading_failure_01_ep_027"
+        ],
+        "key_facts": [
+          "connection pool exhaustion",
+          "geo-lookup API latency increasing",
+          "geo-lookup latency degraded progressively over multiple reporting periods with p99 values increasing from baseline through each successive day rather than appearing as a single sudden spike",
+          "the actual root cause is geo-lookup API latency cascading into connection pool exhaustion, not DNS infrastructure failure",
+          "the checkout failure chain originates in the geo-lookup service layer, not in storage or persistence infrastructure",
+          "user authentication completes successfully before reaching the failing checkout path, ruling out auth as a contributing factor"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q04_action",
+      "answer_text": "To prevent this incident from recurring, the team should take the following actions:\n\n1. **Implement a more resilient retry strategy with jitter and circuit breakers** for services calling the third-party geo_lookup service. The overwhelming retry load from service-B (fraud_check) significantly contributed to the cascade [ref_id: compaction_summary]. Reducing max retries and enabling jitter helped, but a circuit breaker could have isolated the failure earlier.\n\n2. **Establish upstream dependency monitoring and failover mechanisms**. Since the root cause was high latency in a third-party service, the team should monitor upstream dependencies more closely and have automated or rapid manual failover procedures to alternate endpoints, as the DNS switch to an alternate host ultimately helped stabilize the system [ref_id: compaction_summary].\n\n3. **Introduce or enhance caching for external service responses**. The deployment of service-B v2.7.7 with geo response caching and an increased cache size (from 50k to 120k entries) reduced load on the failing service [ref_id: compaction_summary]. Making this a standard practice for critical external calls can mitigate future upstream issues.\n\n4. **Enforce feature flags for non-critical external calls**. The 'skip-geo-on-timeout' feature flag, when rolled out to 95% of traffic, reduced system load and contributed to recovery [ref_id: compaction_summary]. Such flags should be standard for features that depend on potentially unstable external services.\n\n5. **Conduct a post-incident review to formalize lessons learned**. A review was scheduled [ref_id: compaction_summary], and its outcomes should include updated runbooks, alerting thresholds, and architectural improvements to prevent similar cascading failures.\n\n6. **Right-size connection pools and set in-flight request limits proactively**. While increasing the third_party_geo pool size and capping /checkout in-flight requests were reactive measures, these limits should be reviewed and set based on expected load and failure modes during normal operations [ref_id: compaction_summary].",
+      "turns": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_dafedbcc86ef4cd686362c6c",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 641
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_dafedbcc86ef4cd686362c6c",
+              "content": "{\"search_modes\": [\"compaction\"], \"filter_fields\": [], \"max_results_per_search\": 1, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple documents by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times. Valid ref_ids: 'compaction_summary' (the full summary), or original episode IDs cited in the summary (e.g. 'scope_01_ep_005').\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_682b0c870a9b45d99a25fcd6",
+              "name": "memory_search",
+              "arguments": {
+                "query": "prevent recurrence"
+              }
+            }
+          ],
+          "tokens_used": 832
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_682b0c870a9b45d99a25fcd6",
+              "content": "[{\"ref_id\": \"compaction_summary\", \"text\": \"**Summary of Cascading Failure Incident (2024-01-15 to 2024-02-13)**\\n\\nThis summary compacts 30 daily operations episodes into a coherent timeline of performance degradation, infrastructure strain, and mitigation efforts culminating in partial recovery. The incident originated from increasing upstream latency in the third-party geo_lookup service, which cascaded into connection pool exhaustion, elevated error rates, and widespread latency across core endpoints.\\n\\n**Initial Baseline and Early Warni\", \"score\": 1.0, \"metadata\": {\"type\": \"compaction_summary\", \"cited_episodes\": 35}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_6e07cec5d8e94e609c7b3ab4",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "compaction_summary"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 1020
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "call_6e07cec5d8e94e609c7b3ab4",
+              "content": "{\"documents\": [{\"ref_id\": \"compaction_summary\", \"text\": \"**Summary of Cascading Failure Incident (2024-01-15 to 2024-02-13)**\\n\\nThis summary compacts 30 daily operations episodes into a coherent timeline of performance degradation, infrastructure strain, and mitigation efforts culminating in partial recovery. The incident originated from increasing upstream latency in the third-party geo_lookup service, which cascaded into connection pool exhaustion, elevated error rates, and widespread latency across core endpoints.\\n\\n**Initial Baseline and Early Warnings (2024-01-15 to 2024-01-24)**\\nSystem performance was stable through mid-January. Key endpoints showed consistent p99 latencies: /checkout ~320ms [cascading_failure_01_ep_001], /geo_lookup ~180ms [cascading_failure_01_ep_001]. The metrics-db-01 disk usage rose steadily from 78% to 80% [cascading_failure_01_ep_001 to cascading_failure_01_ep_006], triggering recurring warnings. On 2024-01-23, the first upstream latency alert appeared: geo_lookup_p99_ms=250ms [cascading_failure_01_ep_009]. By 2024-01-24, connection pool wait times increased: third_party_geo avg_wait=10ms with 3 waiting requests [cascading_failure_01_ep_010], signaling initial resource contention.\\n\\n**Onset of Degradation (2024-01-25 to 2024-01-27)**\\nLatency and error rates began a steady climb. /geo_lookup p99 latency increased from 275ms [cascading_failure_01_ep_011] to 330ms [cascading_failure_01_ep_013]. The third_party_geo pool showed exhaustion events (exhaustion=1) and avg_wait rising to 22ms [cascading_failure_01_ep_013]. Concurrently, /checkout p99 latency rose from 405ms to 450ms and error rate from 0.14% to 0.16% [cascading_failure_01_ep_011 to cascading_failure_01_ep_013]. Primary DB pool wait times also increased, reaching avg_wait=9ms [cascading_failure_01_ep_013].\\n\\n**Critical Failure Phase (2024-01-28 to 2024-02-08)**\\nOn 2024-01-28, a critical failure erupted: /checkout error rate spiked to 0.82% [cascading_failure_01_ep_014], p99 latency jumped to 650ms, and primary connection pool exhaustion began (exhaustion=1, avg_wait=18ms). A deployment of service-C (checkout) v3.2.1 occurred that day, followed by a rollback on 2024-01-29 due to persistent errors (0.71%) [cascading_failure_01_ep_015]. Despite the rollback, degradation worsened. By 2024-01-30, /checkout error rate reached 1.56% [cascading_failure_01_ep_016], p99 latency hit 780ms, and primary pool exhaustion intensified (exhaustion=7, avg_wait=85ms). The third_party_geo pool was fully saturated (active=60, idle=0, waiting=55, avg_wait=120ms) [cascading_failure_01_ep_016].\\n\\nThe crisis deepened with service-B (fraud_check) becoming overwhelmed. Its retry count surged from 118 [cascading_failure_01_ep_010] to 310 (0.26% retry rate) by 2024-01-31 [cascading_failure_01_ep_017], and CPU usage climbed from 37% [cascading_failure_01_ep_010] to 88% [cascading_failure_01_ep_023]. /fraud_check p99 latency rose from 305ms [cascading_failure_01_ep_010] to 920ms [cascading_failure_01_ep_024]. To mitigate, the team reduced service-B's max retries from 5 to 2 and enabled jitter on 2024-02-07 [cascading_failure_01_ep_024].\\n\\nMultiple mitigations were attempted:\\n- Primary pool max_size increased from 200 to 260 on 2024-02-05 [cascading_failure_01_ep_022].\\n- third_party_geo pool max_size increased from 60 to 120 on 2024-02-09 [cascading_failure_01_ep_026].\\n- Feature flag 'skip-geo-on-timeout' was progressively rolled out, reaching 50% on 2024-02-08 [cascading_failure_01_ep_025].\\n- /checkout max in-flight requests were capped at 900 on 2024-02-08 [cascading_failure_01_ep_025].\\n- A new service-B version (v2.7.7) with geo response caching was deployed on 2024-02-10 [cascading_failure_01_ep_027], and cache size was increased from 50k to 120k entries on 2024-02-11 [cascading_failure_01_ep_028].\\n\\nDespite these efforts, metrics continued to deteriorate. By 2024-02-09, /checkout error rate peaked at 4.27% [cascading_failure_01_ep_026], p99 latency reached 1240ms, and gateway CPU usage hit 82% [cascading_failure_01_ep_026].\\n\\n**Recovery and Stabilization (2024-02-10 to 2024-02-13)**\\nA sustained recovery began after the deployment of service-B v2.7.7 and the progressive rollout of 'skip-geo-on-timeout' to 95% of traffic by 2024-02-12 [cascading_failure_01_ep_029]. The final key action was switching the geo vendor endpoint to an alternate host via DNS on 2024-02-13 [cascading_failure_01_ep_030]. This correlated with significant improvement: /checkout error rate dropped to 1.96% [cascading_failure_01_ep_030], p99 latency fell to 940ms, and connection pool wait times decreased (primary avg_wait=60ms, third_party_geo avg_wait=85ms). Gateway CPU usage also declined to 60-62% [cascading_failure_01_ep_030]. However, upstream geo latency remained high at p99=850ms [cascading_failure_01_ep_030], indicating the root cause was external. A post-incident review was scheduled for 2024-02-14 [cascading_failure_01_ep_030].\\n\\n**Conclusion**\\nThe incident was a cascading failure initiated by degraded performance in a third-party geo_lookup service. This caused connection pool exhaustion at the gateway, which propagated latency and errors to /checkout and overwhelmed the service-B (fraud) system due to retries. Mitigations focused on increasing capacity, reducing load via feature flags and caching, and finally rerouting traffic to a healthier vendor endpoint, leading to system stabilization.\", \"metadata\": {}}], \"count\": 1}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "To prevent this incident from recurring, the team should take the following actions:\n\n1. **Implement a more resilient retry strategy with jitter and circuit breakers** for services calling the third-party geo_lookup service. The overwhelming retry load from service-B (fraud_check) significantly contributed to the cascade [ref_id: compaction_summary]. Reducing max retries and enabling jitter helped, but a circuit breaker could have isolated the failure earlier.\n\n2. **Establish upstream dependency monitoring and failover mechanisms**. Since the root cause was high latency in a third-party service, the team should monitor upstream dependencies more closely and have automated or rapid manual failover procedures to alternate endpoints, as the DNS switch to an alternate host ultimately helped stabilize the system [ref_id: compaction_summary].\n\n3. **Introduce or enhance caching for external service responses**. The deployment of service-B v2.7.7 with geo response caching and an increased cache size (from 50k to 120k entries) reduced load on the failing service [ref_id: compaction_summary]. Making this a standard practice for critical external calls can mitigate future upstream issues.\n\n4. **Enforce feature flags for non-critical external calls**. The 'skip-geo-on-timeout' feature flag, when rolled out to 95% of traffic, reduced system load and contributed to recovery [ref_id: compaction_summary]. Such flags should be standard for features that depend on potentially unstable external services.\n\n5. **Conduct a post-incident review to formalize lessons learned**. A review was scheduled [ref_id: compaction_summary], and its outcomes should include updated runbooks, alerting thresholds, and architectural improvements to prevent similar cascading failures.\n\n6. **Right-size connection pools and set in-flight request limits proactively**. While increasing the third_party_geo pool size and capping /checkout in-flight requests were reactive measures, these limits should be reviewed and set based on expected load and failure modes during normal operations [ref_id: compaction_summary].",
+          "tokens_used": 3307
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 5800,
+      "wall_time_ms": 13660.737787999096,
+      "budget_violations": [],
+      "refs_cited": [
+        "compaction_summary"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "compaction_summary"
+    ],
+    "valid_ref_ids": [
+      "compaction_summary"
+    ]
+  }
+]

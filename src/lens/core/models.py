@@ -83,9 +83,10 @@ class AgentAnswer:
     wall_time_ms: float = 0.0
     budget_violations: list[str] = field(default_factory=list)
     refs_cited: list[str] = field(default_factory=list)
+    ref_episode_map: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "question_id": self.question_id,
             "answer_text": self.answer_text,
             "turns": self.turns,
@@ -95,6 +96,9 @@ class AgentAnswer:
             "budget_violations": self.budget_violations,
             "refs_cited": self.refs_cited,
         }
+        if self.ref_episode_map:
+            d["ref_episode_map"] = self.ref_episode_map
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> AgentAnswer:
@@ -107,6 +111,7 @@ class AgentAnswer:
             wall_time_ms=d.get("wall_time_ms", 0.0),
             budget_violations=d.get("budget_violations", []),
             refs_cited=d.get("refs_cited", []),
+            ref_episode_map=d.get("ref_episode_map", {}),
         )
 
 
@@ -118,14 +123,18 @@ class QuestionResult:
     answer: AgentAnswer
     retrieved_ref_ids: list[str] = field(default_factory=list)
     valid_ref_ids: list[str] = field(default_factory=list)  # subset that exist in vault
+    ref_episode_map: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "question": self.question.to_dict(),
             "answer": self.answer.to_dict(),
             "retrieved_ref_ids": self.retrieved_ref_ids,
             "valid_ref_ids": self.valid_ref_ids,
         }
+        if self.ref_episode_map:
+            d["ref_episode_map"] = self.ref_episode_map
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> QuestionResult:
@@ -134,6 +143,7 @@ class QuestionResult:
             answer=AgentAnswer.from_dict(d["answer"]),
             retrieved_ref_ids=d.get("retrieved_ref_ids", []),
             valid_ref_ids=d.get("valid_ref_ids", []),
+            ref_episode_map=d.get("ref_episode_map", {}),
         )
 
 

@@ -37,7 +37,7 @@ from threading import Lock
 # Constants
 # ---------------------------------------------------------------------------
 
-SERIAL_ADAPTERS = {"letta", "letta-sleepy"}
+SERIAL_ADAPTERS = {"letta", "letta-sleepy", "cognee"}
 DEFAULT_MANIFEST = "experiments/matrix.json"
 DEFAULT_STATE = "experiments/matrix_state.json"
 
@@ -75,36 +75,56 @@ def _update_state(state: dict, path: str, key: str, updates: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Secret injection
+# Environment loading
 # ---------------------------------------------------------------------------
 
-def _load_together_key() -> str:
-    """Load TOGETHER_API_KEY from .env file."""
-    env_path = Path(".env")
-    if not env_path.exists():
-        print("ERROR: .env file not found. Cannot load TOGETHER_API_KEY.", file=sys.stderr)
+def _load_env_key(name: str) -> str:
+    """Load a key from environment or .env file."""
+    key = os.environ.get(name, "")
+    if not key:
+        env_path = Path(".env")
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith(f"{name}="):
+                    key = line.split("=", 1)[1].strip("\"'")
+                    break
+    return key
+
+
+def _load_modal_config() -> dict[str, str]:
+    """Load Modal LLM and embedding URLs from environment / .env."""
+    llm_url = _load_env_key("MODAL_LLM_URL")
+    embed_url = _load_env_key("MODAL_EMBED_URL")
+    api_key = _load_env_key("MODAL_API_KEY")
+    llm_model = _load_env_key("MODAL_LLM_MODEL")
+
+    if not llm_url:
+        print("ERROR: MODAL_LLM_URL not set. Add it to .env or environment.", file=sys.stderr)
         sys.exit(1)
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if line.startswith("TOGETHER_API_KEY="):
-            val = line.split("=", 1)[1]
-            # Strip surrounding quotes
-            val = val.strip().strip("\"'")
-            if val:
-                return val
-    print("ERROR: TOGETHER_API_KEY not found in .env file.", file=sys.stderr)
-    sys.exit(1)
+    if not embed_url:
+        print("ERROR: MODAL_EMBED_URL not set. Add it to .env or environment.", file=sys.stderr)
+        sys.exit(1)
+
+    return {"llm_url": llm_url, "embed_url": embed_url, "api_key": api_key, "llm_model": llm_model}
 
 
-def _substitute_env(env_dict: dict, together_key: str) -> dict:
-    """Replace $TOGETHER_API_KEY placeholders with actual key."""
-    result = {}
-    for k, v in env_dict.items():
-        if isinstance(v, str):
-            result[k] = v.replace("$TOGETHER_API_KEY", together_key)
-        else:
-            result[k] = v
-    return result
+def _build_run_env(modal_config: dict[str, str], extra: dict[str, str] | None = None) -> dict:
+    """Build environment for a subprocess from Modal config."""
+    env = {**os.environ}
+    api_key = modal_config["api_key"] or "unused"
+
+    env["LENS_LLM_API_KEY"] = api_key
+    env["LENS_LLM_API_BASE"] = modal_config["llm_url"]
+    env["LENS_LLM_MODEL"] = modal_config.get("llm_model") or ""
+    env["OPENAI_API_KEY"] = api_key
+    env["OPENAI_BASE_URL"] = modal_config["llm_url"]
+    env["LENS_EMBED_BASE_URL"] = modal_config["embed_url"]
+    env["LENS_EMBED_API_KEY"] = api_key
+
+    if extra:
+        env.update(extra)
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -156,21 +176,23 @@ def _run_experiment(experiment: dict, env: dict) -> tuple[str | None, str]:
     return None, combined
 
 
-def _score_run(run_id: str, experiment: dict, together_key: str) -> tuple[float | None, str]:
+def _score_run(run_id: str, experiment: dict, modal_config: dict[str, str]) -> tuple[float | None, str]:
     """Run `uv run lens score --run output/<run_id> --judge-model <model>`.
 
     Returns (composite_score_or_None, combined_output).
     """
-    judge_model = experiment.get("judge_model", "Qwen/Qwen3-235B-A22B-Instruct-2507-tput")
-    judge_base_url = experiment.get("judge_base_url", "https://api.together.xyz/v1")
+    judge_model = experiment.get("judge_model", "Qwen/Qwen3.5-35B-A3B")
 
     run_dir = str(Path(experiment.get("output_dir", "output")) / run_id)
     cmd = ["uv", "run", "lens", "score", "--run", run_dir, "--judge-model", judge_model, "-v"]
 
+    api_key = modal_config["api_key"] or "unused"
     score_env = {
         **os.environ,
-        "OPENAI_API_KEY": together_key,
-        "OPENAI_BASE_URL": judge_base_url,
+        "OPENAI_API_KEY": api_key,
+        "OPENAI_BASE_URL": modal_config["llm_url"],
+        "LENS_JUDGE_API_KEY": api_key,
+        "LENS_JUDGE_API_BASE": modal_config["llm_url"],
     }
 
     proc = subprocess.run(
@@ -204,7 +226,7 @@ def _run_and_score(
     experiment: dict,
     state: dict,
     state_path: str,
-    together_key: str,
+    modal_config: dict[str, str],
 ) -> None:
     """Execute a single experiment: run -> score -> update state."""
     now = datetime.now(timezone.utc).isoformat()
@@ -219,7 +241,8 @@ def _run_and_score(
 
     try:
         # Build env
-        env = _substitute_env(experiment.get("env", {}), together_key)
+        extra = experiment.get("env", {})
+        env = _build_run_env(modal_config, extra if extra else None)
 
         # Run
         run_id, run_output = _run_experiment(experiment, env)
@@ -234,7 +257,7 @@ def _run_and_score(
         _print_status(state)
 
         # Score
-        score_val, score_output = _score_run(run_id, experiment, together_key)
+        score_val, score_output = _score_run(run_id, experiment, modal_config)
 
         if score_val is None:
             print(
@@ -323,6 +346,12 @@ def main() -> None:
     manifest = json.loads(manifest_path.read_text())
     experiments: dict[str, dict] = manifest["experiments"]
 
+    # Propagate top-level judge_model to experiments that don't specify their own
+    default_judge = manifest.get("judge_model")
+    if default_judge:
+        for exp in experiments.values():
+            exp.setdefault("judge_model", default_judge)
+
     # Filter
     if args.filter_pattern:
         experiments = {
@@ -381,9 +410,10 @@ def main() -> None:
         print(f"\nTotal: {len(to_run)} experiments to run")
         return
 
-    # Load secret
-    together_key = _load_together_key()
-    print(f"Loaded TOGETHER_API_KEY ({len(together_key)} chars)")
+    # Load Modal config
+    modal_config = _load_modal_config()
+    print(f"Using Modal LLM: {modal_config['llm_url']}")
+    print(f"Using Modal Embeddings: {modal_config['embed_url']}")
 
     print(f"\nStarting {len(to_run)} experiments: {len(serial_queue)} serial, {len(parallel_queue)} parallel")
     _print_status(state)
@@ -398,7 +428,7 @@ def main() -> None:
         executor = ThreadPoolExecutor(max_workers=args.max_parallel)
         for name, exp in sorted(parallel_queue.items()):
             future = executor.submit(
-                _run_and_score, name, exp, state, args.state, together_key
+                _run_and_score, name, exp, state, args.state, modal_config
             )
             parallel_futures[future] = name
 
@@ -406,7 +436,7 @@ def main() -> None:
     for name in sorted(serial_queue):
         exp = serial_queue[name]
         print(f"\n>>> Serial: {name}")
-        _run_and_score(name, exp, state, args.state, together_key)
+        _run_and_score(name, exp, state, args.state, modal_config)
 
     # Wait for parallel experiments
     if parallel_futures:

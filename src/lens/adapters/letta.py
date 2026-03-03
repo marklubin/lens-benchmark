@@ -9,16 +9,13 @@ Requires:
     Embedding proxy running locally (scripts/letta_embed_proxy.py)
 
 Setup:
-    podman run -d -p 8283:8283 --name letta \\
-        -e TOGETHER_API_KEY=<key> letta/letta:latest
+    podman run -d -p 8283:8283 --name letta letta/letta:latest
     uv run python scripts/letta_embed_proxy.py &
-    # Register together provider and configure together-oai embedding provider
-    # (see scripts/letta_setup.py or docs/letta_setup.md)
 
 Environment variables:
     LETTA_BASE_URL       Server URL (default: http://localhost:8283)
-    LETTA_LLM_MODEL      LLM model handle (default: together/Qwen/Qwen3-235B-A22B-Instruct-2507-tput)
-    LETTA_EMBED_MODEL    Embedding model handle (default: together-oai/text-embedding-3-small)
+    LETTA_LLM_MODEL      LLM model handle (default: letta/letta-free)
+    LETTA_EMBED_MODEL    Embedding model handle (default: embed-proxy/text-embedding-3-small)
 """
 from __future__ import annotations
 
@@ -43,7 +40,7 @@ _PERSONA = (
     "for longitudinal analysis. I do not editorialize or add context."
 )
 
-_DEFAULT_LLM = "letta/letta-free"
+_DEFAULT_LLM = "openai-proxy/Qwen/Qwen3.5-35B-A3B"  # modal-llm via proxy
 _DEFAULT_EMBED = "embed-proxy/text-embedding-3-small"
 
 
@@ -215,7 +212,7 @@ class LettaAdapter(MemoryAdapter):
     def get_capabilities(self) -> CapabilityManifest:
         return CapabilityManifest(
             search_modes=["semantic"],
-            max_results_per_search=10,
+            max_results_per_search=5,
             extra_tools=[
                 ExtraTool(
                     name="batch_retrieve",

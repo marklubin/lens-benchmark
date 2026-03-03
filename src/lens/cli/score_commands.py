@@ -2,21 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 
 import click
 from rich.console import Console
 
 console = Console()
-
-# Strip Qwen3-style <think>...</think> tags from model output
-_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
-
-
-def _strip_think_tags(text: str) -> str:
-    """Remove <think>...</think> blocks from Qwen3 reasoning output."""
-    return _THINK_RE.sub("", text).strip()
 
 
 def _make_openai_judge(model: str, api_key: str | None = None, cache_dir: str | None = None):
@@ -55,20 +46,14 @@ def _make_openai_judge(model: str, api_key: str | None = None, cache_dir: str | 
         from lens.agent.llm_cache import CachingOpenAIClient
         client = CachingOpenAIClient(client, cache_dir=cache_dir)
 
-    # Detect Qwen3 models that default to thinking mode
-    _is_thinking_model = "qwen3" in model.lower()
-
     def judge_fn(prompt: str) -> str:
-        # Append /no_think for Qwen3 to avoid wasting tokens on reasoning
-        content = prompt + "\n/no_think" if _is_thinking_model else prompt
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": content}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_tokens=20 if _is_thinking_model else 10,
+            max_tokens=10,
         )
-        raw = resp.choices[0].message.content or "TIE"
-        return _strip_think_tags(raw) if _is_thinking_model else raw
+        return resp.choices[0].message.content or "TIE"
 
     return judge_fn, client
 
@@ -95,21 +80,17 @@ def _make_baseline_llm_fn(model: str, api_key: str | None = None, cache_dir: str
         from lens.agent.llm_cache import CachingOpenAIClient
         client = CachingOpenAIClient(client, cache_dir=cache_dir)
 
-    _is_thinking_model = "qwen3" in model.lower()
-
     def llm_fn(system_prompt: str, user_prompt: str) -> str:
-        content = user_prompt + "\n/no_think" if _is_thinking_model else user_prompt
         resp = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content},
+                {"role": "user", "content": user_prompt},
             ],
             temperature=0.0,
             max_tokens=1024,
         )
-        raw = resp.choices[0].message.content or ""
-        return _strip_think_tags(raw) if _is_thinking_model else raw
+        return resp.choices[0].message.content or ""
 
     return llm_fn
 

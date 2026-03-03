@@ -14,6 +14,17 @@ def _all_question_results(result: RunResult) -> list[QuestionResult]:
     return qrs
 
 
+def _resolve_episode_ids(
+    ref_ids: list[str] | set[str],
+    ep_map: dict[str, str],
+) -> set[str]:
+    """Map ref_ids to source episode IDs via ref_episode_map.
+
+    If a ref_id has no mapping, it is assumed to already be an episode_id.
+    """
+    return {ep_map.get(r, r) for r in ref_ids}
+
+
 @register_metric("evidence_grounding")
 class EvidenceGrounding(BaseMetric):
     """Fraction of retrieved ref_ids that exist in the vault."""
@@ -114,8 +125,11 @@ class EvidenceCoverage(BaseMetric):
             if not required:
                 scores.append(1.0)
                 continue
-            retrieved_set = set(qr.retrieved_ref_ids)
-            found = sum(1 for r in required if r in retrieved_set)
+            # Normalize retrieved refs to episode IDs via ref_episode_map
+            retrieved_episodes = _resolve_episode_ids(
+                qr.retrieved_ref_ids, qr.ref_episode_map,
+            )
+            found = sum(1 for r in required if r in retrieved_episodes)
             scores.append(found / len(required))
 
         value = sum(scores) / len(scores)
@@ -231,9 +245,10 @@ class CitationCoverage(BaseMetric):
             if not required:
                 scores.append(1.0)
                 continue
-            # Combine tool-call refs and inline citation refs
+            # Normalize cited refs to episode IDs via ref_episode_map
             cited = set(qr.retrieved_ref_ids) | set(qr.valid_ref_ids)
-            overlap = required & cited
+            cited_episodes = _resolve_episode_ids(cited, qr.ref_episode_map)
+            overlap = required & cited_episodes
             scores.append(len(overlap) / len(required))
 
         value = sum(scores) / len(scores)

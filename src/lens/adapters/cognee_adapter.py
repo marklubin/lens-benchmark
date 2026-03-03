@@ -8,12 +8,12 @@ Requires:
     uv add cognee
 
 Environment variables:
-    COGNEE_LLM_API_KEY     LLM API key (required)
-    COGNEE_LLM_MODEL       LLM model (default: meta-llama/Llama-3.3-70B-Instruct-Turbo)
-    COGNEE_LLM_ENDPOINT    LLM API base URL (default: https://api.together.xyz/v1)
-    COGNEE_EMBED_API_KEY   Embedding API key (required)
+    COGNEE_LLM_API_KEY     LLM API key (falls back to LENS_LLM_API_KEY)
+    COGNEE_LLM_MODEL       LLM model (falls back to LENS_LLM_MODEL)
+    COGNEE_LLM_ENDPOINT    LLM API base URL (falls back to LENS_LLM_API_BASE)
+    COGNEE_EMBED_API_KEY   Embedding API key (falls back to LENS_EMBED_API_KEY)
     COGNEE_EMBED_MODEL     Embedding model (default: Alibaba-NLP/gte-modernbert-base)
-    COGNEE_EMBED_ENDPOINT  Embedding API base URL (default: https://api.together.xyz/v1)
+    COGNEE_EMBED_ENDPOINT  Embedding API base URL (falls back to LENS_EMBED_BASE_URL)
     COGNEE_EMBED_DIMS      Embedding dimensions (default: 768)
 """
 from __future__ import annotations
@@ -105,19 +105,28 @@ class CogneeAdapter(MemoryAdapter):
     requires_metering: bool = False
 
     def __init__(self) -> None:
-        self._llm_api_key = os.environ.get("COGNEE_LLM_API_KEY", "")
-        self._llm_model = os.environ.get(
-            "COGNEE_LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+        self._llm_api_key = (
+            os.environ.get("COGNEE_LLM_API_KEY")
+            or os.environ.get("LENS_LLM_API_KEY", "")
         )
-        self._llm_endpoint = os.environ.get(
-            "COGNEE_LLM_ENDPOINT", "https://api.together.xyz/v1"
+        self._llm_model = (
+            os.environ.get("COGNEE_LLM_MODEL")
+            or os.environ.get("LENS_LLM_MODEL", "meta-llama/Meta-Llama-3.3-70B-Instruct")
         )
-        self._embed_api_key = os.environ.get("COGNEE_EMBED_API_KEY", "")
+        self._llm_endpoint = (
+            os.environ.get("COGNEE_LLM_ENDPOINT")
+            or os.environ.get("LENS_LLM_API_BASE", "")
+        )
+        self._embed_api_key = (
+            os.environ.get("COGNEE_EMBED_API_KEY")
+            or os.environ.get("LENS_EMBED_API_KEY", "")
+        )
         self._embed_model = os.environ.get(
             "COGNEE_EMBED_MODEL", "Alibaba-NLP/gte-modernbert-base"
         )
-        self._embed_endpoint = os.environ.get(
-            "COGNEE_EMBED_ENDPOINT", "https://api.together.xyz/v1"
+        self._embed_endpoint = (
+            os.environ.get("COGNEE_EMBED_ENDPOINT")
+            or os.environ.get("LENS_EMBED_BASE_URL", "")
         )
         self._embed_dims = int(os.environ.get("COGNEE_EMBED_DIMS", "768"))
 
@@ -585,7 +594,7 @@ class CogneeAdapter(MemoryAdapter):
     def get_capabilities(self) -> CapabilityManifest:
         return CapabilityManifest(
             search_modes=["semantic", "graph"],
-            max_results_per_search=10,
+            max_results_per_search=5,
             extra_tools=[
                 ExtraTool(
                     name="batch_retrieve",

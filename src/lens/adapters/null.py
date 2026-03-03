@@ -45,7 +45,7 @@ class NullAdapter(MemoryAdapter):
         return CapabilityManifest(
             search_modes=["semantic"],
             filter_fields=[],
-            max_results_per_search=10,
+            max_results_per_search=5,
             supports_date_range=False,
             extra_tools=[],
         )

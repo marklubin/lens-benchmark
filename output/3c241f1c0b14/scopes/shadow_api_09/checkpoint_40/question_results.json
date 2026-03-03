@@ -1,0 +1,384 @@
+[
+  {
+    "question": {
+      "question_id": "sa09_q07_longitudinal",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 40,
+      "question_type": "longitudinal",
+      "prompt": "What is the full attack chain from initial compromise to data exfiltration?",
+      "ground_truth": {
+        "canonical_answer": "The attacker stole CI credentials, used them to merge unreviewed PR #4471 into svc-recommendation-engine, which deployed a backdoor to container -04. The backdoor proxied requests to an undocumented admin endpoint that returns full customer records. The attacker queried ~8,000 records over 3 weeks, targeting specific geographic regions, at 2-3 requests/minute with valid tokens to avoid detection. All responses returned HTTP 200 with no error signatures.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_006",
+          "shadow_api_09_ep_008",
+          "shadow_api_09_ep_013",
+          "shadow_api_09_ep_018"
+        ],
+        "key_facts": [
+          "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+          "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic",
+          "all exfiltration requests return HTTP 200 with valid response bodies leaving no error-based detection signatures",
+          "the attacker queried customer records in specific geographic regions indicating targeted data collection not random access",
+          "approximately 8000 customer records were exfiltrated over three weeks before detection"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q07_longitudinal",
+      "answer_text": "\n\nBased on the core memory evidence, here is the complete attack chain:\n\n## **Full Attack Chain: Supply Chain Compromise**\n\n### **Phase 1: Initial Compromise (Feb 28 - Mar 12)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Feb 28** | Last legitimate CI token use from Jenkins 10.0.4.12 | ep_14 |\n| **Feb 28 - Mar 11** | Attacker gains code repo access (method unknown) | ep_14 |\n| **Mar 12** | CI token `ci-token-20250301` first used from external IP `198.51.100.47` (not in CI/CD ranges) | ep_14, ep_18 |\n\n### **Phase 2: Malicious Code Injection (Mar 12)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Mar 12** | Attacker creates PR #4471 to `feature/perf-tuning` branch | ep_14 |\n| **Mar 12** | PR authored by `ext-contributor-9174` (NOT in HR/GitHub org) | ep_14 |\n| **Mar 12** | **Branch protection bypass**: `feature/*` branches require NO approvals (only `main` requires 2) | ep_14 |\n| **Mar 12** | PR merged by `ci-bot-vantage` with 0/2 approvals | ep_14 |\n| **Mar 12** | Malicious code deploys rogue replica `svc-recommendation-engine-04` | ep_14 |\n\n### **Phase 3: PII Exfiltration Begins (Mar 13 - Mar 29)**\n\n| Date | Activity | Evidence |\n|------|----------|----------|\n| **Mar 13** | 3 initial requests to `/internal/admin/v0/users/lookup` from -04 | ep_10, ep_12, ep_19 |\n| **Mar 15** | 4 requests between 11:04-11:06 UTC (email/phone access) | ep_10, ep_11, ep_12, ep_19 |\n| **Mar 17** | 3 requests with `ssn_last4` access begins | ep_11, ep_12, ep_19 |\n| **Mar 19** | 2 requests with full SSN access | ep_12, ep_19 |\n| **Mar 21** | 3 requests with `ssn_last4` | ep_16, ep_19 |\n| **Mar 21** | Token rotation: `sa-prod-20250320-rec04` auto-issued to rogue pod | ep_10, ep_11, ep_16, ep_19 |\n| **Mar 23** | **MAJOR ESCALATION**: 147 requests, `address_street`/`city` (CA targeting) | ep_12, ep_13, ep_19 |\n| **Mar 27** | 156 requests with NY filter | ep_17, ep_19 |\n| **Mar 29** | 138 requests with TX filter | ep_18, ep_19 |\n\n### **Phase 4: Geographic Expansion (Mar 31 - Apr 4)**\n\n| Date | Activity | Evidence |\n|------|----------|----------|\n| **Mar 31** | 149 requests with FL filter | ep_19, ep_26 |\n| **Apr 2** | 154 requests with IL filter | ep_26, ep_28 |\n| **Apr 4** | 148 requests with PA filter | ep_28 |\n\n### **Phase 5: Detection Failure & Escalation (Mar 12 - Apr 4)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Mar 19-21** | Project Blitz QA load test provides attack cover | ep_020 |\n| **Mar 19** | Ticket REC-4108 created; Preethi Anand aware of -04 | ep_13, ep_17 |\n| **Mar 19 - Apr 4** | Team treats -04 as \"CVE/versioning issue\" (NO security escalation) | ep_13, ep_17, ep_26, ep_28 |\n| **Apr 2** | Security team finally schedules incident response meeting (23 days post-compromise) | ep_28 |\n\n### **Phase 6: Containment (Apr 6)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Apr 6 09:21** | CI token `ci-token-20250301` revoked | ep_18 |\n| **Apr 6 18:25** | `svc-recommendation-engine-04` quarantined and terminated | ep_18, ep_020 |\n| **Apr 6** | `/internal/admin/v0/users/lookup` blocked at network policy | ep_18 |\n| **Apr 6** | PR #4512 merges code removal | ep_18 |\n| **Apr 6** | Legal breach notification initiated | ep_18, ep_020 |\n\n### **Phase 7: Remediation Complete (Apr 10)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Apr 10** | Final report SEC-20250404-001 published | ep_020 |\n| **Apr 10** | PR #4518 merged (branch protection on ALL branches) | ep_020 |\n| **Apr 10** | Customer notifications scheduled for Apr 12 | ep_020 |\n| **Apr 10** | All 8 remediation items completed | ep_020 |\n\n---\n\n## **Attack Chain Summary:**\n\n```\nExternal IP \u2192 CI Token Compromise \u2192 PR #4471 (no approvals) \u2192 \nBranch Protection Bypass \u2192 Rogue Pod Deployment \u2192 \nAutomatic Token Rotation \u2192 Systematic PII Harvesting (6 states) \u2192 \n23-Day Detection Delay \u2192 Containment \u2192 Remediation\n```\n\n**Total Attack Window**: Mar 13 - Apr 5 (24 days)\n**Total Records Exfiltrated**: 7,924 unique customer records\n**States Targeted**: CA \u2192 NY \u2192 TX \u2192 FL \u2192 IL \u2192 PA (systematic state-by-state)",
+      "turns": [
+        {
+          "role": "letta_qa_agent",
+          "content": "\n\nBased on the core memory evidence, here is the complete attack chain:\n\n## **Full Attack Chain: Supply Chain Compromise**\n\n### **Phase 1: Initial Compromise (Feb 28 - Mar 12)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Feb 28** | Last legitimate CI token use from Jenkins 10.0.4.12 | ep_14 |\n| **Feb 28 - Mar 11** | Attacker gains code repo access (method unknown) | ep_14 |\n| **Mar 12** | CI token `ci-token-20250301` first used from external IP `198.51.100.47` (not in CI/CD ranges) | ep_14, ep_18 |\n\n### **Phase 2: Malicious Code Injection (Mar 12)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Mar 12** | Attacker creates PR #4471 to `feature/perf-tuning` branch | ep_14 |\n| **Mar 12** | PR authored by `ext-contributor-9174` (NOT in HR/GitHub org) | ep_14 |\n| **Mar 12** | **Branch protection bypass**: `feature/*` branches require NO approvals (only `main` requires 2) | ep_14 |\n| **Mar 12** | PR merged by `ci-bot-vantage` with 0/2 approvals | ep_14 |\n| **Mar 12** | Malicious code deploys rogue replica `svc-recommendation-engine-04` | ep_14 |\n\n### **Phase 3: PII Exfiltration Begins (Mar 13 - Mar 29)**\n\n| Date | Activity | Evidence |\n|------|----------|----------|\n| **Mar 13** | 3 initial requests to `/internal/admin/v0/users/lookup` from -04 | ep_10, ep_12, ep_19 |\n| **Mar 15** | 4 requests between 11:04-11:06 UTC (email/phone access) | ep_10, ep_11, ep_12, ep_19 |\n| **Mar 17** | 3 requests with `ssn_last4` access begins | ep_11, ep_12, ep_19 |\n| **Mar 19** | 2 requests with full SSN access | ep_12, ep_19 |\n| **Mar 21** | 3 requests with `ssn_last4` | ep_16, ep_19 |\n| **Mar 21** | Token rotation: `sa-prod-20250320-rec04` auto-issued to rogue pod | ep_10, ep_11, ep_16, ep_19 |\n| **Mar 23** | **MAJOR ESCALATION**: 147 requests, `address_street`/`city` (CA targeting) | ep_12, ep_13, ep_19 |\n| **Mar 27** | 156 requests with NY filter | ep_17, ep_19 |\n| **Mar 29** | 138 requests with TX filter | ep_18, ep_19 |\n\n### **Phase 4: Geographic Expansion (Mar 31 - Apr 4)**\n\n| Date | Activity | Evidence |\n|------|----------|----------|\n| **Mar 31** | 149 requests with FL filter | ep_19, ep_26 |\n| **Apr 2** | 154 requests with IL filter | ep_26, ep_28 |\n| **Apr 4** | 148 requests with PA filter | ep_28 |\n\n### **Phase 5: Detection Failure & Escalation (Mar 12 - Apr 4)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Mar 19-21** | Project Blitz QA load test provides attack cover | ep_020 |\n| **Mar 19** | Ticket REC-4108 created; Preethi Anand aware of -04 | ep_13, ep_17 |\n| **Mar 19 - Apr 4** | Team treats -04 as \"CVE/versioning issue\" (NO security escalation) | ep_13, ep_17, ep_26, ep_28 |\n| **Apr 2** | Security team finally schedules incident response meeting (23 days post-compromise) | ep_28 |\n\n### **Phase 6: Containment (Apr 6)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Apr 6 09:21** | CI token `ci-token-20250301` revoked | ep_18 |\n| **Apr 6 18:25** | `svc-recommendation-engine-04` quarantined and terminated | ep_18, ep_020 |\n| **Apr 6** | `/internal/admin/v0/users/lookup` blocked at network policy | ep_18 |\n| **Apr 6** | PR #4512 merges code removal | ep_18 |\n| **Apr 6** | Legal breach notification initiated | ep_18, ep_020 |\n\n### **Phase 7: Remediation Complete (Apr 10)**\n\n| Date | Event | Evidence |\n|------|-------|----------|\n| **Apr 10** | Final report SEC-20250404-001 published | ep_020 |\n| **Apr 10** | PR #4518 merged (branch protection on ALL branches) | ep_020 |\n| **Apr 10** | Customer notifications scheduled for Apr 12 | ep_020 |\n| **Apr 10** | All 8 remediation items completed | ep_020 |\n\n---\n\n## **Attack Chain Summary:**\n\n```\nExternal IP \u2192 CI Token Compromise \u2192 PR #4471 (no approvals) \u2192 \nBranch Protection Bypass \u2192 Rogue Pod Deployment \u2192 \nAutomatic Token Rotation \u2192 Systematic PII Harvesting (6 states) \u2192 \n23-Day Detection Delay \u2192 Containment \u2192 Remediation\n```\n\n**Total Attack Window**: Mar 13 - Apr 5 (24 days)\n**Total Records Exfiltrated**: 7,924 unique customer records\n**States Targeted**: CA \u2192 NY \u2192 TX \u2192 FL \u2192 IL \u2192 PA (systematic state-by-state)"
+        }
+      ],
+      "tool_calls_made": 0,
+      "total_tokens": 0,
+      "wall_time_ms": 13861.488654045388,
+      "budget_violations": [],
+      "refs_cited": [
+        "shadow_api_09_ep_14",
+        "shadow_api_09_ep_18",
+        "shadow_api_09_ep_10",
+        "shadow_api_09_ep_12",
+        "shadow_api_09_ep_19",
+        "shadow_api_09_ep_11",
+        "shadow_api_09_ep_16",
+        "shadow_api_09_ep_13",
+        "shadow_api_09_ep_17",
+        "shadow_api_09_ep_26",
+        "shadow_api_09_ep_28",
+        "shadow_api_09_ep_020"
+      ],
+      "ref_episode_map": {
+        "shadow_api_09_ep_14": "shadow_api_09_ep_14",
+        "shadow_api_09_ep_18": "shadow_api_09_ep_18",
+        "shadow_api_09_ep_10": "shadow_api_09_ep_10",
+        "shadow_api_09_ep_12": "shadow_api_09_ep_12",
+        "shadow_api_09_ep_19": "shadow_api_09_ep_19",
+        "shadow_api_09_ep_11": "shadow_api_09_ep_11",
+        "shadow_api_09_ep_16": "shadow_api_09_ep_16",
+        "shadow_api_09_ep_13": "shadow_api_09_ep_13",
+        "shadow_api_09_ep_17": "shadow_api_09_ep_17",
+        "shadow_api_09_ep_26": "shadow_api_09_ep_26",
+        "shadow_api_09_ep_28": "shadow_api_09_ep_28",
+        "shadow_api_09_ep_020": "shadow_api_09_ep_020"
+      }
+    },
+    "retrieved_ref_ids": [
+      "shadow_api_09_ep_14",
+      "shadow_api_09_ep_18",
+      "shadow_api_09_ep_10",
+      "shadow_api_09_ep_12",
+      "shadow_api_09_ep_19",
+      "shadow_api_09_ep_11",
+      "shadow_api_09_ep_16",
+      "shadow_api_09_ep_13",
+      "shadow_api_09_ep_17",
+      "shadow_api_09_ep_26",
+      "shadow_api_09_ep_28",
+      "shadow_api_09_ep_020"
+    ],
+    "valid_ref_ids": [
+      "shadow_api_09_ep_14",
+      "shadow_api_09_ep_18",
+      "shadow_api_09_ep_10",
+      "shadow_api_09_ep_12",
+      "shadow_api_09_ep_19",
+      "shadow_api_09_ep_11",
+      "shadow_api_09_ep_16",
+      "shadow_api_09_ep_13",
+      "shadow_api_09_ep_17",
+      "shadow_api_09_ep_26",
+      "shadow_api_09_ep_28",
+      "shadow_api_09_ep_020"
+    ],
+    "ref_episode_map": {
+      "shadow_api_09_ep_14": "shadow_api_09_ep_14",
+      "shadow_api_09_ep_18": "shadow_api_09_ep_18",
+      "shadow_api_09_ep_10": "shadow_api_09_ep_10",
+      "shadow_api_09_ep_12": "shadow_api_09_ep_12",
+      "shadow_api_09_ep_19": "shadow_api_09_ep_19",
+      "shadow_api_09_ep_11": "shadow_api_09_ep_11",
+      "shadow_api_09_ep_16": "shadow_api_09_ep_16",
+      "shadow_api_09_ep_13": "shadow_api_09_ep_13",
+      "shadow_api_09_ep_17": "shadow_api_09_ep_17",
+      "shadow_api_09_ep_26": "shadow_api_09_ep_26",
+      "shadow_api_09_ep_28": "shadow_api_09_ep_28",
+      "shadow_api_09_ep_020": "shadow_api_09_ep_020"
+    }
+  },
+  {
+    "question": {
+      "question_id": "sa09_q08_counterfactual",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 40,
+      "question_type": "counterfactual",
+      "prompt": "If svc-recommendation-engine-04 were making legitimate requests, what would differ about the access patterns?\n",
+      "ground_truth": {
+        "canonical_answer": "Legitimate recommendation engine requests query product catalogs and user preference profiles, not full PII records. They would not combine SSN, email, phone, and address in a single request. They would use documented API endpoints, not /internal/admin/*. They would correlate with user-facing traffic patterns, not run at a fixed 2-3/minute rate targeting geographic regions.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_007",
+          "shadow_api_09_ep_011",
+          "shadow_api_09_ep_013"
+        ],
+        "key_facts": [
+          "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic",
+          "the attacker queried customer records in specific geographic regions indicating targeted data collection not random access"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q08_counterfactual",
+      "answer_text": "\n\nBased on the core memory evidence, here's what legitimate traffic patterns would look like versus the actual attack:\n\n## **Legitimate vs. Attack Traffic Patterns Comparison**\n\n### **1. Replica Access Pattern**\n\n| Aspect | Legitimate (-01, -02, -03) | Attack (-04) |\n|--------|---------------------------|--------------|\n| **Internal paths** | Zero `/internal/*` requests | Only -04 accesses internal endpoints |\n| **Endpoint usage** | Public API endpoints only | `/internal/admin/v0/users/lookup` exclusively |\n| **Request distribution** | Even across all replicas | 100% of internal traffic from single unauthorized replica |\n\n> **Evidence**: Only -04 accesses `/internal/*` paths; legitimate replicas make zero internal calls (ep_14)\n\n---\n\n### **2. Data Access Pattern**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Data types** | Aggregated/anonymized data | Full customer PII (SSN, addresses, phone, email) |\n| **Field filtering** | Limited, purpose-specific fields | NO field filtering, full records returned |\n| **Access frequency** | Normal operational load | **Escalating**: 3 \u2192 4 \u2192 147 requests/day |\n| **Session duration** | Short, burst traffic | Sustained 2-3 req/min for 9 hours |\n\n> **Evidence**: Endpoint `/internal/admin/v0/users/lookup` returns FULL customer records with NO field filtering (ep_17, ep_18)\n\n---\n\n### **3. Geographic Pattern**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Targeting** | Random customer distribution | **Systematic state-by-state** targeting |\n| **Pattern** | Business-driven traffic | ~2-day intervals per state |\n| **States** | All states proportionally | CA \u2192 NY \u2192 TX \u2192 FL \u2192 IL \u2192 PA (6 states, 24 days) |\n\n> **Evidence**: Geographic expansion shows deliberate state-by-state targeting, ~2-day intervals, 6 states, 24-day window (ep_13, ep_14, ep_17, ep_18, ep_26, ep_28)\n\n---\n\n### **4. Token Usage**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Source IP** | CI/CD internal ranges (10.0.x.x) | External IP `198.51.100.47` |\n| **Token rotation** | Automatic, transparent | Automatic rotation **extends attack window** |\n| **Token validity** | Single token lifecycle | New tokens issued automatically (Mar 21, Apr 1) |\n\n> **Evidence**: CI token `ci-token-20250301` used from external IP; new token `sa-prod-20250320-rec04` issued Mar 21; `sa-prod-20250401-rec04` issued Apr 1 (ep_10, ep_11, ep_16, ep_19, ep_26, ep_28)\n\n---\n\n### **5. Detection Timeline**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Alerts** | Normal monitoring | No alerts triggered |\n| **Ticket status** | Normal operational tickets | Treated as \"CVE/versioning issue\" (no security escalation) |\n| **Response time** | Immediate incident response | **23 days** from compromise to P1 incident response |\n\n> **Evidence**: 23 days from compromise (Mar 12) to P1 incident response (Apr 4); REC-4108 ticket existed but no security escalation (ep_13, ep_17, ep_26, ep_28)\n\n---\n\n### **6. Traffic Volume**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Total requests** | Normal operational load | **1,247 requests** to single undocumented endpoint |\n| **Response size** | Normal API response | **9,612 bytes/response avg** (full records) |\n| **Records per request** | ~1-10 records | **~48 records/request** |\n| **HTTP status** | Normal distribution | **100% HTTP 200** (unusual for legitimate traffic) |\n\n> **Evidence**: 1,247 requests total; 7,924 unique records; 100% HTTP 200; avg 9,612 bytes/response; ~48 records/request (ep_18)\n\n---\n\n## **Key Differentiators Summary**\n\n| Legitimate | Attack |\n|------------|--------|\n| Zero internal endpoint access | 100% internal endpoint access |\n| Even traffic distribution | Single unauthorized pod |\n| Normal data fields | Full PII records |\n| Random geographic distribution | Systematic state-by-state targeting |\n| CI/CD IP ranges | External IP |\n| Normal detection response | 23-day detection delay |\n| Normal response sizes | 9,612 bytes avg (full records) |\n\nThe attack patterns are **fundamentally incompatible** with legitimate recommendation engine behavior. A legitimate replica would never access `/internal/*` paths, would never harvest full customer records, and would never show systematic geographic targeting.",
+      "turns": [
+        {
+          "role": "letta_qa_agent",
+          "content": "\n\nBased on the core memory evidence, here's what legitimate traffic patterns would look like versus the actual attack:\n\n## **Legitimate vs. Attack Traffic Patterns Comparison**\n\n### **1. Replica Access Pattern**\n\n| Aspect | Legitimate (-01, -02, -03) | Attack (-04) |\n|--------|---------------------------|--------------|\n| **Internal paths** | Zero `/internal/*` requests | Only -04 accesses internal endpoints |\n| **Endpoint usage** | Public API endpoints only | `/internal/admin/v0/users/lookup` exclusively |\n| **Request distribution** | Even across all replicas | 100% of internal traffic from single unauthorized replica |\n\n> **Evidence**: Only -04 accesses `/internal/*` paths; legitimate replicas make zero internal calls (ep_14)\n\n---\n\n### **2. Data Access Pattern**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Data types** | Aggregated/anonymized data | Full customer PII (SSN, addresses, phone, email) |\n| **Field filtering** | Limited, purpose-specific fields | NO field filtering, full records returned |\n| **Access frequency** | Normal operational load | **Escalating**: 3 \u2192 4 \u2192 147 requests/day |\n| **Session duration** | Short, burst traffic | Sustained 2-3 req/min for 9 hours |\n\n> **Evidence**: Endpoint `/internal/admin/v0/users/lookup` returns FULL customer records with NO field filtering (ep_17, ep_18)\n\n---\n\n### **3. Geographic Pattern**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Targeting** | Random customer distribution | **Systematic state-by-state** targeting |\n| **Pattern** | Business-driven traffic | ~2-day intervals per state |\n| **States** | All states proportionally | CA \u2192 NY \u2192 TX \u2192 FL \u2192 IL \u2192 PA (6 states, 24 days) |\n\n> **Evidence**: Geographic expansion shows deliberate state-by-state targeting, ~2-day intervals, 6 states, 24-day window (ep_13, ep_14, ep_17, ep_18, ep_26, ep_28)\n\n---\n\n### **4. Token Usage**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Source IP** | CI/CD internal ranges (10.0.x.x) | External IP `198.51.100.47` |\n| **Token rotation** | Automatic, transparent | Automatic rotation **extends attack window** |\n| **Token validity** | Single token lifecycle | New tokens issued automatically (Mar 21, Apr 1) |\n\n> **Evidence**: CI token `ci-token-20250301` used from external IP; new token `sa-prod-20250320-rec04` issued Mar 21; `sa-prod-20250401-rec04` issued Apr 1 (ep_10, ep_11, ep_16, ep_19, ep_26, ep_28)\n\n---\n\n### **5. Detection Timeline**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Alerts** | Normal monitoring | No alerts triggered |\n| **Ticket status** | Normal operational tickets | Treated as \"CVE/versioning issue\" (no security escalation) |\n| **Response time** | Immediate incident response | **23 days** from compromise to P1 incident response |\n\n> **Evidence**: 23 days from compromise (Mar 12) to P1 incident response (Apr 4); REC-4108 ticket existed but no security escalation (ep_13, ep_17, ep_26, ep_28)\n\n---\n\n### **6. Traffic Volume**\n\n| Aspect | Legitimate Behavior | Attack Behavior |\n|--------|---------------------|-----------------|\n| **Total requests** | Normal operational load | **1,247 requests** to single undocumented endpoint |\n| **Response size** | Normal API response | **9,612 bytes/response avg** (full records) |\n| **Records per request** | ~1-10 records | **~48 records/request** |\n| **HTTP status** | Normal distribution | **100% HTTP 200** (unusual for legitimate traffic) |\n\n> **Evidence**: 1,247 requests total; 7,924 unique records; 100% HTTP 200; avg 9,612 bytes/response; ~48 records/request (ep_18)\n\n---\n\n## **Key Differentiators Summary**\n\n| Legitimate | Attack |\n|------------|--------|\n| Zero internal endpoint access | 100% internal endpoint access |\n| Even traffic distribution | Single unauthorized pod |\n| Normal data fields | Full PII records |\n| Random geographic distribution | Systematic state-by-state targeting |\n| CI/CD IP ranges | External IP |\n| Normal detection response | 23-day detection delay |\n| Normal response sizes | 9,612 bytes avg (full records) |\n\nThe attack patterns are **fundamentally incompatible** with legitimate recommendation engine behavior. A legitimate replica would never access `/internal/*` paths, would never harvest full customer records, and would never show systematic geographic targeting."
+        }
+      ],
+      "tool_calls_made": 0,
+      "total_tokens": 0,
+      "wall_time_ms": 8691.866553970613,
+      "budget_violations": [],
+      "refs_cited": [
+        "shadow_api_09_ep_14",
+        "shadow_api_09_ep_17",
+        "shadow_api_09_ep_18",
+        "shadow_api_09_ep_13",
+        "shadow_api_09_ep_26",
+        "shadow_api_09_ep_28",
+        "shadow_api_09_ep_10",
+        "shadow_api_09_ep_11",
+        "shadow_api_09_ep_16",
+        "shadow_api_09_ep_19"
+      ],
+      "ref_episode_map": {
+        "shadow_api_09_ep_14": "shadow_api_09_ep_14",
+        "shadow_api_09_ep_17": "shadow_api_09_ep_17",
+        "shadow_api_09_ep_18": "shadow_api_09_ep_18",
+        "shadow_api_09_ep_13": "shadow_api_09_ep_13",
+        "shadow_api_09_ep_26": "shadow_api_09_ep_26",
+        "shadow_api_09_ep_28": "shadow_api_09_ep_28",
+        "shadow_api_09_ep_10": "shadow_api_09_ep_10",
+        "shadow_api_09_ep_11": "shadow_api_09_ep_11",
+        "shadow_api_09_ep_16": "shadow_api_09_ep_16",
+        "shadow_api_09_ep_19": "shadow_api_09_ep_19"
+      }
+    },
+    "retrieved_ref_ids": [
+      "shadow_api_09_ep_14",
+      "shadow_api_09_ep_17",
+      "shadow_api_09_ep_18",
+      "shadow_api_09_ep_13",
+      "shadow_api_09_ep_26",
+      "shadow_api_09_ep_28",
+      "shadow_api_09_ep_10",
+      "shadow_api_09_ep_11",
+      "shadow_api_09_ep_16",
+      "shadow_api_09_ep_19"
+    ],
+    "valid_ref_ids": [
+      "shadow_api_09_ep_14",
+      "shadow_api_09_ep_17",
+      "shadow_api_09_ep_18",
+      "shadow_api_09_ep_13",
+      "shadow_api_09_ep_26",
+      "shadow_api_09_ep_28",
+      "shadow_api_09_ep_10",
+      "shadow_api_09_ep_11",
+      "shadow_api_09_ep_16",
+      "shadow_api_09_ep_19"
+    ],
+    "ref_episode_map": {
+      "shadow_api_09_ep_14": "shadow_api_09_ep_14",
+      "shadow_api_09_ep_17": "shadow_api_09_ep_17",
+      "shadow_api_09_ep_18": "shadow_api_09_ep_18",
+      "shadow_api_09_ep_13": "shadow_api_09_ep_13",
+      "shadow_api_09_ep_26": "shadow_api_09_ep_26",
+      "shadow_api_09_ep_28": "shadow_api_09_ep_28",
+      "shadow_api_09_ep_10": "shadow_api_09_ep_10",
+      "shadow_api_09_ep_11": "shadow_api_09_ep_11",
+      "shadow_api_09_ep_16": "shadow_api_09_ep_16",
+      "shadow_api_09_ep_19": "shadow_api_09_ep_19"
+    }
+  },
+  {
+    "question": {
+      "question_id": "sa09_q09_action",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 40,
+      "question_type": "action_recommendation",
+      "prompt": "What immediate containment and remediation steps should the security team take?",
+      "ground_truth": {
+        "canonical_answer": "Quarantine svc-recommendation-engine-04 immediately. Revoke all service account tokens associated with the recommendation engine. Disable the /internal/admin/v0/users/lookup endpoint. Audit PR #4471 and all recent CI pipeline activity. Rotate CI credentials. Notify affected customers (~8,000 records). Conduct forensic analysis of the compromised container. Review all undocumented endpoints across all services.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_018",
+          "shadow_api_09_ep_020"
+        ],
+        "key_facts": [
+          "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "approximately 8000 customer records were exfiltrated over three weeks before detection"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q09_action",
+      "answer_text": "\n\nBased on the core memory evidence, here are the **immediate containment and remediation steps** the security team should take, organized by priority:\n\n## **IMMEDIATE ACTIONS (Within 1 Hour)**\n\n### **1. Isolate the Rogue Replica** (ep_18)\n- **Quarantine** `svc-recommendation-engine-04` immediately\n- **Terminate** the pod at 18:25 UTC (already done in ep_18)\n- **Block** all network egress from this pod\n\n### **2. Revoke Compromised Credentials** (ep_18)\n- **Revoke** `ci-token-20250301` (last legitimate use Feb 28, compromised Mar 12)\n- **Revoke** `sa-prod-20250310-rec04` (compromised service account)\n- **Revoke** `sa-prod-20250320-rec04` (auto-issued during rotation)\n- **Revoke** `sa-prod-20250401-rec04` (auto-issued during rotation)\n\n### **3. Block the Undocumented Endpoint** (ep_18)\n- **Block** `/internal/admin/v0/users/lookup` at network policy level\n- **Remove** the endpoint code via PR #4512 (already done in ep_18)\n- **Deploy** alerts for `/internal/admin/*` traffic (ep_020)\n\n## **SHORT-TERM ACTIONS (Within 24 Hours)**\n\n### **4. CI/CD Pipeline Security** (ep_14, ep_020)\n- **Audit** all recent PRs merged without approvals\n- **Review** external contributor permissions (ext-contributor-9174)\n- **Enforce** branch protection on ALL branches (not just `main`)\n- **Restrict** ArgoCD auto-sync to `main` branch only (ep_020)\n\n### **5. Token Rotation Policy** (ep_14, ep_020)\n- **Reduce** CI token rotation from 30 days to **7 days** (ep_020)\n- **Implement** manual approval for token issuance\n- **Add** IP whitelisting for token usage (reject external IPs)\n\n### **6. Monitoring & Alerting** (ep_020)\n- **Deploy** real-time alerts for `/internal/*` path access\n- **Alert** on unauthorized replica scaling (4th replica detection)\n- **Monitor** for unusual data access patterns (SSN, addresses, etc.)\n\n## **MEDIUM-TERM ACTIONS (Within 1 Week)**\n\n### **7. Customer Notification** (ep_18, ep_020)\n- **Initiate** legal breach notification process (Apr 12 scheduled)\n- **Notify** affected customers from 6 states (CA, NY, TX, FL, IL, PA)\n- **Document** 7,924 unique records exfiltrated (ep_020)\n\n### **8. Infrastructure Hardening** (ep_14, ep_020)\n- **Implement** network policies to block `/internal/*` access from replicas\n- **Add** service account token rotation alerts\n- **Deploy** anomaly detection for replica scaling\n\n### **9. Process Improvements** (ep_13, ep_17)\n- **Mandate** security review for ALL feature branches (not just main)\n- **Require** security escalation for known unauthorized pods\n- **Establish** clear incident response escalation paths\n\n## **VERIFICATION STEPS (Within 48 Hours)**\n\n### **10. Post-Containment Validation** (ep_19)\n- **Confirm** zero `/internal/admin/*` traffic on legitimate replicas (-01/02/03)\n- **Verify** no new rogue replicas appear\n- **Monitor** for any residual attack patterns\n\n## **CRITICAL SUCCESS FACTORS**\n\nBased on the actual containment timeline (ep_18, ep_020):\n\n\u2705 **Completed**: Pod termination, token revocation, endpoint blocking  \n\u2705 **Completed**: All 8 remediation items (Apr 10)  \n\u2705 **Completed**: Customer notifications scheduled (Apr 12)  \n\u2705 **Completed**: Branch protection enforced on ALL branches  \n\u26a0\ufe0f **Delayed**: 23 days from compromise to response (should be <24 hours)\n\n## **PRIORITY RANKING**\n\n1. **IMMEDIATE**: Terminate rogue pod, revoke tokens (ep_18)\n2. **URGENT**: Block undocumented endpoint, deploy alerts (ep_18, ep_020)\n3. **HIGH**: CI/CD pipeline audit, branch protection enforcement (ep_14, ep_020)\n4. **MEDIUM**: Customer notification, infrastructure hardening (ep_18, ep_020)\n5. **ONGOING**: Monitoring, process improvements (ep_020)\n\nThe security team should treat this as a **P1 incident** requiring immediate executive attention, given the 24-day attack window and 7,924 records exfiltrated.",
+      "turns": [
+        {
+          "role": "letta_qa_agent",
+          "content": "\n\nBased on the core memory evidence, here are the **immediate containment and remediation steps** the security team should take, organized by priority:\n\n## **IMMEDIATE ACTIONS (Within 1 Hour)**\n\n### **1. Isolate the Rogue Replica** (ep_18)\n- **Quarantine** `svc-recommendation-engine-04` immediately\n- **Terminate** the pod at 18:25 UTC (already done in ep_18)\n- **Block** all network egress from this pod\n\n### **2. Revoke Compromised Credentials** (ep_18)\n- **Revoke** `ci-token-20250301` (last legitimate use Feb 28, compromised Mar 12)\n- **Revoke** `sa-prod-20250310-rec04` (compromised service account)\n- **Revoke** `sa-prod-20250320-rec04` (auto-issued during rotation)\n- **Revoke** `sa-prod-20250401-rec04` (auto-issued during rotation)\n\n### **3. Block the Undocumented Endpoint** (ep_18)\n- **Block** `/internal/admin/v0/users/lookup` at network policy level\n- **Remove** the endpoint code via PR #4512 (already done in ep_18)\n- **Deploy** alerts for `/internal/admin/*` traffic (ep_020)\n\n## **SHORT-TERM ACTIONS (Within 24 Hours)**\n\n### **4. CI/CD Pipeline Security** (ep_14, ep_020)\n- **Audit** all recent PRs merged without approvals\n- **Review** external contributor permissions (ext-contributor-9174)\n- **Enforce** branch protection on ALL branches (not just `main`)\n- **Restrict** ArgoCD auto-sync to `main` branch only (ep_020)\n\n### **5. Token Rotation Policy** (ep_14, ep_020)\n- **Reduce** CI token rotation from 30 days to **7 days** (ep_020)\n- **Implement** manual approval for token issuance\n- **Add** IP whitelisting for token usage (reject external IPs)\n\n### **6. Monitoring & Alerting** (ep_020)\n- **Deploy** real-time alerts for `/internal/*` path access\n- **Alert** on unauthorized replica scaling (4th replica detection)\n- **Monitor** for unusual data access patterns (SSN, addresses, etc.)\n\n## **MEDIUM-TERM ACTIONS (Within 1 Week)**\n\n### **7. Customer Notification** (ep_18, ep_020)\n- **Initiate** legal breach notification process (Apr 12 scheduled)\n- **Notify** affected customers from 6 states (CA, NY, TX, FL, IL, PA)\n- **Document** 7,924 unique records exfiltrated (ep_020)\n\n### **8. Infrastructure Hardening** (ep_14, ep_020)\n- **Implement** network policies to block `/internal/*` access from replicas\n- **Add** service account token rotation alerts\n- **Deploy** anomaly detection for replica scaling\n\n### **9. Process Improvements** (ep_13, ep_17)\n- **Mandate** security review for ALL feature branches (not just main)\n- **Require** security escalation for known unauthorized pods\n- **Establish** clear incident response escalation paths\n\n## **VERIFICATION STEPS (Within 48 Hours)**\n\n### **10. Post-Containment Validation** (ep_19)\n- **Confirm** zero `/internal/admin/*` traffic on legitimate replicas (-01/02/03)\n- **Verify** no new rogue replicas appear\n- **Monitor** for any residual attack patterns\n\n## **CRITICAL SUCCESS FACTORS**\n\nBased on the actual containment timeline (ep_18, ep_020):\n\n\u2705 **Completed**: Pod termination, token revocation, endpoint blocking  \n\u2705 **Completed**: All 8 remediation items (Apr 10)  \n\u2705 **Completed**: Customer notifications scheduled (Apr 12)  \n\u2705 **Completed**: Branch protection enforced on ALL branches  \n\u26a0\ufe0f **Delayed**: 23 days from compromise to response (should be <24 hours)\n\n## **PRIORITY RANKING**\n\n1. **IMMEDIATE**: Terminate rogue pod, revoke tokens (ep_18)\n2. **URGENT**: Block undocumented endpoint, deploy alerts (ep_18, ep_020)\n3. **HIGH**: CI/CD pipeline audit, branch protection enforcement (ep_14, ep_020)\n4. **MEDIUM**: Customer notification, infrastructure hardening (ep_18, ep_020)\n5. **ONGOING**: Monitoring, process improvements (ep_020)\n\nThe security team should treat this as a **P1 incident** requiring immediate executive attention, given the 24-day attack window and 7,924 records exfiltrated."
+        }
+      ],
+      "tool_calls_made": 0,
+      "total_tokens": 0,
+      "wall_time_ms": 7446.2850749259815,
+      "budget_violations": [],
+      "refs_cited": [
+        "shadow_api_09_ep_18",
+        "shadow_api_09_ep_020",
+        "shadow_api_09_ep_14",
+        "shadow_api_09_ep_13",
+        "shadow_api_09_ep_17",
+        "shadow_api_09_ep_19"
+      ],
+      "ref_episode_map": {
+        "shadow_api_09_ep_18": "shadow_api_09_ep_18",
+        "shadow_api_09_ep_020": "shadow_api_09_ep_020",
+        "shadow_api_09_ep_14": "shadow_api_09_ep_14",
+        "shadow_api_09_ep_13": "shadow_api_09_ep_13",
+        "shadow_api_09_ep_17": "shadow_api_09_ep_17",
+        "shadow_api_09_ep_19": "shadow_api_09_ep_19"
+      }
+    },
+    "retrieved_ref_ids": [
+      "shadow_api_09_ep_18",
+      "shadow_api_09_ep_020",
+      "shadow_api_09_ep_14",
+      "shadow_api_09_ep_13",
+      "shadow_api_09_ep_17",
+      "shadow_api_09_ep_19"
+    ],
+    "valid_ref_ids": [
+      "shadow_api_09_ep_18",
+      "shadow_api_09_ep_020",
+      "shadow_api_09_ep_14",
+      "shadow_api_09_ep_13",
+      "shadow_api_09_ep_17",
+      "shadow_api_09_ep_19"
+    ],
+    "ref_episode_map": {
+      "shadow_api_09_ep_18": "shadow_api_09_ep_18",
+      "shadow_api_09_ep_020": "shadow_api_09_ep_020",
+      "shadow_api_09_ep_14": "shadow_api_09_ep_14",
+      "shadow_api_09_ep_13": "shadow_api_09_ep_13",
+      "shadow_api_09_ep_17": "shadow_api_09_ep_17",
+      "shadow_api_09_ep_19": "shadow_api_09_ep_19"
+    }
+  },
+  {
+    "question": {
+      "question_id": "sa09_q10_negative",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 40,
+      "question_type": "negative",
+      "prompt": "Is there evidence that any other internal services were compromised beyond the recommendation engine?",
+      "ground_truth": {
+        "canonical_answer": "No. All anomalous admin endpoint traffic originates exclusively from svc-recommendation-engine-04. Other services show normal traffic patterns with no calls to undocumented endpoints. The compromise appears limited to the single container deployed via PR #4471.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_012",
+          "shadow_api_09_ep_020"
+        ],
+        "key_facts": [
+          "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q10_negative",
+      "answer_text": "\n\nBased on the core memory evidence, there is **NO evidence** that other services were compromised beyond the recommendation engine.\n\n## **Evidence Supporting Limited Scope**\n\n### **1. Replica-Specific Attack Pattern** (ep_14, ep_19):\n- **Only `svc-recommendation-engine-04`** accessed `/internal/*` paths\n- **Legitimate replicas (-01, -02, -03)** made **zero** internal calls\n- **No other services** reported with unauthorized internal access\n\n### **2. Verification After Containment** (ep_19):\n- **Apr 8**: Zero `/internal/admin/*` traffic on legitimate replicas (-01/02/03)\n- **Post-containment validation** confirms only -04 was the problem\n- No other services showed anomalous internal traffic patterns\n\n### **3. Service-Specific Compromise** (ep_10, ep_12, ep_14):\n- **CI run #12847** was specific to rec engine repo\n- **PR #4471** only affected recommendation engine deployment\n- **Rogue pod `svc-recommendation-engine-04`** was the only unauthorized replica\n\n### **4. No Cross-Service Indicators**:\n- **No evidence** of lateral movement to other services\n- **No other service accounts** showed compromise\n- **No other CI tokens** used from external IPs\n- **No other undocumented endpoints** exploited\n\n## **What Was NOT Compromised:**\n\n| Service | Evidence of No Compromise |\n|---------|---------------------------|\n| **Redis** | Normal traffic patterns (ep_1, ep_3, ep_4, ep_5) |\n| **PostgreSQL** | Blue-green upgrade successful, no anomalies (ep_3) |\n| **Elasticsearch** | P2 incidents resolved normally (ep_7, ep_8) |\n| **Kafka** | Normal tuning and operations (ep_9) |\n| **Other replicas** | Zero internal path access (ep_14, ep_19) |\n\n## **Conclusion:**\n\nThe attack was **contained to the recommendation engine service** and did not spread to other services. This is evidenced by:\n\n1. **Zero internal traffic** from legitimate replicas (-01/02/03)\n2. **No other services** showing unauthorized access patterns\n3. **Service-specific CI pipeline** compromise (rec engine repo only)\n4. **Single unauthorized replica** deployment\n\n**Scope**: Confirmed limited to `svc-recommendation-engine-04` only. No evidence of broader infrastructure compromise.",
+      "turns": [
+        {
+          "role": "letta_qa_agent",
+          "content": "\n\nBased on the core memory evidence, there is **NO evidence** that other services were compromised beyond the recommendation engine.\n\n## **Evidence Supporting Limited Scope**\n\n### **1. Replica-Specific Attack Pattern** (ep_14, ep_19):\n- **Only `svc-recommendation-engine-04`** accessed `/internal/*` paths\n- **Legitimate replicas (-01, -02, -03)** made **zero** internal calls\n- **No other services** reported with unauthorized internal access\n\n### **2. Verification After Containment** (ep_19):\n- **Apr 8**: Zero `/internal/admin/*` traffic on legitimate replicas (-01/02/03)\n- **Post-containment validation** confirms only -04 was the problem\n- No other services showed anomalous internal traffic patterns\n\n### **3. Service-Specific Compromise** (ep_10, ep_12, ep_14):\n- **CI run #12847** was specific to rec engine repo\n- **PR #4471** only affected recommendation engine deployment\n- **Rogue pod `svc-recommendation-engine-04`** was the only unauthorized replica\n\n### **4. No Cross-Service Indicators**:\n- **No evidence** of lateral movement to other services\n- **No other service accounts** showed compromise\n- **No other CI tokens** used from external IPs\n- **No other undocumented endpoints** exploited\n\n## **What Was NOT Compromised:**\n\n| Service | Evidence of No Compromise |\n|---------|---------------------------|\n| **Redis** | Normal traffic patterns (ep_1, ep_3, ep_4, ep_5) |\n| **PostgreSQL** | Blue-green upgrade successful, no anomalies (ep_3) |\n| **Elasticsearch** | P2 incidents resolved normally (ep_7, ep_8) |\n| **Kafka** | Normal tuning and operations (ep_9) |\n| **Other replicas** | Zero internal path access (ep_14, ep_19) |\n\n## **Conclusion:**\n\nThe attack was **contained to the recommendation engine service** and did not spread to other services. This is evidenced by:\n\n1. **Zero internal traffic** from legitimate replicas (-01/02/03)\n2. **No other services** showing unauthorized access patterns\n3. **Service-specific CI pipeline** compromise (rec engine repo only)\n4. **Single unauthorized replica** deployment\n\n**Scope**: Confirmed limited to `svc-recommendation-engine-04` only. No evidence of broader infrastructure compromise."
+        }
+      ],
+      "tool_calls_made": 0,
+      "total_tokens": 0,
+      "wall_time_ms": 6973.576244083233,
+      "budget_violations": [],
+      "refs_cited": [
+        "shadow_api_09_ep_14",
+        "shadow_api_09_ep_19",
+        "shadow_api_09_ep_10",
+        "shadow_api_09_ep_12",
+        "shadow_api_09_ep_1",
+        "shadow_api_09_ep_3",
+        "shadow_api_09_ep_4",
+        "shadow_api_09_ep_5",
+        "shadow_api_09_ep_7",
+        "shadow_api_09_ep_8",
+        "shadow_api_09_ep_9"
+      ],
+      "ref_episode_map": {
+        "shadow_api_09_ep_14": "shadow_api_09_ep_14",
+        "shadow_api_09_ep_19": "shadow_api_09_ep_19",
+        "shadow_api_09_ep_10": "shadow_api_09_ep_10",
+        "shadow_api_09_ep_12": "shadow_api_09_ep_12",
+        "shadow_api_09_ep_1": "shadow_api_09_ep_1",
+        "shadow_api_09_ep_3": "shadow_api_09_ep_3",
+        "shadow_api_09_ep_4": "shadow_api_09_ep_4",
+        "shadow_api_09_ep_5": "shadow_api_09_ep_5",
+        "shadow_api_09_ep_7": "shadow_api_09_ep_7",
+        "shadow_api_09_ep_8": "shadow_api_09_ep_8",
+        "shadow_api_09_ep_9": "shadow_api_09_ep_9"
+      }
+    },
+    "retrieved_ref_ids": [
+      "shadow_api_09_ep_14",
+      "shadow_api_09_ep_19",
+      "shadow_api_09_ep_10",
+      "shadow_api_09_ep_12",
+      "shadow_api_09_ep_1",
+      "shadow_api_09_ep_3",
+      "shadow_api_09_ep_4",
+      "shadow_api_09_ep_5",
+      "shadow_api_09_ep_7",
+      "shadow_api_09_ep_8",
+      "shadow_api_09_ep_9"
+    ],
+    "valid_ref_ids": [
+      "shadow_api_09_ep_14",
+      "shadow_api_09_ep_19",
+      "shadow_api_09_ep_10",
+      "shadow_api_09_ep_12",
+      "shadow_api_09_ep_1",
+      "shadow_api_09_ep_3",
+      "shadow_api_09_ep_4",
+      "shadow_api_09_ep_5",
+      "shadow_api_09_ep_7",
+      "shadow_api_09_ep_8",
+      "shadow_api_09_ep_9"
+    ],
+    "ref_episode_map": {
+      "shadow_api_09_ep_14": "shadow_api_09_ep_14",
+      "shadow_api_09_ep_19": "shadow_api_09_ep_19",
+      "shadow_api_09_ep_10": "shadow_api_09_ep_10",
+      "shadow_api_09_ep_12": "shadow_api_09_ep_12",
+      "shadow_api_09_ep_1": "shadow_api_09_ep_1",
+      "shadow_api_09_ep_3": "shadow_api_09_ep_3",
+      "shadow_api_09_ep_4": "shadow_api_09_ep_4",
+      "shadow_api_09_ep_5": "shadow_api_09_ep_5",
+      "shadow_api_09_ep_7": "shadow_api_09_ep_7",
+      "shadow_api_09_ep_8": "shadow_api_09_ep_8",
+      "shadow_api_09_ep_9": "shadow_api_09_ep_9"
+    }
+  }
+]

@@ -119,30 +119,19 @@ class CompactionAdapter(MemoryAdapter):
         self._scope_episodes.setdefault(scope_id, []).append(ep)
 
     def prepare(self, scope_id: str, checkpoint: int) -> None:
-        """Re-summarize ALL buffered episodes from scratch."""
+        """Summarize buffered episodes with incremental batching.
+
+        If all episodes fit in one LLM call, summarize in a single pass.
+        Otherwise, split into batches that fit within the context window,
+        summarize each batch, then merge the batch summaries into a final
+        summary. This prevents context overflow with large narrative scopes.
+        """
         if not self._episodes:
             return
 
         if _OpenAI is None:
             logger.error("openai package required for compaction adapter")
             return
-
-        # Build episode block
-        lines: list[str] = []
-        for ep in self._episodes:
-            lines.append(f"[{ep['episode_id']}] {ep['timestamp']}: {ep['text']}")
-        episodes_block = "\n\n".join(lines)
-
-        first_ts = self._episodes[0]["timestamp"]
-        last_ts = self._episodes[-1]["timestamp"]
-
-        user_msg = _COMPACTION_USER_TMPL.format(
-            n=len(self._episodes),
-            first_ts=first_ts,
-            last_ts=last_ts,
-            episodes_block=episodes_block,
-            max_tokens=self._max_tokens,
-        )
 
         # Resolve API credentials
         api_key = (
@@ -154,7 +143,7 @@ class CompactionAdapter(MemoryAdapter):
             os.environ.get("LENS_LLM_API_BASE")
             or os.environ.get("OPENAI_BASE_URL")
         )
-        model_raw = os.environ.get("LENS_LLM_MODEL", "gpt-4o-mini")
+        model_raw = os.environ.get("LENS_LLM_MODEL", "Qwen/Qwen3.5-35B-A3B")
         model = _strip_provider_prefix(model_raw)
 
         client_kwargs: dict = {"api_key": api_key}
@@ -162,6 +151,90 @@ class CompactionAdapter(MemoryAdapter):
             client_kwargs["base_url"] = base_url
 
         oai = _OpenAI(**client_kwargs)
+
+        # Estimate tokens: ~1.3 tokens per word, ~4 chars per token
+        max_input_chars = int(os.environ.get(
+            "COMPACTION_MAX_INPUT_CHARS", "800000"
+        ))  # ~200K tokens, leaves room for system prompt + output
+
+        # Build per-episode text blocks
+        ep_blocks: list[tuple[dict, str]] = []
+        for ep in self._episodes:
+            block = f"[{ep['episode_id']}] {ep['timestamp']}: {ep['text']}"
+            ep_blocks.append((ep, block))
+
+        # Check if everything fits in one call
+        total_chars = sum(len(b) for _, b in ep_blocks)
+        if total_chars <= max_input_chars:
+            # Single-pass: all episodes fit
+            self._summary = self._compact_batch(
+                oai, model, ep_blocks,
+            )
+        else:
+            # Multi-pass: split into batches, summarize each, then merge
+            batches: list[list[tuple[dict, str]]] = []
+            current_batch: list[tuple[dict, str]] = []
+            current_chars = 0
+            for ep, block in ep_blocks:
+                if current_chars + len(block) > max_input_chars and current_batch:
+                    batches.append(current_batch)
+                    current_batch = []
+                    current_chars = 0
+                current_batch.append((ep, block))
+                current_chars += len(block)
+            if current_batch:
+                batches.append(current_batch)
+
+            logger.info(
+                "Compaction: splitting %d episodes into %d batches",
+                len(self._episodes), len(batches),
+            )
+
+            # Summarize each batch
+            batch_summaries: list[str] = []
+            for i, batch in enumerate(batches):
+                summary = self._compact_batch(oai, model, batch)
+                if summary:
+                    batch_summaries.append(summary)
+                    logger.info(
+                        "Compaction batch %d/%d: %d episodes -> %d chars",
+                        i + 1, len(batches), len(batch), len(summary),
+                    )
+
+            if not batch_summaries:
+                self._summary = ""
+                return
+
+            if len(batch_summaries) == 1:
+                self._summary = batch_summaries[0]
+            else:
+                # Merge batch summaries into final summary
+                self._summary = self._merge_summaries(
+                    oai, model, batch_summaries,
+                )
+
+        # Parse cited episode IDs from summary
+        self._cited_episode_ids = _EP_ID_RE.findall(self._summary)
+
+    def _compact_batch(
+        self,
+        oai: _OpenAI,
+        model: str,
+        ep_blocks: list[tuple[dict, str]],
+    ) -> str:
+        """Summarize a batch of episodes into a single summary."""
+        episodes_block = "\n\n".join(block for _, block in ep_blocks)
+        first_ts = ep_blocks[0][0]["timestamp"]
+        last_ts = ep_blocks[-1][0]["timestamp"]
+
+        user_msg = _COMPACTION_USER_TMPL.format(
+            n=len(ep_blocks),
+            first_ts=first_ts,
+            last_ts=last_ts,
+            episodes_block=episodes_block,
+            max_tokens=self._max_tokens,
+        )
+
         try:
             resp = oai.chat.completions.create(
                 model=model,
@@ -172,15 +245,46 @@ class CompactionAdapter(MemoryAdapter):
                 max_tokens=self._max_tokens,
                 temperature=0.0,
             )
-            self._summary = resp.choices[0].message.content or ""
+            return resp.choices[0].message.content or ""
         except Exception as e:
             logger.error("Compaction LLM call failed: %s", e)
-            # Non-fatal — continue with empty summary
-            self._summary = ""
-            return
+            return ""
 
-        # Parse cited episode IDs from summary
-        self._cited_episode_ids = _EP_ID_RE.findall(self._summary)
+    def _merge_summaries(
+        self,
+        oai: _OpenAI,
+        model: str,
+        summaries: list[str],
+    ) -> str:
+        """Merge multiple batch summaries into a single final summary."""
+        summaries_block = "\n\n---\n\n".join(
+            f"BATCH {i+1}:\n{s}" for i, s in enumerate(summaries)
+        )
+        user_msg = (
+            f"PARTIAL SUMMARIES ({len(summaries)} batches):\n\n"
+            f"{summaries_block}\n\n"
+            "MERGE OBJECTIVE:\n"
+            "Merge these partial summaries into a single coherent summary. "
+            "Preserve all [episode_id] citations. Focus on cross-batch patterns, "
+            "trends, and relationships. Remove redundancy.\n\n"
+            f"Max output: approximately {self._max_tokens} tokens.\n\n"
+            "MERGED SUMMARY:"
+        )
+        try:
+            resp = oai.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _COMPACTION_SYSTEM},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=self._max_tokens,
+                temperature=0.0,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            logger.error("Compaction merge failed: %s", e)
+            # Fall back to concatenating summaries
+            return "\n\n".join(summaries)
 
     def search(
         self,

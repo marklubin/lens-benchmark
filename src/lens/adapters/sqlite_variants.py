@@ -1005,6 +1005,7 @@ class SQLiteChunkedAdapter(MemoryAdapter):
             sim = cosine_similarity(query_vec, emb)
             meta = json.loads(row["meta"]) if row["meta"] else {}
             scored.append({
+                "chunk_id": row["chunk_id"],
                 "episode_id": row["episode_id"],
                 "chunk_text": row["text"],
                 "score": sim,
@@ -1013,19 +1014,16 @@ class SQLiteChunkedAdapter(MemoryAdapter):
 
         scored.sort(key=lambda r: r["score"], reverse=True)
 
-        # Deduplicate by episode_id — keep best chunk per episode
-        seen: set[str] = set()
+        # Return chunk-level results with source_episode_id in metadata
         results: list[SearchResult] = []
         for item in scored:
-            ep_id = item["episode_id"]
-            if ep_id in seen:
-                continue
-            seen.add(ep_id)
+            meta = dict(item["metadata"])
+            meta["source_episode_id"] = item["episode_id"]
             results.append(SearchResult(
-                ref_id=ep_id,
+                ref_id=item["chunk_id"],
                 text=item["chunk_text"][:500],
                 score=item["score"],
-                metadata=item["metadata"],
+                metadata=meta,
             ))
             if len(results) >= limit:
                 break
@@ -1034,6 +1032,19 @@ class SQLiteChunkedAdapter(MemoryAdapter):
 
     def retrieve(self, ref_id: str) -> Document | None:
         cur = self._conn.cursor()
+        # Try chunk first
+        cur.execute(
+            "SELECT c.chunk_id, c.episode_id, c.text, e.meta "
+            "FROM chunks c JOIN episodes e ON c.episode_id = e.episode_id "
+            "WHERE c.chunk_id = ?",
+            (ref_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            meta = json.loads(row["meta"]) if row["meta"] else {}
+            meta["source_episode_id"] = row["episode_id"]
+            return Document(ref_id=row["chunk_id"], text=row["text"], metadata=meta)
+        # Fallback: try episode_id (backward compat)
         cur.execute(
             "SELECT episode_id, text, meta FROM episodes WHERE episode_id = ?",
             (ref_id,),
@@ -1165,7 +1176,12 @@ class SQLiteChunkedHybridAdapter(MemoryAdapter):
         self._conn.commit()
 
     def _fts_search(self, query: str, filters: dict | None, limit: int) -> list[SearchResult]:
-        """BM25 keyword search on full episodes."""
+        """BM25 keyword search on full episodes.
+
+        FTS5 operates at episode level (not chunk level), so ref_ids here are
+        episode_ids.  No source_episode_id metadata is needed because the
+        ref_id IS the episode_id.
+        """
         safe_query = _fts5_escape(query)
         if not safe_query:
             return []
@@ -1202,7 +1218,7 @@ class SQLiteChunkedHybridAdapter(MemoryAdapter):
         return results
 
     def _chunk_embedding_search(self, query: str, filters: dict | None, limit: int) -> list[SearchResult]:
-        """Semantic search on chunked embeddings, deduplicated by episode."""
+        """Semantic search on chunked embeddings, returning chunk-level refs."""
         query_vec = self._embed([query])[0]
 
         sql = (
@@ -1227,6 +1243,7 @@ class SQLiteChunkedHybridAdapter(MemoryAdapter):
             sim = cosine_similarity(query_vec, emb)
             meta = json.loads(row["meta"]) if row["meta"] else {}
             scored.append({
+                "chunk_id": row["chunk_id"],
                 "episode_id": row["episode_id"],
                 "chunk_text": row["text"],
                 "score": sim,
@@ -1234,22 +1251,17 @@ class SQLiteChunkedHybridAdapter(MemoryAdapter):
             })
         scored.sort(key=lambda r: r["score"], reverse=True)
 
-        # Deduplicate by episode — keep best chunk per episode
-        seen: set[str] = set()
+        # Return chunk-level results with source_episode_id in metadata
         results: list[SearchResult] = []
-        for item in scored:
-            ep_id = item["episode_id"]
-            if ep_id in seen:
-                continue
-            seen.add(ep_id)
+        for item in scored[:limit]:
+            meta = dict(item["metadata"])
+            meta["source_episode_id"] = item["episode_id"]
             results.append(SearchResult(
-                ref_id=ep_id,
+                ref_id=item["chunk_id"],
                 text=item["chunk_text"][:500],
                 score=item["score"],
-                metadata=item["metadata"],
+                metadata=meta,
             ))
-            if len(results) >= limit:
-                break
         return results
 
     def search(
@@ -1271,6 +1283,19 @@ class SQLiteChunkedHybridAdapter(MemoryAdapter):
 
     def retrieve(self, ref_id: str) -> Document | None:
         cur = self._conn.cursor()
+        # Try chunk first
+        cur.execute(
+            "SELECT c.chunk_id, c.episode_id, c.text, e.meta "
+            "FROM chunks c JOIN episodes e ON c.episode_id = e.episode_id "
+            "WHERE c.chunk_id = ?",
+            (ref_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            meta = json.loads(row["meta"]) if row["meta"] else {}
+            meta["source_episode_id"] = row["episode_id"]
+            return Document(ref_id=row["chunk_id"], text=row["text"], metadata=meta)
+        # Fallback: try episode_id (for FTS results and backward compat)
         cur.execute(
             "SELECT episode_id, text, meta FROM episodes WHERE episode_id = ?",
             (ref_id,),

@@ -1,0 +1,382 @@
+[
+  {
+    "question": {
+      "question_id": "cf01_q01_longitudinal",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 38,
+      "question_type": "longitudinal",
+      "prompt": "Based on the logs so far, are there any concerning patterns in service health?",
+      "ground_truth": {
+        "canonical_answer": "Geo-lookup latency has been gradually increasing. Service-B retry rates are slightly elevated. No user-facing impact yet but worth monitoring.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_009",
+          "cascading_failure_01_ep_010"
+        ],
+        "key_facts": [
+          "geo-lookup API latency increasing",
+          "service-B retry rate elevated",
+          "geo-lookup latency degraded progressively over multiple reporting periods with p99 values increasing from baseline through each successive day rather than appearing as a single sudden spike"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q01_longitudinal",
+      "answer_text": "Yes. The audit logs reveal several emerging issues that could affect service reliability:\n\n| Concern | What the logs show | Evidence |\n|---|---|---|\n| **Gradual latency increase on core e\u2011commerce APIs** \u2013 p50 and p95 response times are creeping upward (e.g., checkout p50\u202f\u2192\u202f92\u202fms \u2192\u202f101\u202fms; p95\u202f\u2192\u202f210\u202fms \u2192\u202f245\u202fms). | The latency drift is documented across the 15\u202fJan \u2192\u202f24\u202fJan period. | \u3010compaction_summary\u3011 |\n| **CPU and memory pressure on IDP API servers** \u2013 CPU rose from ~42\u202f% to ~66\u202f% and memory to ~78\u202f% by late\u2011January, triggering SEVERE alerts on multiple days. | CPU spikes on 7\u202fJan (57\u202f%) and 21\u202fJan (63\u202f%); memory climbs to 78\u202f% on 26\u202fJan. | \u3010compaction_summary\u3011 |\n| **Persistently high error\u2011rate for MFA enrollment** \u2013 error rates stay around 10\u201112\u202f% throughout the window, far above the sub\u20111\u202f% norm for other services. | MFA enrollment error\u2011rate 12.4\u202f% on 3\u202fJan and 9.6\u202f% on 16\u202fJan. | \u3010compaction_summary\u3011 |\n| **Isolated TLS\u2011handshake warnings** \u2013 a single TLS\u2011handshake warning (42 occurrences) appeared on 19\u202fJan, indicating potential certificate or negotiation issues. | TLS\u2011handshake warning on 19\u202fJan. | \u3010compaction_summary\u3011 |\n| **Disk\u2011usage warnings on Metrics\u2011DB and audit\u2011DB** \u2013 usage consistently above 78\u202f% (Metrics\u2011DB) and reaching 77\u201178\u202f% on the audit database, approaching capacity limits. | Disk usage 78\u202f% on 15\u202fJan, 82\u202f% on 16\u202fJan, and 80\u202f% on 24\u202fJan for Metrics\u2011DB; audit\u2011DB 77\u201178\u202f% on 21\u202fJan. | \u3010compaction_summary\u3011 |\n| **Ingest\u2011lag spikes in the audit pipeline** \u2013 p95 ingest latency jumped to 10.1\u202fs on 19\u202fJan before being tuned back to ~6\u20119\u202fs, suggesting occasional back\u2011pressure. | Ingest\u2011lag p95\u202f=\u202f10.1\u202fs on 19\u202fJan. | \u3010compaction_summary\u3011 |\n\nThese patterns\u2014rising latency, resource saturation, elevated error rates, and occasional warning spikes\u2014are all flagged in the logs and merit further investigation and remediation to prevent service degradation.",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "12df8fe5f",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 557
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "12df8fe5f",
+              "content": "{\"search_modes\": [\"compaction\"], \"filter_fields\": [], \"max_results_per_search\": 1, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple documents by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times. Valid ref_ids: 'compaction_summary' (the full summary), or original episode IDs cited in the summary (e.g. 'scope_01_ep_005').\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "2497dac98",
+              "name": "memory_search",
+              "arguments": {
+                "query": "service health logs concerning patterns",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 762
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "2497dac98",
+              "content": "[{\"ref_id\": \"compaction_summary\", \"text\": \"**Executive Summary (2024\\u201101\\u201115\\u202f\\u2192\\u202f2024\\u201101\\u201124\\u202f&\\u202fparallel 2026 audit logs)**  \\n\\n| Area | Key trend / anomaly | Representative data (episode\\u202fID) |\\n|------|--------------------|-----------------------------------|\\n| **Core e\\u2011commerce endpoints** (checkout, fraud_check, geo_lookup, auth, product_catalog, search, recommendations) | Latency slowly drifts upward while error rates stay flat.  *checkout* p50 moves from **92\\u202fms** on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_001] to **101\\u202fms** on 24\\u202fJan\\u202f[\\u200bcascading_\", \"score\": 1.0, \"metadata\": {\"type\": \"compaction_summary\", \"cited_episodes\": 25}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "4cfb347b8",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "compaction_summary"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 1013
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "4cfb347b8",
+              "content": "{\"documents\": [{\"ref_id\": \"compaction_summary\", \"text\": \"**Executive Summary (2024\\u201101\\u201115\\u202f\\u2192\\u202f2024\\u201101\\u201124\\u202f&\\u202fparallel 2026 audit logs)**  \\n\\n| Area | Key trend / anomaly | Representative data (episode\\u202fID) |\\n|------|--------------------|-----------------------------------|\\n| **Core e\\u2011commerce endpoints** (checkout, fraud_check, geo_lookup, auth, product_catalog, search, recommendations) | Latency slowly drifts upward while error rates stay flat.  *checkout* p50 moves from **92\\u202fms** on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_001] to **101\\u202fms** on 24\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_010]; p95 climbs from **210\\u202fms** \\u2192 **245\\u202fms** and p99 from **320\\u202fms** \\u2192 **390\\u202fms**.  Error\\u2011rate remains ~0.12\\u20110.14\\u202f% (e.g., 142 errors on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_001] vs 170 errors on 24\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_010]).  All other front\\u2011end services show the same modest latency increase (e.g., *auth* p95 70\\u202fms \\u2192 76\\u202fms, *search* p95 122\\u202fms \\u2192 134\\u202fms). |\\n| **Gateway & service\\u2011B infrastructure** | CPU stays in the low\\u201130\\u202f% range, memory ~58\\u201161\\u202f%, disk usage constant at **61\\u202f%**.  Connections rise gradually (primary connections 1820\\u202f\\u2192\\u202f2075\\u202f[\\u200bcascading_failure_01_ep_001 \\u2192 \\u200bcascading_failure_01_ep_010]).  A single TLS\\u2011handshake warning appears on 19\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_005] (42 occurrences). |\\n| **Metrics\\u2011DB** | Disk usage warnings climb: **78\\u202f%** on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_001], **82\\u202f%** on 16\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_002], **80\\u202f%** on 18\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_004] and again **80\\u202f%** on 24\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_010].  No critical failures; cleanup jobs run nightly (e.g., 02:00\\u202fZ on 16\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_002]). |\\n| **IDP audit\\u2011service (2026 logs)** | \\u2022 **sso_sessions** latency stable around **42\\u201149\\u202fms** p50 (e.g., 42.4\\u202fms on 11\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_009]), error\\u2011rate 0.45\\u20110.82\\u202f% (peak 0.82\\u202f% on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_001]).  \\u2022 **mfa_enrollment** error\\u2011rate stays high (~10\\u201112\\u202f%) throughout the period (12.4\\u202f% on 3\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_002]; 9.6\\u202f% on 16\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_005]).  \\u2022 **audit_pipeline** drop\\u2011rate stays <0.01\\u202f% (e.g., 0.006\\u202f% on 9\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_008]), but ingest lag p95 spikes to **10.1\\u202fs** on 19\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_018] before being tuned back to ~6\\u20119\\u202fs (e.g., 6.2\\u202fs on 9\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_008]).  \\u2022 **directory_sync** runs 24 times daily, duration 66\\u201195\\u202fs; a single LDAP bind timeout on 4\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_004] caused a retry, later resolved by credential rotation on 13\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_011]. |\\n| **IDP API servers** | CPU climbs from **42\\u202f%** (11\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_009]) to **66\\u202f%** (26\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_025]), triggering SEVERE alerts on 7\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_006] (57\\u202f% CPU) and 21\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_020] (63\\u202f%).  Memory also rises to **78\\u202f%** (26\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_025]).  Disk stays ~64\\u201166\\u202f% but audit\\u2011db disk hits **76\\u201178\\u202f%** (e.g., 77\\u202f% on 21\\u202fJan\\u202f[\", \"metadata\": {}}], \"count\": 1}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "Yes. The audit logs reveal several emerging issues that could affect service reliability:\n\n| Concern | What the logs show | Evidence |\n|---|---|---|\n| **Gradual latency increase on core e\u2011commerce APIs** \u2013 p50 and p95 response times are creeping upward (e.g., checkout p50\u202f\u2192\u202f92\u202fms \u2192\u202f101\u202fms; p95\u202f\u2192\u202f210\u202fms \u2192\u202f245\u202fms). | The latency drift is documented across the 15\u202fJan \u2192\u202f24\u202fJan period. | \u3010compaction_summary\u3011 |\n| **CPU and memory pressure on IDP API servers** \u2013 CPU rose from ~42\u202f% to ~66\u202f% and memory to ~78\u202f% by late\u2011January, triggering SEVERE alerts on multiple days. | CPU spikes on 7\u202fJan (57\u202f%) and 21\u202fJan (63\u202f%); memory climbs to 78\u202f% on 26\u202fJan. | \u3010compaction_summary\u3011 |\n| **Persistently high error\u2011rate for MFA enrollment** \u2013 error rates stay around 10\u201112\u202f% throughout the window, far above the sub\u20111\u202f% norm for other services. | MFA enrollment error\u2011rate 12.4\u202f% on 3\u202fJan and 9.6\u202f% on 16\u202fJan. | \u3010compaction_summary\u3011 |\n| **Isolated TLS\u2011handshake warnings** \u2013 a single TLS\u2011handshake warning (42 occurrences) appeared on 19\u202fJan, indicating potential certificate or negotiation issues. | TLS\u2011handshake warning on 19\u202fJan. | \u3010compaction_summary\u3011 |\n| **Disk\u2011usage warnings on Metrics\u2011DB and audit\u2011DB** \u2013 usage consistently above 78\u202f% (Metrics\u2011DB) and reaching 77\u201178\u202f% on the audit database, approaching capacity limits. | Disk usage 78\u202f% on 15\u202fJan, 82\u202f% on 16\u202fJan, and 80\u202f% on 24\u202fJan for Metrics\u2011DB; audit\u2011DB 77\u201178\u202f% on 21\u202fJan. | \u3010compaction_summary\u3011 |\n| **Ingest\u2011lag spikes in the audit pipeline** \u2013 p95 ingest latency jumped to 10.1\u202fs on 19\u202fJan before being tuned back to ~6\u20119\u202fs, suggesting occasional back\u2011pressure. | Ingest\u2011lag p95\u202f=\u202f10.1\u202fs on 19\u202fJan. | \u3010compaction_summary\u3011 |\n\nThese patterns\u2014rising latency, resource saturation, elevated error rates, and occasional warning spikes\u2014are all flagged in the logs and merit further investigation and remediation to prevent service degradation.",
+          "tokens_used": 3151
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 5483,
+      "wall_time_ms": 1312.014894967433,
+      "budget_violations": [],
+      "refs_cited": [
+        "compaction_summary"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "compaction_summary"
+    ],
+    "valid_ref_ids": [
+      "compaction_summary"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "cf01_q02_null",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 38,
+      "question_type": "null_hypothesis",
+      "prompt": "What were the key operational events on January 20th?",
+      "ground_truth": {
+        "canonical_answer": "A routine day of operations as documented in the daily log summary.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_006"
+        ],
+        "key_facts": []
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q02_null",
+      "answer_text": "",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "876c7a238",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 545
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "4e2b37bdf",
+              "name": "memory_search",
+              "arguments": {
+                "query": "January 20",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 765
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "8e68bb6e2",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "compaction_summary"
+              }
+            }
+          ],
+          "tokens_used": 1008
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "69deca556",
+              "name": "memory_search",
+              "arguments": {
+                "query": "20 Jan",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 2441
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "10efdb626",
+              "name": "memory_search",
+              "arguments": {
+                "query": "\"20 Jan\"",
+                "limit": 20
+              }
+            }
+          ],
+          "tokens_used": 2757
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "36a517f19",
+              "name": "memory_search",
+              "arguments": {
+                "query": "20 Jan 2024",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 3169
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "a643cf2fc",
+              "name": "memory_search",
+              "arguments": {
+                "query": "20 Jan",
+                "limit": 20
+              }
+            }
+          ],
+          "tokens_used": 3398
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "5ee13152c",
+              "name": "memory_search",
+              "arguments": {
+                "query": "20 Jan",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 3616
+        }
+      ],
+      "tool_calls_made": 7,
+      "total_tokens": 17699,
+      "wall_time_ms": 2243.6553899897262,
+      "budget_violations": [
+        "Token limit exceeded: 17699 > 16384",
+        "Turn limit exceeded: 8 >= 8"
+      ],
+      "refs_cited": [
+        "compaction_summary"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "compaction_summary"
+    ],
+    "valid_ref_ids": [
+      "compaction_summary"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "cf01_q13_paraphrase",
+      "scope_id": "cascading_failure_01",
+      "checkpoint_after": 38,
+      "question_type": "paraphrase",
+      "prompt": "Are any upstream dependencies showing degraded performance?",
+      "ground_truth": {
+        "canonical_answer": "Yes. Geo-lookup latency has been gradually increasing. Service-B retry rates are slightly elevated. No user-facing impact yet but worth monitoring.",
+        "required_evidence_refs": [
+          "cascading_failure_01_ep_009",
+          "cascading_failure_01_ep_010"
+        ],
+        "key_facts": [
+          "geo-lookup API latency increasing",
+          "service-B retry rate elevated",
+          "geo-lookup latency degraded progressively over multiple reporting periods with p99 values increasing from baseline through each successive day rather than appearing as a single sudden spike"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "cf01_q13_paraphrase",
+      "answer_text": "Yes. Several upstream services are showing signs of degraded performance:\n\n* **IDP API servers** \u2013 CPU utilization has risen from the low\u201140\u202f% range to the mid\u201160\u202f% range, triggering SEVERE alerts on multiple days (e.g., 57\u202f% on 7\u202fJan\u202f[\u200bcascading_failure_01_dx_006] and 66\u202f% on 26\u202fJan\u202f[\u200bcascading_failure_01_dx_025]). Memory usage has also climbed to ~78\u202f% (26\u202fJan\u202f[\u200bcascading_failure_01_dx_025]).\n\n* **Audit\u2011pipeline (IDP audit\u2011service)** \u2013 The ingest\u2011lag p95 spiked to **10.1\u202fs** on 19\u202fJan\u202f[\u200bcascading_failure_01_dx_018] before being tuned back to the normal 6\u20139\u202fs range.\n\n* **Metrics\u2011DB** \u2013 Disk\u2011usage warnings have increased, reaching **82\u202f%** on 16\u202fJan\u202f[\u200bcascading_failure_01_ep_002] and staying around 80\u202f% on later days (e.g., 24\u202fJan\u202f[\u200bcascading_failure_01_ep_010]).\n\n* **Directory\u2011sync (IDP audit\u2011service)** \u2013 A single LDAP bind timeout occurred on 4\u202fJan\u202f[\u200bcascading_failure_01_dx_004], causing a retry and a brief performance dip.\n\nThese observations indicate that upstream dependencies are experiencing elevated resource utilization and occasional latency spikes, which could affect downstream services.",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "88cce388b",
+              "name": "memory_capabilities",
+              "arguments": {}
+            }
+          ],
+          "tokens_used": 544
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "88cce388b",
+              "content": "{\"search_modes\": [\"compaction\"], \"filter_fields\": [], \"max_results_per_search\": 1, \"supports_date_range\": false, \"extra_tools\": [{\"name\": \"batch_retrieve\", \"description\": \"Retrieve multiple documents by their reference IDs in a single call. PREFER this over calling memory_retrieve multiple times. Valid ref_ids: 'compaction_summary' (the full summary), or original episode IDs cited in the summary (e.g. 'scope_01_ep_005').\", \"parameters\": {\"type\": \"object\", \"properties\": {\"ref_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"List of reference IDs to retrieve.\"}}, \"required\": [\"ref_ids\"]}}]}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "4976c0c19",
+              "name": "memory_search",
+              "arguments": {
+                "query": "upstream dependencies degraded performance",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 736
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "4976c0c19",
+              "content": "[{\"ref_id\": \"compaction_summary\", \"text\": \"**Executive Summary (2024\\u201101\\u201115\\u202f\\u2192\\u202f2024\\u201101\\u201124\\u202f&\\u202fparallel 2026 audit logs)**  \\n\\n| Area | Key trend / anomaly | Representative data (episode\\u202fID) |\\n|------|--------------------|-----------------------------------|\\n| **Core e\\u2011commerce endpoints** (checkout, fraud_check, geo_lookup, auth, product_catalog, search, recommendations) | Latency slowly drifts upward while error rates stay flat.  *checkout* p50 moves from **92\\u202fms** on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_001] to **101\\u202fms** on 24\\u202fJan\\u202f[\\u200bcascading_\", \"score\": 1.0, \"metadata\": {\"type\": \"compaction_summary\", \"cited_episodes\": 25}}]",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "1944a76f5",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "compaction_summary"
+              }
+            }
+          ],
+          "tokens_used": 997
+        },
+        {
+          "role": "tool",
+          "tool_results": [
+            {
+              "tool_call_id": "1944a76f5",
+              "content": "{\"ref_id\": \"compaction_summary\", \"text\": \"**Executive Summary (2024\\u201101\\u201115\\u202f\\u2192\\u202f2024\\u201101\\u201124\\u202f&\\u202fparallel 2026 audit logs)**  \\n\\n| Area | Key trend / anomaly | Representative data (episode\\u202fID) |\\n|------|--------------------|-----------------------------------|\\n| **Core e\\u2011commerce endpoints** (checkout, fraud_check, geo_lookup, auth, product_catalog, search, recommendations) | Latency slowly drifts upward while error rates stay flat.  *checkout* p50 moves from **92\\u202fms** on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_001] to **101\\u202fms** on 24\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_010]; p95 climbs from **210\\u202fms** \\u2192 **245\\u202fms** and p99 from **320\\u202fms** \\u2192 **390\\u202fms**.  Error\\u2011rate remains ~0.12\\u20110.14\\u202f% (e.g., 142 errors on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_001] vs 170 errors on 24\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_010]).  All other front\\u2011end services show the same modest latency increase (e.g., *auth* p95 70\\u202fms \\u2192 76\\u202fms, *search* p95 122\\u202fms \\u2192 134\\u202fms). |\\n| **Gateway & service\\u2011B infrastructure** | CPU stays in the low\\u201130\\u202f% range, memory ~58\\u201161\\u202f%, disk usage constant at **61\\u202f%**.  Connections rise gradually (primary connections 1820\\u202f\\u2192\\u202f2075\\u202f[\\u200bcascading_failure_01_ep_001 \\u2192 \\u200bcascading_failure_01_ep_010]).  A single TLS\\u2011handshake warning appears on 19\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_005] (42 occurrences). |\\n| **Metrics\\u2011DB** | Disk usage warnings climb: **78\\u202f%** on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_001], **82\\u202f%** on 16\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_002], **80\\u202f%** on 18\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_004] and again **80\\u202f%** on 24\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_010].  No critical failures; cleanup jobs run nightly (e.g., 02:00\\u202fZ on 16\\u202fJan\\u202f[\\u200bcascading_failure_01_ep_002]). |\\n| **IDP audit\\u2011service (2026 logs)** | \\u2022 **sso_sessions** latency stable around **42\\u201149\\u202fms** p50 (e.g., 42.4\\u202fms on 11\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_009]), error\\u2011rate 0.45\\u20110.82\\u202f% (peak 0.82\\u202f% on 15\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_001]).  \\u2022 **mfa_enrollment** error\\u2011rate stays high (~10\\u201112\\u202f%) throughout the period (12.4\\u202f% on 3\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_002]; 9.6\\u202f% on 16\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_005]).  \\u2022 **audit_pipeline** drop\\u2011rate stays <0.01\\u202f% (e.g., 0.006\\u202f% on 9\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_008]), but ingest lag p95 spikes to **10.1\\u202fs** on 19\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_018] before being tuned back to ~6\\u20119\\u202fs (e.g., 6.2\\u202fs on 9\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_008]).  \\u2022 **directory_sync** runs 24 times daily, duration 66\\u201195\\u202fs; a single LDAP bind timeout on 4\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_004] caused a retry, later resolved by credential rotation on 13\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_011]. |\\n| **IDP API servers** | CPU climbs from **42\\u202f%** (11\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_009]) to **66\\u202f%** (26\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_025]), triggering SEVERE alerts on 7\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_006] (57\\u202f% CPU) and 21\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_020] (63\\u202f%).  Memory also rises to **78\\u202f%** (26\\u202fJan\\u202f[\\u200bcascading_failure_01_dx_025]).  Disk stays ~64\\u201166\\u202f% but audit\\u2011db disk hits **76\\u201178\\u202f%** (e.g., 77\\u202f% on 21\\u202fJan\\u202f[\", \"metadata\": {}}",
+              "is_error": false
+            }
+          ],
+          "tokens_used": 0
+        },
+        {
+          "role": "assistant",
+          "content": "Yes. Several upstream services are showing signs of degraded performance:\n\n* **IDP API servers** \u2013 CPU utilization has risen from the low\u201140\u202f% range to the mid\u201160\u202f% range, triggering SEVERE alerts on multiple days (e.g., 57\u202f% on 7\u202fJan\u202f[\u200bcascading_failure_01_dx_006] and 66\u202f% on 26\u202fJan\u202f[\u200bcascading_failure_01_dx_025]). Memory usage has also climbed to ~78\u202f% (26\u202fJan\u202f[\u200bcascading_failure_01_dx_025]).\n\n* **Audit\u2011pipeline (IDP audit\u2011service)** \u2013 The ingest\u2011lag p95 spiked to **10.1\u202fs** on 19\u202fJan\u202f[\u200bcascading_failure_01_dx_018] before being tuned back to the normal 6\u20139\u202fs range.\n\n* **Metrics\u2011DB** \u2013 Disk\u2011usage warnings have increased, reaching **82\u202f%** on 16\u202fJan\u202f[\u200bcascading_failure_01_ep_002] and staying around 80\u202f% on later days (e.g., 24\u202fJan\u202f[\u200bcascading_failure_01_ep_010]).\n\n* **Directory\u2011sync (IDP audit\u2011service)** \u2013 A single LDAP bind timeout occurred on 4\u202fJan\u202f[\u200bcascading_failure_01_dx_004], causing a retry and a brief performance dip.\n\nThese observations indicate that upstream dependencies are experiencing elevated resource utilization and occasional latency spikes, which could affect downstream services.",
+          "tokens_used": 3068
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 5345,
+      "wall_time_ms": 1462.7360579906963,
+      "budget_violations": [],
+      "refs_cited": [
+        "compaction_summary"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "compaction_summary"
+    ],
+    "valid_ref_ids": [
+      "compaction_summary"
+    ]
+  }
+]

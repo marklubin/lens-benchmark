@@ -8,12 +8,13 @@ from dataclasses import dataclass, field
 class LLMConfig:
     """Configuration for the LLM used by the runner."""
 
-    provider: str = "mock"  # "mock", "anthropic", "openai"
+    provider: str = "mock"  # "mock", "modal", "static" ("openai" accepted as alias for "modal")
     model: str = "gpt-4o-mini"
     api_base: str | None = None
     api_key: str | None = None
     seed: int = 42
     temperature: float = 0.0
+    query_plan: str | None = None  # Path to query plan JSON for static driver
 
     @classmethod
     def from_dict(cls, d: dict) -> LLMConfig:
@@ -28,6 +29,7 @@ class LLMConfig:
             api_key=os.environ.get("LENS_LLM_API_KEY", self.api_key),
             seed=int(os.environ.get("LENS_LLM_SEED", str(self.seed))),
             temperature=float(os.environ.get("LENS_LLM_TEMPERATURE", str(self.temperature))),
+            query_plan=self.query_plan,
         )
 
 
@@ -62,12 +64,12 @@ class AgentBudgetConfig:
         """Standard budget for normal runs."""
         return cls(
             preset="standard",
-            max_turns=10,
-            max_tool_calls=20,
+            max_turns=4,
+            max_tool_calls=4,
             max_payload_bytes=65536,
-            max_latency_per_call_ms=5000,
+            max_latency_per_call_ms=30000,
             max_agent_tokens=32768,
-            ingest_max_latency_ms=200,
+            ingest_max_latency_ms=30000,
         )
 
     @classmethod
@@ -85,35 +87,35 @@ class AgentBudgetConfig:
 
     @classmethod
     def constrained_16k(cls) -> AgentBudgetConfig:
-        """Constrained budget — 16K token cap on cumulative tool results."""
+        """Constrained budget — legacy 16K preset, tokens no longer enforced."""
         return cls(
             preset="constrained-16k",
             max_turns=10,
-            max_tool_calls=20,
+            max_tool_calls=4,
             max_payload_bytes=131072,
             max_latency_per_call_ms=10000,
             max_agent_tokens=32768,
             ingest_max_latency_ms=200,
-            max_cumulative_result_tokens=16384,
+            max_cumulative_result_tokens=0,
         )
 
     @classmethod
     def constrained_8k(cls) -> AgentBudgetConfig:
-        """Constrained budget — 8K token cap on cumulative tool results."""
+        """Constrained budget — legacy 8K preset, tokens no longer enforced."""
         return cls(
             preset="constrained-8k",
-            max_turns=8,
-            max_tool_calls=16,
+            max_turns=4,
+            max_tool_calls=4,
             max_payload_bytes=65536,
-            max_latency_per_call_ms=5000,
+            max_latency_per_call_ms=30000,
             max_agent_tokens=16384,
-            ingest_max_latency_ms=200,
-            max_cumulative_result_tokens=8192,
+            ingest_max_latency_ms=30000,
+            max_cumulative_result_tokens=0,
         )
 
     @classmethod
     def constrained_4k(cls) -> AgentBudgetConfig:
-        """Constrained budget — 4K token cap on cumulative tool results."""
+        """Constrained budget — legacy 4K preset, tokens no longer enforced."""
         return cls(
             preset="constrained-4k",
             max_turns=6,
@@ -122,12 +124,12 @@ class AgentBudgetConfig:
             max_latency_per_call_ms=5000,
             max_agent_tokens=16384,
             ingest_max_latency_ms=200,
-            max_cumulative_result_tokens=4096,
+            max_cumulative_result_tokens=0,
         )
 
     @classmethod
     def constrained_2k(cls) -> AgentBudgetConfig:
-        """Constrained budget — 2K token cap on cumulative tool results."""
+        """Constrained budget — legacy 2K preset, tokens no longer enforced."""
         return cls(
             preset="constrained-2k",
             max_turns=6,
@@ -136,7 +138,7 @@ class AgentBudgetConfig:
             max_latency_per_call_ms=5000,
             max_agent_tokens=16384,
             ingest_max_latency_ms=200,
-            max_cumulative_result_tokens=2048,
+            max_cumulative_result_tokens=0,
         )
 
     @classmethod

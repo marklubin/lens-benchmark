@@ -21,7 +21,7 @@ def _default_dataset() -> str:
 @click.option("--out", "output_dir", default="output", help="Output directory")
 @click.option("--budget", default="standard", type=click.Choice(["fast", "standard", "extended", "constrained-4k", "constrained-2k"]))
 @click.option("--seed", default=42, type=int)
-@click.option("--provider", default=None, help="LLM provider (mock, openai)")
+@click.option("--provider", default=None, help="LLM provider (mock, modal, static)")
 @click.option("--model", default=None, help="LLM model name")
 @click.option("--parallel-questions", default=None, type=int, help="Number of questions to answer concurrently (default: 1)")
 @click.option("--cache-dir", default=None, type=click.Path(), help="Directory for adapter state caching (enables cache)")

@@ -440,7 +440,7 @@ class TestHindsightCapabilities:
     def test_max_results_per_search(self):
         adapter = _make_adapter()
         caps = adapter.get_capabilities()
-        assert caps.max_results_per_search == 10
+        assert caps.max_results_per_search == 5
 
     def test_batch_retrieve_tool_registered(self):
         adapter = _make_adapter()

@@ -30,10 +30,43 @@ def create_llm_client(
     if config.provider == "mock":
         return MockLLMClient()
 
-    if config.provider == "openai":
+    if config.provider == "static":
         if not config.api_key:
             raise ConfigError(
-                "OpenAI provider requires an API key. "
+                "Static provider requires an API key for synthesis. "
+                "Set LENS_LLM_API_KEY or pass --api-key."
+            )
+        import json
+        from pathlib import Path
+
+        from lens.agent.static_driver import StaticLLMClient
+
+        plans: dict = {}
+        if config.query_plan:
+            plan_path = Path(config.query_plan)
+            if plan_path.exists():
+                raw = json.loads(plan_path.read_text())
+                plans = raw.get("plans", raw)
+            else:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Query plan file not found: %s — using default plans",
+                    config.query_plan,
+                )
+
+        return StaticLLMClient(
+            plans=plans,
+            api_key=config.api_key,
+            model=config.model,
+            base_url=config.api_base,
+            temperature=config.temperature,
+            seed=config.seed,
+        )
+
+    if config.provider in ("modal", "openai"):
+        if not config.api_key:
+            raise ConfigError(
+                "Modal provider requires an API key. "
                 "Set LENS_LLM_API_KEY or pass --api-key."
             )
         from lens.agent.openai_client import OpenAIClient
@@ -48,7 +81,24 @@ def create_llm_client(
             cache_dir=cache_dir,
         )
 
+    if config.provider == "anthropic":
+        api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ConfigError(
+                "Anthropic provider requires an API key. "
+                "Set ANTHROPIC_API_KEY or pass --api-key."
+            )
+        from lens.agent.anthropic_client import AnthropicClient
+
+        return AnthropicClient(
+            api_key=api_key,
+            model=config.model,
+            temperature=config.temperature,
+            max_tokens=4096,
+            cache_dir=cache_dir,
+        )
+
     raise ConfigError(
         f"Unknown LLM provider: {config.provider!r}. "
-        f"Available providers: mock, openai"
+        f"Available providers: mock, modal, anthropic, static"
     )

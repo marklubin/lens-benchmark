@@ -96,6 +96,10 @@ def _ensure_builtins() -> None:
     except ImportError:
         pass  # letta-client not installed
     try:
+        import lens.adapters.letta_v4  # noqa: F401
+    except ImportError:
+        pass  # letta-client not installed
+    try:
         import lens.adapters.graphiti_adapter  # noqa: F401
     except ImportError:
         pass  # graphiti-core not installed
@@ -108,6 +112,22 @@ def _ensure_builtins() -> None:
     except ImportError:
         pass  # openai not installed
     try:
+        import lens.adapters.hopping  # noqa: F401
+    except ImportError:
+        pass  # openai not installed
+    try:
         import lens.adapters.triad_v1  # noqa: F401
     except ImportError:
         pass  # openai not installed
+    try:
+        import lens.adapters.hierarchical  # noqa: F401
+    except ImportError:
+        pass  # openai not installed
+    try:
+        import lens.adapters.graphrag_light  # noqa: F401
+    except ImportError:
+        pass  # networkx not installed
+    try:
+        import lens.adapters.letta_v4_nosleep  # noqa: F401
+    except ImportError:
+        pass  # letta-client not installed

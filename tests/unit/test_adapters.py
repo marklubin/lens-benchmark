@@ -36,7 +36,7 @@ class TestNullAdapter:
         caps = adapter.get_capabilities()
         assert isinstance(caps, CapabilityManifest)
         assert "semantic" in caps.search_modes
-        assert caps.max_results_per_search == 10
+        assert caps.max_results_per_search == 5
 
     def test_prepare_noop(self):
         adapter = NullAdapter()

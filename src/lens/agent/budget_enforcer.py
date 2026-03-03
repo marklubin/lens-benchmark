@@ -90,25 +90,13 @@ class BudgetEnforcement:
         self.total_tokens += n
 
     def check_cumulative_results(self, result_bytes: int) -> bool:
-        """Check if adding this result would exceed the cumulative result token cap.
+        """Track cumulative result tokens consumed.
 
-        Estimates tokens as bytes / 4. Returns True if within budget (or unlimited),
-        False if over limit. Records a violation when exceeded.
+        Estimates tokens as bytes / 4. Always returns True — cumulative tokens
+        are tracked as a metric but no longer enforced as a hard limit.
         """
-        if self.budget.max_cumulative_result_tokens <= 0:
-            return True  # Unlimited
-
         estimated_tokens = result_bytes // 4
         self.cumulative_result_tokens += estimated_tokens
-
-        if self.cumulative_result_tokens > self.budget.max_cumulative_result_tokens:
-            self.context_exhausted = True
-            msg = (
-                f"Cumulative result token limit exceeded: "
-                f"{self.cumulative_result_tokens} > {self.budget.max_cumulative_result_tokens}"
-            )
-            self.violations.append(msg)
-            return False
         return True
 
     @property
@@ -118,7 +106,6 @@ class BudgetEnforcement:
             self.turns_used >= self.budget.max_turns
             or self.tool_calls_used >= self.budget.max_total_tool_calls
             or self.total_tokens >= self.budget.max_agent_tokens
-            or self.context_exhausted
         )
 
     def summary(self) -> dict:
@@ -139,9 +126,5 @@ class BudgetEnforcement:
                 "max_agent_tokens": self.budget.max_agent_tokens,
             },
         }
-        if self.budget.max_cumulative_result_tokens > 0:
-            s["cumulative_result_tokens"] = self.cumulative_result_tokens
-            s["budget"]["max_cumulative_result_tokens"] = (
-                self.budget.max_cumulative_result_tokens
-            )
+        s["cumulative_result_tokens"] = self.cumulative_result_tokens
         return s
