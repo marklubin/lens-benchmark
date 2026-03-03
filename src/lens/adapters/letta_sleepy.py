@@ -118,6 +118,10 @@ class LettaSleepyAdapter(MemoryAdapter):
         self._agent_id: str | None = None
         self._scope_id: str | None = None
         self._text_cache: dict[str, str] = {}
+        # Initial message IDs captured after agent creation — used to
+        # reset the conversation buffer between episodes so history
+        # doesn't accumulate (core memory + archival are preserved).
+        self._initial_msg_ids: list[str] = []
 
     def _get_client(self):
         if self._client is None:
@@ -147,6 +151,77 @@ class LettaSleepyAdapter(MemoryAdapter):
         except Exception as e:
             log.warning("Letta agent message failed: %s", e)
             return ""
+
+    # ------------------------------------------------------------------
+    # Message buffer management
+    # ------------------------------------------------------------------
+
+    def _snapshot_initial_messages(self) -> None:
+        """Capture the agent's initial in-context message IDs.
+
+        Called once after agent creation. The captured IDs are used by
+        _reset_message_buffer() to restore the conversation to its
+        pristine state between episodes.
+        """
+        import httpx
+
+        try:
+            resp = httpx.get(
+                f"{self._base_url}/v1/agents/{self._agent_id}",
+                headers={"Authorization": "Bearer dummy"},
+                timeout=30.0,
+            )
+            if resp.status_code == 200:
+                self._initial_msg_ids = resp.json().get("message_ids", [])
+                log.info(
+                    "Captured %d initial message IDs for buffer resets",
+                    len(self._initial_msg_ids),
+                )
+            else:
+                log.warning(
+                    "Failed to snapshot initial messages: HTTP %d",
+                    resp.status_code,
+                )
+                self._initial_msg_ids = []
+        except Exception as e:
+            log.warning("Failed to snapshot initial messages: %s", e)
+            self._initial_msg_ids = []
+
+    def _reset_message_buffer(self) -> None:
+        """Reset the agent's in-context messages to the initial state.
+
+        Preserves core memory blocks and archival passages — only the
+        conversation history is rolled back so it doesn't accumulate
+        across episodes and overflow the LLM context window.
+        """
+        if not self._agent_id or not self._initial_msg_ids:
+            return
+
+        import httpx
+
+        try:
+            resp = httpx.patch(
+                f"{self._base_url}/v1/agents/{self._agent_id}",
+                headers={
+                    "Authorization": "Bearer dummy",
+                    "Content-Type": "application/json",
+                },
+                json={"message_ids": self._initial_msg_ids},
+                timeout=30.0,
+            )
+            if resp.status_code < 300:
+                log.debug(
+                    "Reset message buffer to %d initial messages",
+                    len(self._initial_msg_ids),
+                )
+            else:
+                log.warning(
+                    "Failed to reset message buffer: HTTP %d — %s",
+                    resp.status_code,
+                    resp.text[:300],
+                )
+        except Exception as e:
+            log.warning("Failed to reset message buffer: %s", e)
 
     # ------------------------------------------------------------------
     # Letta configuration helpers
@@ -271,6 +346,10 @@ class LettaSleepyAdapter(MemoryAdapter):
         self._scope_id = scope_id
         self._text_cache = {}
 
+        # Capture initial message state before any interactions —
+        # used to reset the conversation buffer between episodes.
+        self._snapshot_initial_messages()
+
         # Give the primary agent core memory editing tools so it can
         # consolidate insights during prepare() — not just search.
         self._attach_memory_tools(agent.id)
@@ -292,33 +371,63 @@ class LettaSleepyAdapter(MemoryAdapter):
         text: str,
         meta: dict | None = None,
     ) -> None:
-        """Store an episode as an archival passage."""
+        """Ingest an episode: store in archival + send as agent message.
+
+        Two-pronged approach:
+        1. passages.create() — guarantees the episode is in archival memory
+           for retrieval (the LLM agent may not reliably call
+           insert_archival_memory on its own).
+        2. messages.create() — lets the agent process the episode, update
+           core memory, and trigger the sleep-time agent for consolidation.
+
+        After the agent finishes processing, the conversation buffer is
+        reset so messages don't accumulate across episodes.
+        """
         if not self._agent_id:
             raise AdapterError("reset() must be called before ingest()")
 
-        content = f"[{episode_id}] {timestamp}: {text}"
         client = self._get_client()
-        client.agents.passages.create(
-            agent_id=self._agent_id,
-            text=content,
+
+        # 1) Direct archival storage — guaranteed retrieval
+        tagged_text = f"[{episode_id}] {timestamp}\n\n{text}"
+        try:
+            client.agents.passages.create(
+                agent_id=self._agent_id,
+                text=tagged_text,
+            )
+        except Exception as e:
+            log.warning("passages.create() failed for %s: %s", episode_id, e)
+
+        # 2) Agent message — triggers sleep-time consolidation
+        self._ask_agent(
+            f"New episode [{episode_id}] has been stored in your archival memory. "
+            f"Key context: {text[:500]}... "
+            f"Update your core memory with any significant patterns or developments.",
+            max_steps=10,
         )
+
+        # Wipe conversation buffer — core memory + archival persist.
+        self._reset_message_buffer()
+
         self._text_cache[episode_id] = text
 
     def prepare(self, scope_id: str, checkpoint: int) -> None:
-        """Nudge the Letta agent to trigger sleep consolidation.
+        """Signal that all episodes for this checkpoint are ingested.
 
-        Send a message so the sleep-time agent has conversation context
-        to work with. The sleep agent runs automatically every N steps.
+        Sends a consolidation prompt so the agent (and its sleep-time
+        companion) can do any final processing.  The conversation buffer
+        is reset afterwards to keep the next round clean.
         """
         if not self._agent_id:
             return
-        log.info("Triggering sleep consolidation at checkpoint %d", checkpoint)
+        log.info("Triggering consolidation at checkpoint %d", checkpoint)
         self._ask_agent(
-            f"You have received new episodes up to checkpoint {checkpoint}. "
-            "Please review your archival memory and make sure your core memory "
-            "reflects the key patterns and developments so far.",
+            f"All episodes up to checkpoint {checkpoint} have been ingested. "
+            f"Review your archival memory and consolidate the key patterns, "
+            f"trends, and developments into your core memory blocks.",
             max_steps=15,
         )
+        self._reset_message_buffer()
 
     def search(
         self,

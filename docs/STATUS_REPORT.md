@@ -1,14 +1,14 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-03-01 (session 30)
+**Last Updated**: 2026-03-03 (session 32)
 **Scoring Pipeline**: v3.2 (naive baseline advantage replaces longitudinal_advantage, per-question timing)
-**Agent LLM**: Qwen3.5-35B-A3B (Modal vLLM) / GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI)
+**Agent LLM**: Qwen3.5-35B-A3B (Modal vLLM) / Claude Sonnet (Anthropic, Letta runs) / GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI)
 **Judge LLM**: Qwen3.5-35B-A3B (Modal) / GPT-OSS-120B (Cerebras, session 23)
 **Token Cap**: 32,768 (standard) / 16,384 (constrained-16k) / 8,192 (constrained-8k) / 4,096 (constrained-4k) / 2,048 (constrained-2k)
-**Dataset**: 6 numeric scopes (01-06) + 3 narrative scopes (07-09, **120 episodes generated, 633K words**), 144+30 questions, 720+60 signal episodes + 540+60 distractor episodes
-**Unit Tests**: 992 passing (50 letta-sleepy mock failures — pre-existing)
-**Adapters Under Evaluation**: 8 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti) + 3 new (hierarchical, hierarchical-hybrid, **letta-v4**). ~~hindsight~~ removed — see session 19 notes.
-**Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + 12 Phase 3 runs + **90 Phase 5 runs scored (of 96 attempted)** + **9 narrative scope runs (Phase 6)**
+**Dataset**: 6 numeric scopes (01-06) + 3 narrative scopes (07-09, **120 episodes generated, 633K words**) + 3 CDR scopes (10-12, **120 episodes, clinical/zoning/therapy**), 144+30+30 questions, 720+60+60 signal episodes + 540+60+60 distractor episodes
+**Unit Tests**: 1040 passing
+**Adapters Under Evaluation**: 8 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti) + 5 new (hierarchical, hierarchical-hybrid, hopping, graphrag-light, **letta-entity**). ~~hindsight~~ removed — see session 19 notes.
+**Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + 12 Phase 3 runs + **90 Phase 5 runs scored (of 96 attempted)** + **9 narrative scope runs (Phase 6)** + **3 letta-v4 runs** + **21 CDR scope runs (Phase 7)**
 
 ---
 
@@ -16,7 +16,7 @@
 
 LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluating whether AI agent memory systems can synthesize conclusions from evidence scattered across many sequential episodes, rather than finding answers in a single document.
 
-**Current state**: Core infrastructure is feature-complete. **90/96 Phase 5 runs scored** — all 8 adapters evaluated across 6 domain-diverse scopes with distractor episodes. **Phase 6 (narrative scopes)**: 9/9 initial runs scored across 3 adapters (null, sqlite-chunked-hybrid, hopping) on scopes 07-09 with Qwen3.5-35B-A3B. Static driver and hierarchical adapter implemented for systematic query quality analysis.
+**Current state**: Core infrastructure is feature-complete. **90/96 Phase 5 runs scored** — all 8 adapters evaluated across 6 domain-diverse scopes with distractor episodes. **Phase 6 (narrative scopes)**: 60/60 runs scored across 10 adapters on scopes 07-09. **CDR scopes (10-12)**: 21/21 runs scored across 7 adapters × 3 new scopes (clinical trial, zoning corruption, therapy chat) using Letta + Anthropic Sonnet and self-contained adapters. sqlite-chunked-hybrid leads (0.600 mean), Letta/Sonnet 2nd (0.581).
 
 **Key finding 12 — PHASE 5 COMPLETE (90/96 scored): Simple retrieval beats all complex memory architectures**: Using Cerebras GPT-OSS-120B as agent LLM (judge + embeddings via Modal). **sqlite-chunked-hybrid leads with 0.473 mean composite (CI: 0.406–0.502)**. Cognee 2nd (0.432), graphiti 3rd (0.426 on 3 scopes). All 7 non-null adapters complete 12/12 runs except graphiti (6/12 — entity extraction timeout on scopes 03-05). **16k > 8k for all adapters** (p=0.016, Wilcoxon). **Kendall's W = 0.755** (strong concordance). 12 of 28 pairwise comparisons significant at p<0.05. **No adapter exceeds 0.50 composite** — the benchmark's core longitudinal synthesis challenge remains unsolved. **Judge reliability: minimal position bias (A/(A+B)=0.451), 7,652 total judgments, but cognee has 100% TIE rate (judge failure).**
 
@@ -47,6 +47,50 @@ LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluat
 ---
 
 ## Latest Benchmark Results
+
+### CDR Scopes 10-12: Complete Benchmark (Sessions 31-32, 2026-03-02/03)
+
+**21/21 runs scored (7 adapters × 3 CDR scopes).** Three new domain-diverse scopes: clinical trial (S10), zoning corruption (S11), therapy chat (S12). Each scope: 40 episodes (20 signal + 20 distractor, ~5,000 words each). Self-contained adapters use static driver with Qwen3.5-35B-A3B (Modal). Letta adapters use Anthropic Claude Sonnet via local Letta container. Budget: constrained-8k.
+
+#### Composite Score Rankings
+
+| Rank | Adapter | S10 (Clinical) | S11 (Zoning) | S12 (Therapy) | Mean |
+|------|---------|-----------------|--------------|----------------|------|
+| 1 | **sqlite-chunked-hybrid** | **0.519** | **0.691** | 0.589 | **0.600** |
+| 2 | letta (Sonnet) | 0.471 | 0.623 | **0.650** | 0.581 |
+| 3 | graphrag-light | 0.514 | 0.658 | 0.563 | 0.578 |
+| 4 | hierarchical | **0.552** | 0.590 | 0.580 | 0.574 |
+| 5 | letta-sleepy (Sonnet) | 0.444 | 0.572 | 0.606 | 0.541 |
+| 6 | hopping | 0.372 | 0.509 | 0.506 | 0.462 |
+| 7 | null | 0.000 | 0.000 | 0.000 | 0.000 |
+
+#### Run IDs
+
+| Adapter | S10 | S11 | S12 |
+|---------|-----|-----|-----|
+| null | `340477991de2` | `d21e6de830a6` | `f2dd4080d062` |
+| sqlite-chunked-hybrid | `70c67b943fa3` | `97b913da439f` | `44a460070f36` |
+| hopping | `7c87336f4eaa` | `e9c180d754d3` | `33068702c449` |
+| hierarchical | `265bf4ba9abd` | `9df4e4d3f983` | `bb0d85ca45e8` |
+| graphrag-light | `11dc9cc02017` | `4c7b08a51153` | `570997c3e031` |
+| letta | `ee81d92699f2` | `a5849efcb327` | `f1a224122c0c` |
+| letta-sleepy | `4710d74ce9ca` | `e0083831508e` | `ad801eb8d72d` |
+
+#### Key Findings
+
+1. **sqlite-chunked-hybrid leads again** (0.600 mean) — consistent with Phase 5 (0.473) and Phase 6 (0.805). Simple FTS+embedding hybrid retrieval beats all complex memory architectures across every benchmark phase.
+2. **Letta + Anthropic Sonnet performs well** (0.581, #2) — demonstrates that LLM quality matters more than memory architecture sophistication. Standard Letta with a strong LLM beats letta-sleepy's sleep-time consolidation.
+3. **graphrag-light** (0.578, #3) — competitive after entity dedup fix. The lightweight graph approach performs comparably to hierarchical without requiring multi-level summarization.
+4. **letta-sleepy archival fix was critical**: Previous implementation relied on the LLM agent calling `insert_archival_memory` — unreliable. Fix: deterministic `passages.create()` + shortened agent message for consolidation. Scores went from 0.0 (gated by evidence_grounding=0) to 0.44-0.61.
+5. **hopping underperforms** (0.462) — rolling summary approach loses fine-grained evidence across these longer narrative episodes.
+6. **triadv1-pairs hangs reproducibly** on S10 — killed twice, needs investigation. Excluded from CDR results.
+
+#### Bug Fixes Applied
+
+- **graphrag-light entity dedup KeyError**: `_llm_dedup_check()` returned display-form names (e.g., "Elm Street") but graph stores normalized lowercase keys. Fix: normalize returned name + verify existence before use.
+- **letta-sleepy archival storage**: Sonnet didn't reliably call `insert_archival_memory` tool when prompted. Fix: two-pronged ingest — `passages.create()` for guaranteed storage + shortened agent message for consolidation. Run time dropped from ~3 hours to ~20 minutes per scope.
+
+---
 
 ### Letta V4: Core Memory Agent Experiment (Session 30, 2026-03-01)
 
@@ -1025,6 +1069,8 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-03-03 | CDR complete benchmark (session 32) | **21/21 CDR scope runs scored** — 7 adapters × 3 scopes (clinical trial, zoning, therapy). sqlite-chunked-hybrid leads (0.600), letta/Sonnet 2nd (0.581), graphrag-light 3rd (0.578). Fixed graphrag-light entity dedup KeyError (normalize before graph lookup). Fixed letta-sleepy archival storage (deterministic passages.create + shortened agent message → scores from 0.0 to 0.44-0.61, runs from 3h to 20min). 1040 tests passing. |
+| 2026-03-02 | CDR scopes + Letta/Sonnet (session 31) | Generated 120 episodes for CDR scopes 10-12 via `generate_narrative_episodes.py`. Built `letta-entity` adapter (two-agent with dynamic entity core memory). Created 18 configs + 3 query plans. E2E verified 5/6 self-contained adapters on S10 (triadv1 hangs). Debugged Letta + Anthropic Sonnet: patched count_tokens 500 error (ApproxTokenCounter), archival token limit (8K→65K), proxy inheritance. Successfully ran Letta benchmark on S10 with Sonnet. |
 | 2026-03-01 | Letta V4 core memory agent (session 30) | Built `letta-v4` adapter — three-agent Letta system (ingest/sleep/Q&A) with 4 core memory blocks (patterns, hypotheses, entities, events) updated during episode processing. Key design iterations: reduced blocks from 20K→5K chars, reordered (patterns first), rewrote prompts for selectivity ("most episodes are ROUTINE"). Ran 3 narrative scopes: S07=0.586, S08=0.489, S09=0.612 (mean 0.562). **Underperforms standard Letta (0.748)** — core memory compresses away fine-grained evidence needed for specific answers. Fixed ref extraction bug (`ep_NNN` bare refs not captured → evidence_grounding=0). Strong insight_depth (0.767) and action_quality (0.794) but low evidence_coverage (0.169). Zero losses to naive baseline. |
 | 2026-02-28 | Narrative scope benchmarks (session 28) | **9/9 Phase 6 runs scored**: 3 adapters (null, sqlite-chunked-hybrid, hopping) × 3 narrative scopes (07-09) with Qwen3.5-35B-A3B on Modal. Fixed critical checkpoint misalignment for interleaved datasets (signal ep N at position 2N → checkpoints [14,22,28,40]). Fixed embedding endpoint (rewrote Modal server with multi-path support). sqlite-chunked-hybrid leads (0.377 mean), hopping 2nd (0.217). Budget compliance=0.00 for all memory adapters — narrative episodes too large for 8K budget. Compaction cannot run (220K words > 65K context). |
 | 2026-02-28 | Model upgrade + static driver (session 27) | Deployed Qwen3.5-35B-A3B on Modal A100 (replacing Llama 3.3 70B). Implemented static driver (`static_driver.py` — pre-computed query plans), hierarchical adapter (`hierarchical.py` — multi-level summarization), query plan generator script. Updated 82 config files to new model. Created 24 new config files (18 static + 6 hierarchical). |

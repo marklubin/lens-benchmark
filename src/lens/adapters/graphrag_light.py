@@ -536,8 +536,17 @@ class GraphRAGLightAdapter(MemoryAdapter):
                         content = "\n".join(lines)
                     data = json.loads(content)
                     if data.get("match"):
+                        existing = data["existing_name"]
+                        # Normalize in case LLM returned display name
+                        existing_lower = existing.lower().strip()
+                        if not self._graph.has_node(existing) and self._graph.has_node(existing_lower):
+                            existing = existing_lower
+                        elif not self._graph.has_node(existing):
+                            # Neither form found — fail open
+                            log.warning("Dedup LLM returned unknown node %r, skipping", existing)
+                            return None
                         return {
-                            "existing_name": data["existing_name"],
+                            "existing_name": existing,
                             "canonical_name": data.get("canonical_name", candidate_name),
                         }
                     return None

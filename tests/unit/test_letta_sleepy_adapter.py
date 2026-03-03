@@ -255,13 +255,19 @@ class TestLettaSleepyReset:
 class TestLettaSleepyIngest:
     def test_ingest_stores_passage(self):
         adapter = _ingested_adapter(n=2)
-        passages = adapter._client.agents.passages._store.get(adapter._agent_id, [])
+        passages = adapter._client.agents.passages.list(agent_id=adapter._agent_id)
         assert len(passages) == 2
 
     def test_ingest_passage_contains_episode_id(self):
         adapter = _ingested_adapter(n=1)
-        passages = adapter._client.agents.passages._store[adapter._agent_id]
-        assert "[ep_001]" in passages[0].text
+        passages = adapter._client.agents.passages.list(agent_id=adapter._agent_id)
+        assert any("[ep_001]" in p.text for p in passages)
+
+    def test_ingest_sends_message_to_agent(self):
+        adapter = _ingested_adapter(n=1)
+        last_input = adapter._client.agents.messages.last_input
+        assert last_input is not None
+        assert "ep_001" in last_input
 
     def test_ingest_caches_text(self):
         adapter = _ingested_adapter(n=2)
