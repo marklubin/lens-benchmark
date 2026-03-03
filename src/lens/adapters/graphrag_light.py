@@ -57,11 +57,11 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_ENTITY_TYPES = {"PERSON", "ORGANIZATION", "LOCATION", "SYSTEM", "CONCEPT", "EVENT", "METRIC"}
+_ENTITY_TYPES = {"ACTOR", "OBJECT", "PLACE", "CONCEPT", "EVENT"}
 
 _RELATIONSHIP_TYPES = {
-    "WORKS_FOR", "REPORTS_TO", "INTERACTS_WITH", "LOCATED_AT",
-    "PART_OF", "CAUSES", "MEASURES", "REFERENCES",
+    "RELATED_TO", "ACTED_ON", "PRODUCED", "BELONGS_TO",
+    "OCCURRED_AT", "PRECEDES", "CONTRADICTS",
 }
 
 _EXTRACT_PROMPT = """\
@@ -70,16 +70,33 @@ Extract entities and relationships from this episode text.
 Return ONLY valid JSON with this schema:
 {
   "entities": [
-    {"name": "exact name", "type": "PERSON|ORGANIZATION|LOCATION|SYSTEM|CONCEPT|EVENT|METRIC", "description": "one-line description"}
+    {"name": "exact name", "type": "TYPE", "description": "one-line description"}
   ],
   "relationships": [
-    {"source": "entity name", "target": "entity name", "type": "WORKS_FOR|REPORTS_TO|INTERACTS_WITH|LOCATED_AT|PART_OF|CAUSES|MEASURES|REFERENCES", "description": "one-line description"}
+    {"source": "entity name", "target": "entity name", "type": "TYPE", "description": "one-line description"}
   ]
 }
 
+Entity types:
+- ACTOR: people, orgs, systems, agents (anything that acts)
+- OBJECT: documents, metrics, artifacts, evidence items
+- PLACE: locations, venues, jurisdictions
+- CONCEPT: ideas, patterns, hypotheses, conditions
+- EVENT: specific occurrences with temporal anchoring
+
+Relationship types:
+- RELATED_TO: general association (catch-all)
+- ACTED_ON: subject performed action on object
+- PRODUCED: created, generated, caused
+- BELONGS_TO: membership, ownership, containment
+- OCCURRED_AT: temporal/spatial anchoring
+- PRECEDES: temporal ordering
+- CONTRADICTS: opposing evidence/claims
+
 Rules:
 - Extract concrete, named entities only (not generic terms like "the system")
-- Use the entity's most specific name as it appears in the text
+- Resolve pronouns to their referent: if text says "he reported" and referent is "Marcus Rivera", extract as "Marcus Rivera", not "he"
+- Use the full proper name. "Dr. Sarah Chen" not "Dr. Chen" or "she". If multiple aliases exist, use the most complete/formal version.
 - Keep descriptions under 100 characters
 - Only include relationships between extracted entities
 - If the text has no clear entities, return {"entities": [], "relationships": []}
@@ -254,12 +271,14 @@ def _llm_extract_entities(
 
 
 def _parse_extraction(content: str) -> dict:
-    """Parse LLM entity extraction output. Handles markdown code blocks."""
-    # Strip markdown code blocks
+    """Parse LLM entity extraction output. Handles markdown code blocks and think tags."""
+    # Strip <think>...</think> blocks (Qwen3.5 reasoning)
+    content = re.sub(r'<think>[\s\S]*?</think>', '', content)
     content = content.strip()
+
+    # Strip markdown code blocks
     if content.startswith("```"):
         lines = content.split("\n")
-        # Remove first and last lines (``` markers)
         if lines[0].startswith("```"):
             lines = lines[1:]
         if lines and lines[-1].strip() == "```":
@@ -269,11 +288,12 @@ def _parse_extraction(content: str) -> dict:
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
-        # Try to find JSON in the content
-        match = re.search(r'\{[\s\S]*\}', content)
-        if match:
+        # Use incremental decoder to find the first valid JSON object
+        start = content.find("{")
+        if start >= 0:
+            decoder = json.JSONDecoder()
             try:
-                data = json.loads(match.group())
+                data, _ = decoder.raw_decode(content, start)
             except json.JSONDecodeError:
                 log.warning("Failed to parse entity extraction JSON")
                 return {"entities": [], "relationships": []}
@@ -300,7 +320,7 @@ def _parse_extraction(content: str) -> dict:
             valid_rels.append({
                 "source": str(r["source"]),
                 "target": str(r["target"]),
-                "type": str(r.get("type", "REFERENCES")),
+                "type": str(r.get("type", "RELATED_TO")),
                 "description": str(r.get("description", "")),
             })
 
@@ -381,7 +401,171 @@ class GraphRAGLightAdapter(MemoryAdapter):
     @staticmethod
     def _normalize_entity(name: str) -> str:
         """Normalize entity name for deduplication."""
-        return name.strip().lower()
+        import re as _re
+        n = name.strip().lower()
+        n = _re.sub(r'\s+', ' ', n)
+        for article in ("the ", "a ", "an "):
+            if n.startswith(article):
+                n = n[len(article):]
+                break
+        return n
+
+    # --- Entity deduplication ---
+
+    def _find_dedup_candidates(self, norm_name: str, ent_data: dict) -> list[str]:
+        """Find existing graph entities that might be the same as *norm_name*.
+
+        Stage 1: name-based (substring containment or >50% token overlap).
+        Stage 2: embedding-based (cosine > 0.85) if no name matches and embeddings exist.
+        Returns up to 5 candidate normalized names.
+        """
+        candidates: list[str] = []
+
+        # Stage 1 — name-based
+        cand_tokens = set(norm_name.split())
+        for existing in self._graph.nodes:
+            if existing == norm_name:
+                continue
+            # Substring containment
+            if norm_name in existing or existing in norm_name:
+                candidates.append(existing)
+                continue
+            # Token overlap
+            ex_tokens = set(existing.split())
+            if cand_tokens and ex_tokens:
+                overlap = len(cand_tokens & ex_tokens)
+                min_len = min(len(cand_tokens), len(ex_tokens))
+                if min_len > 0 and overlap / min_len > 0.5:
+                    candidates.append(existing)
+
+        # Stage 2 — embedding-based (only if no name matches and embeddings exist)
+        if not candidates and self._entity_embeddings:
+            ent_text = f"{ent_data.get('name', norm_name)}: {ent_data.get('description', '')}"
+            try:
+                query_vec = _embed_texts_openai(
+                    [ent_text],
+                    model=self._embed_model,
+                    api_key=self._embed_api_key,
+                    base_url=self._embed_base_url,
+                )[0]
+            except Exception:
+                log.warning("Dedup embedding failed for %s", norm_name)
+                return []
+
+            for ex_name, ex_vec in self._entity_embeddings.items():
+                if ex_name == norm_name:
+                    continue
+                sim = _cosine_similarity(query_vec, ex_vec)
+                if sim > 0.85:
+                    candidates.append(ex_name)
+
+        return candidates[:5]
+
+    def _llm_dedup_check(
+        self,
+        candidate_name: str,
+        candidate_data: dict,
+        existing_names: list[str],
+    ) -> dict | None:
+        """Ask LLM whether *candidate_name* matches any of *existing_names*.
+
+        Returns ``{"existing_name": ..., "canonical_name": ...}`` on match,
+        ``None`` otherwise. Fails open on any error.
+        """
+        import time
+
+        model = self._llm_model or os.environ.get("LENS_LLM_MODEL", "gpt-4o-mini")
+        api_key = (
+            self._llm_api_key
+            or os.environ.get("LENS_LLM_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
+        base_url = self._llm_base_url or os.environ.get("LENS_LLM_API_BASE", "https://api.openai.com/v1")
+
+        chat_url = base_url.rstrip("/")
+        if not chat_url.endswith("/chat/completions"):
+            chat_url += "/chat/completions"
+
+        # Build existing entity descriptions
+        existing_descs: list[str] = []
+        for en in existing_names:
+            node = self._graph.nodes.get(en, {})
+            desc = node.get("description", "")
+            display = node.get("name", en)
+            existing_descs.append(f"- {display} (normalized: {en}): {desc}")
+
+        prompt = (
+            "Are any of these existing entities the same as the candidate? "
+            "Consider name variations, abbreviations, titles, contextual equivalence.\n\n"
+            f"Candidate: {candidate_name}\n"
+            f"Description: {candidate_data.get('description', '')}\n\n"
+            "Existing entities:\n" + "\n".join(existing_descs) + "\n\n"
+            'Return JSON: {"match": true, "existing_name": "<normalized name>", "canonical_name": "<best display name>"} '
+            'or {"match": false}'
+        )
+
+        body = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "max_tokens": 200,
+        }).encode()
+
+        for attempt in range(2):
+            req = urllib.request.Request(
+                chat_url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "User-Agent": "lens-benchmark/1.0",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read())
+                    content = result["choices"][0]["message"]["content"]
+                    # Strip markdown fences
+                    content = content.strip()
+                    if content.startswith("```"):
+                        lines = content.split("\n")
+                        if lines[0].startswith("```"):
+                            lines = lines[1:]
+                        if lines and lines[-1].strip() == "```":
+                            lines = lines[:-1]
+                        content = "\n".join(lines)
+                    data = json.loads(content)
+                    if data.get("match"):
+                        return {
+                            "existing_name": data["existing_name"],
+                            "canonical_name": data.get("canonical_name", candidate_name),
+                        }
+                    return None
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+                log.warning("Dedup LLM HTTP error (attempt %d/2): %s", attempt + 1, e)
+                if attempt == 0:
+                    time.sleep(1)
+                continue
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                log.warning("Dedup LLM parse error: %s", e)
+                return None
+
+        return None  # fail open
+
+    def _merge_entity(
+        self,
+        existing_norm: str,
+        new_norm: str,
+        new_data: dict,
+        canonical_name: str | None = None,
+    ) -> None:
+        """Merge *new_data* into the existing graph node at *existing_norm*."""
+        node = self._graph.nodes[existing_norm]
+        node["source_episodes"] = node.get("source_episodes", set()) | new_data.get("source_episodes", set())
+        if len(new_data.get("description", "")) > len(node.get("description", "")):
+            node["description"] = new_data["description"]
+        if canonical_name and canonical_name != node.get("name"):
+            node["name"] = canonical_name
 
     # --- Data loading ---
 
@@ -461,8 +645,25 @@ class GraphRAGLightAdapter(MemoryAdapter):
                 rel["source_episodes"] = {ep_id}
                 new_relationships.append(rel)
 
+        # 1b. Deduplicate new entities against existing graph
+        merge_map: dict[str, str] = {}  # new_norm -> existing_norm
+        for norm_name, ent_data in new_entities.items():
+            if self._graph.has_node(norm_name):
+                continue  # exact match — will merge in step 2
+            candidates = self._find_dedup_candidates(norm_name, ent_data)
+            if candidates:
+                result = self._llm_dedup_check(ent_data["name"], ent_data, candidates)
+                if result is not None:
+                    merge_map[norm_name] = result["existing_name"]
+                    self._merge_entity(
+                        result["existing_name"], norm_name, ent_data,
+                        result.get("canonical_name"),
+                    )
+
         # 2. Update graph with new entities and relationships
         for norm_name, ent_data in new_entities.items():
+            if norm_name in merge_map:
+                continue  # already merged into existing node
             if self._graph.has_node(norm_name):
                 # Merge source episodes
                 existing = self._graph.nodes[norm_name]
@@ -481,6 +682,9 @@ class GraphRAGLightAdapter(MemoryAdapter):
         for rel in new_relationships:
             src = self._normalize_entity(rel["source"])
             tgt = self._normalize_entity(rel["target"])
+            # Apply merge map to relationship endpoints
+            src = merge_map.get(src, src)
+            tgt = merge_map.get(tgt, tgt)
             # Only add edge if both nodes exist
             if self._graph.has_node(src) and self._graph.has_node(tgt):
                 if self._graph.has_edge(src, tgt):
@@ -496,10 +700,10 @@ class GraphRAGLightAdapter(MemoryAdapter):
                         weight=1,
                     )
 
-        # 3. Compute embeddings for new entities
+        # 3. Compute embeddings for new entities (skip merged ones)
         entities_needing_embeddings = [
             norm_name for norm_name in new_entities
-            if norm_name not in self._entity_embeddings
+            if norm_name not in self._entity_embeddings and norm_name not in merge_map
         ]
 
         if entities_needing_embeddings:

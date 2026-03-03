@@ -131,3 +131,7 @@ def _ensure_builtins() -> None:
         import lens.adapters.letta_v4_nosleep  # noqa: F401
     except ImportError:
         pass  # letta-client not installed
+    try:
+        import lens.adapters.letta_entity  # noqa: F401
+    except ImportError:
+        pass  # letta-client not installed
