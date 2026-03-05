@@ -29,6 +29,9 @@ from lens.adapters.triad import (
 
 logger = logging.getLogger(__name__)
 
+# Max characters per facet notebook before the agent is told to prune
+_MAX_NOTEBOOK_CHARS = 8000
+
 # ---------------------------------------------------------------------------
 # v1 recording system prompts (per-facet object store agents)
 # ---------------------------------------------------------------------------
@@ -119,7 +122,7 @@ _V1_RECORD_SYSTEMS: dict[str, str] = {
 _V1_RECORD_USER = """\
 CURRENT OBJECT STORE:
 {store}
-
+{capacity_warning}
 NEW EPISODE [{episode_id}] ({timestamp}):
 {text}
 
@@ -262,21 +265,35 @@ def _build_v1_synthesis_user(
 def _v1_record_episode_parallel(
     adapter: _TriadBase,
     ep: dict,
-    max_tokens: int = 3000,
+    max_tokens: int = 2000,
 ) -> None:
     """Update all facet object stores in parallel for a single episode."""
     facets = adapter._notebook_keys
+    # Truncate episode text to first 2000 chars — full 5K words unnecessary
+    ep_text = ep["text"][:2000]
 
     def update_facet(facet: str) -> tuple[str, str]:
+        store = adapter._notebooks[facet]
+        # Hard-cap notebook to prevent unbounded prompt growth
+        if len(store) > _MAX_NOTEBOOK_CHARS:
+            store = store[:_MAX_NOTEBOOK_CHARS] + "\n... [TRUNCATED — prune stale entries]"
+            capacity_warning = (
+                "\n⚠ CAPACITY WARNING: Your store was truncated. "
+                "Retain only the most significant objects. "
+                "Prune routine/low-signal entries.\n"
+            )
+        else:
+            capacity_warning = ""
         result = _complete(
             adapter._oai,
             adapter._model,
             system=_V1_RECORD_SYSTEMS[facet],
             user=_V1_RECORD_USER.format(
-                store=adapter._notebooks[facet],
+                store=store,
+                capacity_warning=capacity_warning,
                 episode_id=ep["episode_id"],
                 timestamp=ep["timestamp"],
-                text=ep["text"],
+                text=ep_text,
             ),
             max_tokens=max_tokens,
         )
@@ -315,12 +332,15 @@ def _v1_parallel_search(
     facet_responses: dict[str, str] = {}
 
     def consult_facet(facet: str) -> tuple[str, str]:
+        store = adapter._notebooks[facet]
+        if len(store) > _MAX_NOTEBOOK_CHARS:
+            store = store[:_MAX_NOTEBOOK_CHARS] + "\n... [TRUNCATED]"
         result = _complete(
             adapter._oai,
             adapter._model,
             system=_V1_CONSULT_SYSTEMS[facet],
             user=_V1_CONSULT_USER.format(
-                store=adapter._notebooks[facet],
+                store=store,
                 question=query,
             ),
             max_tokens=2000,
@@ -435,6 +455,12 @@ class TriadV1PairsAdapter(_TriadBase):
 
         def consult_pair(pair: tuple[str, str]) -> tuple[tuple[str, str], str]:
             fa, fb = pair
+            store_a = self._notebooks[fa]
+            store_b = self._notebooks[fb]
+            if len(store_a) > _MAX_NOTEBOOK_CHARS:
+                store_a = store_a[:_MAX_NOTEBOOK_CHARS] + "\n... [TRUNCATED]"
+            if len(store_b) > _MAX_NOTEBOOK_CHARS:
+                store_b = store_b[:_MAX_NOTEBOOK_CHARS] + "\n... [TRUNCATED]"
             result = _complete(
                 self._oai,
                 self._model,
@@ -445,9 +471,9 @@ class TriadV1PairsAdapter(_TriadBase):
                 ),
                 user=_V1_PAIR_CONSULT_USER.format(
                     facet_a_upper=fa.upper(),
-                    store_a=self._notebooks[fa],
+                    store_a=store_a,
                     facet_b_upper=fb.upper(),
-                    store_b=self._notebooks[fb],
+                    store_b=store_b,
                     question=query,
                 ),
                 max_tokens=2000,
@@ -560,15 +586,18 @@ class TriadV1PairsFusedAdapter(_TriadBase):
             return self._fallback_search(limit)
 
         try:
+            def _cap(s: str) -> str:
+                return s[:_MAX_NOTEBOOK_CHARS] + "\n... [TRUNCATED]" if len(s) > _MAX_NOTEBOOK_CHARS else s
+
             answer = _complete(
                 self._oai,
                 self._model,
                 system=_V1_PAIRS_FUSED_SYSTEM,
                 user=_V1_PAIRS_FUSED_USER.format(
-                    entity_store=self._notebooks["entity"],
-                    relation_store=self._notebooks["relation"],
-                    event_store=self._notebooks["event"],
-                    cause_store=self._notebooks["cause"],
+                    entity_store=_cap(self._notebooks["entity"]),
+                    relation_store=_cap(self._notebooks["relation"]),
+                    event_store=_cap(self._notebooks["event"]),
+                    cause_store=_cap(self._notebooks["cause"]),
                     question=query,
                 ),
                 max_tokens=2500,

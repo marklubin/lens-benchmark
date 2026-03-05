@@ -1,18 +1,20 @@
-"""Letta Entity — Two-agent architecture with dynamic per-entity core memory.
+"""Letta Entity — Two-agent architecture with entity-focused core memory.
 
-Two agents per scope sharing dynamic entity blocks:
+Two agents per scope:
 
-  Ingest agent:  Receives episodes via messages.create(). Extracts entities,
-                 canonicalises names, and creates/updates/deletes individual
-                 core memory blocks — one per tracked entity. Archives raw
-                 evidence to archival memory.
+  Ingest agent:  Receives episode summaries via messages.create().
+                 Maintains a large "entities" core memory block tracking
+                 important actors, objects, and patterns. Raw episode text
+                 is stored deterministically via passages.create().
 
-  Q&A agent:     Shares entity blocks with ingest agent. Uses
-                 archival_memory_search to find detailed evidence. Synthesises
-                 answers from entity histories + archival evidence.
+  Q&A agent:     Shares the entities block. Uses archival_memory_search
+                 to find detailed evidence. Synthesises answers from
+                 entity histories + archival evidence.
 
-No sleep agent — all memory management happens at ingest time via dynamic
-block operations.
+Key design: episode text goes to archival via passages.create() (deterministic,
+never lost). The ingest agent's job is solely to update the entity tracker block.
+This follows the lesson from letta-sleepy: never rely on LLM agents to call
+specific tools for critical data operations.
 
 Requires:
     pip install letta-client
@@ -52,17 +54,18 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_ENTITY_BLOCK_LIMIT = 3000
+_ENTITY_BLOCK_LIMIT = 20000  # Large block for entity tracking
 
 _DEFAULT_LLM = "openai-proxy/Qwen/Qwen3.5-35B-A3B"
 _DEFAULT_EMBED = "embed-proxy/text-embedding-3-small"
 
 _PERSONA = (
     "I am an analytical system that tracks entities across sequential data "
-    "episodes. I maintain individual memory blocks for important entities, "
-    "tracking their state changes, relationships, and evidence over time.\n\n"
-    "ENTITY BLOCKS: Dynamic, one per tracked entity. My working memory.\n"
-    "ARCHIVAL MEMORY: Unlimited. All detailed evidence lives here.\n\n"
+    "episodes. I maintain an entity tracker in core memory and use archival "
+    "memory for detailed evidence.\n\n"
+    "ENTITY TRACKER BLOCK: My working memory — tracks important entities, "
+    "their state changes, relationships, and evidence over time.\n"
+    "ARCHIVAL MEMORY: Unlimited. All full episode texts live here.\n\n"
     "I cite episode IDs for every claim."
 )
 
@@ -72,46 +75,46 @@ _PERSONA = (
 
 _INGEST_SYSTEM = (
     "You are an analytical agent processing sequential data episodes.\n"
-    "You maintain individual memory blocks for important entities.\n\n"
+    "You maintain an entity tracker in your 'entities' core memory block.\n\n"
 
     "## MEMORY TIERS\n\n"
 
-    "ENTITY BLOCKS — one block per tracked entity (~3K chars each), always in context.\n"
-    "Each block tracks one entity's full history, relationships, and evidence.\n\n"
+    "ENTITIES BLOCK — your working memory (~20K chars), always in context.\n"
+    "Tracks important entities with their histories, relationships, evidence.\n\n"
 
-    "ARCHIVAL MEMORY — unlimited, searchable. Store detailed episode summaries here.\n\n"
+    "ARCHIVAL MEMORY — unlimited, searchable. Full episode texts are already\n"
+    "stored there automatically. You do NOT need to archive episodes yourself.\n\n"
 
     "## HOW TO PROCESS EACH EPISODE\n\n"
 
-    "1. Archive a structured summary to archival memory (always do this)\n"
+    "1. Read the episode summary provided in the message\n"
     "2. Extract entities — use full proper names, resolve pronouns\n"
-    "3. For each important entity:\n"
-    "   a) If entity has no block yet AND appears significant (2+ mentions, behavioral change, central to pattern):\n"
-    "      → create_block with label=entity_name_lowercase, value=structured template\n"
-    "   b) If entity has a block:\n"
-    "      → core_memory_replace to update STATUS, append to HISTORY, update RELATIONSHIPS\n"
-    "   c) If entity is no longer relevant (no mentions for many episodes, resolved):\n"
-    "      → delete_block to free space\n"
-    "4. Track at most ~15-20 entities. Be selective — not every mentioned name deserves a block.\n"
-    "5. send_message with a 1-line acknowledgment\n\n"
+    "3. Update the 'entities' block using core_memory_replace:\n"
+    "   - Add new entities that appear significant (2+ mentions, behavioral change, central to pattern)\n"
+    "   - Update existing entity entries with new status, history, relationships\n"
+    "   - Remove entities no longer relevant (no mentions for many episodes)\n"
+    "4. send_message with a 1-line acknowledgment\n\n"
 
-    "## BLOCK FORMAT\n\n"
+    "## ENTITY FORMAT (in entities block)\n\n"
 
-    "NAME: Full Name\n"
+    "=== ENTITY_NAME ===\n"
     "TYPE: ACTOR|OBJECT|PLACE|CONCEPT|EVENT\n"
     "STATUS: current state\n"
     "HISTORY:\n"
-    "• YYYY-MM-DD: what changed [ep_X]\n"
+    "- what changed [ep_X]\n"
+    "- what changed [ep_Y]\n"
     "RELATIONSHIPS:\n"
-    "• related_entity: nature of relationship [ep_X]\n"
+    "- related_entity: nature [ep_X]\n"
     "EVIDENCE: [ep_X, ep_Y, ep_Z]\n\n"
 
     "## CRITICAL RULES\n\n"
 
-    "- Most episodes are ROUTINE. Only create/update entity blocks when meaningful.\n"
-    "- An entity earns a block when: appears 2+ times, shows behavioral change, or is central to an emerging pattern.\n"
-    "- Use episode IDs and dates. Never \"recently\" or \"today\".\n"
-    "- When a block is full, condense: merge history entries, archive old details."
+    "- Most episodes are ROUTINE. Only update entities block when meaningful.\n"
+    "- Track at most ~15-20 entities. Be selective.\n"
+    "- Use episode IDs. Never 'recently' or 'today'.\n"
+    "- When the block fills up, condense: merge history entries, drop stale entities.\n"
+    "- Use core_memory_replace to update the entities block — find the section "
+    "to change and replace it with the updated version."
 )
 
 _QA_SYSTEM = (
@@ -119,15 +122,15 @@ _QA_SYSTEM = (
 
     "## YOUR MEMORY\n\n"
 
-    "ENTITY BLOCKS (visible now): Individual blocks for tracked entities, each with\n"
-    "full history, relationships, and evidence citations. Scan these first.\n\n"
+    "ENTITY TRACKER (visible now): A block tracking important entities with\n"
+    "full histories, relationships, and evidence citations. Scan this first.\n\n"
 
-    "ARCHIVAL MEMORY (searchable): Detailed per-episode summaries. Use\n"
+    "ARCHIVAL MEMORY (searchable): Full episode texts. Use\n"
     "archival_memory_search to find specific evidence.\n\n"
 
     "## STRATEGY\n\n"
 
-    "1. Scan entity blocks — which entities are relevant to the question?\n"
+    "1. Scan the entities block — which entities are relevant to the question?\n"
     "2. Note their histories, status changes, and relationships\n"
     "3. Search archival for detailed evidence from cited episodes\n"
     "4. Search archival for additional relevant episodes\n"
@@ -146,10 +149,10 @@ _QA_SYSTEM = (
 
 @register_adapter("letta-entity")
 class LettaEntityAdapter(MemoryAdapter):
-    """Letta Entity: two-agent architecture with dynamic per-entity blocks.
+    """Letta Entity: two-agent architecture with entity-focused core memory.
 
-    Ingest agent processes episodes and manages entity blocks.
-    Q&A agent answers questions using shared entity blocks + archival search.
+    Ingest agent processes episodes and maintains entity tracker block.
+    Q&A agent answers questions using shared entity block + archival search.
     """
 
     requires_metering: bool = False
@@ -164,11 +167,13 @@ class LettaEntityAdapter(MemoryAdapter):
         self._qa_agent_id: str | None = None
         self._scope_id: str | None = None
         self._text_cache: dict[str, str] = {}
-        self._entity_blocks: dict[str, str] = {}  # label -> block_id
-        self._persona_block_id: str | None = None
+        self._entities_block_id: str | None = None
+
+        # For message buffer reset
+        self._ingest_initial_msg_ids: list[str] = []
 
     # ------------------------------------------------------------------
-    # Client helpers (same patterns as letta_v4)
+    # Client helpers
     # ------------------------------------------------------------------
 
     def _get_client(self):
@@ -218,7 +223,6 @@ class LettaEntityAdapter(MemoryAdapter):
 
     def _create_block(self, label: str, value: str, description: str, limit: int = _ENTITY_BLOCK_LIMIT) -> str | None:
         """Create a memory block and return its ID."""
-
         resp = httpx.post(
             f"{self._base_url}/v1/blocks/",
             headers=_api_headers(),
@@ -240,7 +244,6 @@ class LettaEntityAdapter(MemoryAdapter):
 
     def _attach_block(self, agent_id: str, block_id: str) -> bool:
         """Attach an existing block to an agent."""
-
         resp = httpx.patch(
             f"{self._base_url}/v1/agents/{agent_id}/core-memory/blocks/attach/{block_id}",
             headers=_api_headers(),
@@ -252,37 +255,8 @@ class LettaEntityAdapter(MemoryAdapter):
         log.warning("Failed to attach block %s: %s", block_id[:12], resp.text[:200])
         return False
 
-    def _detach_block(self, agent_id: str, block_id: str) -> bool:
-        """Detach a block from an agent."""
-
-        resp = httpx.patch(
-            f"{self._base_url}/v1/agents/{agent_id}/core-memory/blocks/detach/{block_id}",
-            headers=_api_headers(),
-            timeout=10.0,
-        )
-        if resp.status_code < 300:
-            log.info("Detached block %s from agent %s", block_id[:12], agent_id[:12])
-            return True
-        log.warning("Failed to detach block %s: %s", block_id[:12], resp.text[:200])
-        return False
-
-    def _delete_block(self, block_id: str) -> bool:
-        """Delete a block entirely."""
-
-        resp = httpx.delete(
-            f"{self._base_url}/v1/blocks/{block_id}",
-            headers=_api_headers(),
-            timeout=10.0,
-        )
-        if resp.status_code < 300:
-            log.info("Deleted block %s", block_id[:12])
-            return True
-        log.warning("Failed to delete block %s: %s", block_id[:12], resp.text[:200])
-        return False
-
     def _update_system_prompt(self, agent_id: str, system: str) -> bool:
         """Update an agent's system prompt."""
-
         resp = httpx.patch(
             f"{self._base_url}/v1/agents/{agent_id}",
             headers=_api_headers(),
@@ -295,19 +269,8 @@ class LettaEntityAdapter(MemoryAdapter):
         log.warning("Failed to update system prompt: %s", resp.text[:200])
         return False
 
-    def _get_agent_blocks(self, agent_id: str) -> list[dict]:
-        """Get an agent's core memory blocks."""
-
-        resp = httpx.get(
-            f"{self._base_url}/v1/agents/{agent_id}/core-memory/blocks",
-            headers=_api_headers(),
-            timeout=10.0,
-        )
-        return resp.json() if resp.status_code < 300 else []
-
     def _attach_tools(self, agent_id: str, tool_names: list[str]) -> None:
         """Attach server-side tools to an agent by name."""
-
         resp = httpx.get(
             f"{self._base_url}/v1/tools/",
             headers=_api_headers(),
@@ -336,48 +299,46 @@ class LettaEntityAdapter(MemoryAdapter):
             else:
                 log.warning("Failed to attach tool %s: %s", name, resp.text[:200])
 
-    # ------------------------------------------------------------------
-    # Entity block sync
-    # ------------------------------------------------------------------
+    def _capture_initial_messages(self, agent_id: str) -> list[str]:
+        """Capture initial message IDs for buffer reset."""
+        try:
+            resp = httpx.get(
+                f"{self._base_url}/v1/agents/{agent_id}",
+                headers=_api_headers(),
+                timeout=30.0,
+            )
+            if resp.status_code == 200:
+                msg_ids = resp.json().get("message_ids", [])
+                log.info("Captured %d initial message IDs for %s", len(msg_ids), agent_id[:12])
+                return msg_ids
+        except Exception as e:
+            log.warning("Failed to capture initial messages for %s: %s", agent_id[:12], e)
+        return []
 
-    def _sync_entity_blocks(self) -> None:
-        """Sync entity blocks between ingest and Q&A agents.
-
-        After each ingest, the ingest agent may have created or deleted entity
-        blocks. This method detects changes and mirrors them on the Q&A agent.
-        """
-        if not self._ingest_agent_id or not self._qa_agent_id:
+    def _reset_message_buffer(self, agent_id: str, initial_msg_ids: list[str]) -> None:
+        """Reset an agent's conversation to initial state. Preserves core memory + archival."""
+        if not agent_id or not initial_msg_ids:
             return
-
-        current_blocks = self._get_agent_blocks(self._ingest_agent_id)
-        current_labels: dict[str, str] = {}  # label -> block_id
-        for block in current_blocks:
-            label = block.get("label", "")
-            block_id = block.get("id", "")
-            if label == "persona":
-                continue
-            current_labels[label] = block_id
-
-        # New blocks: on ingest agent but not tracked
-        for label, block_id in current_labels.items():
-            if label not in self._entity_blocks:
-                self._attach_block(self._qa_agent_id, block_id)
-                self._entity_blocks[label] = block_id
-                log.info("Synced new entity block %s to Q&A agent", label)
-
-        # Deleted blocks: tracked but no longer on ingest agent
-        removed = [l for l in self._entity_blocks if l not in current_labels]
-        for label in removed:
-            block_id = self._entity_blocks.pop(label)
-            self._detach_block(self._qa_agent_id, block_id)
-            log.info("Removed entity block %s from Q&A agent", label)
+        try:
+            resp = httpx.patch(
+                f"{self._base_url}/v1/agents/{agent_id}",
+                headers=_api_headers(),
+                json={"message_ids": initial_msg_ids},
+                timeout=30.0,
+            )
+            if resp.status_code < 300:
+                log.debug("Reset message buffer for %s", agent_id[:12])
+            else:
+                log.warning("Failed to reset buffer for %s: HTTP %d", agent_id[:12], resp.status_code)
+        except Exception as e:
+            log.warning("Failed to reset message buffer for %s: %s", agent_id[:12], e)
 
     # ------------------------------------------------------------------
     # MemoryAdapter interface
     # ------------------------------------------------------------------
 
     def reset(self, scope_id: str) -> None:
-        """Create two agents: ingest + Q&A, sharing a persona block."""
+        """Create two agents: ingest + Q&A, sharing an entities block."""
         client = self._get_client()
 
         prefix = f"lens-entity-{scope_id}"
@@ -385,15 +346,25 @@ class LettaEntityAdapter(MemoryAdapter):
 
         self._scope_id = scope_id
         self._text_cache = {}
-        self._entity_blocks = {}
+
+        # Create shared entities block (large, for entity tracking)
+        self._entities_block_id = self._create_block(
+            label="entities",
+            value="(no entities tracked yet)",
+            description="Entity tracker: important actors, objects, patterns with histories and evidence.",
+            limit=_ENTITY_BLOCK_LIMIT,
+        )
+        if not self._entities_block_id:
+            raise AdapterError("Failed to create entities block")
 
         # Create persona block
-        self._persona_block_id = self._create_block(
+        persona_block_id = self._create_block(
             label="persona",
             value=_PERSONA,
-            description="Shared context about the entity tracking task.",
+            description="Agent persona and task description.",
+            limit=5000,
         )
-        if not self._persona_block_id:
+        if not persona_block_id:
             raise AdapterError("Failed to create persona block")
 
         # Create ingest agent
@@ -412,15 +383,14 @@ class LettaEntityAdapter(MemoryAdapter):
             ) from e
 
         self._ingest_agent_id = ingest_agent.id
-        self._attach_block(self._ingest_agent_id, self._persona_block_id)
+        self._attach_block(self._ingest_agent_id, persona_block_id)
+        self._attach_block(self._ingest_agent_id, self._entities_block_id)
         self._attach_tools(self._ingest_agent_id, [
             "core_memory_append",
             "core_memory_replace",
-            "archival_memory_insert",
-            "create_block",
-            "delete_block",
         ])
         self._update_system_prompt(self._ingest_agent_id, _INGEST_SYSTEM)
+        self._ingest_initial_msg_ids = self._capture_initial_messages(self._ingest_agent_id)
 
         # Create Q&A agent
         try:
@@ -437,15 +407,17 @@ class LettaEntityAdapter(MemoryAdapter):
             ) from e
 
         self._qa_agent_id = qa_agent.id
-        self._attach_block(self._qa_agent_id, self._persona_block_id)
+        self._attach_block(self._qa_agent_id, persona_block_id)
+        self._attach_block(self._qa_agent_id, self._entities_block_id)
         self._attach_tools(self._qa_agent_id, ["archival_memory_search"])
         self._update_system_prompt(self._qa_agent_id, _QA_SYSTEM)
 
         log.info(
-            "Created Letta Entity pair for %s: ingest=%s qa=%s",
+            "Created Letta Entity pair for %s: ingest=%s qa=%s entities_block=%s",
             scope_id,
             self._ingest_agent_id[:12],
             self._qa_agent_id[:12],
+            self._entities_block_id[:12],
         )
 
     def ingest(
@@ -456,24 +428,59 @@ class LettaEntityAdapter(MemoryAdapter):
         text: str,
         meta: dict | None = None,
     ) -> None:
-        """Send episode to the ingest agent for processing."""
+        """Ingest an episode: store in archival + ask agent to update entity tracker.
+
+        Two-pronged approach (same as letta-sleepy):
+        1. passages.create() — guarantees the episode is in archival memory
+        2. messages.create() — lets the agent update the entities block
+        """
         if not self._ingest_agent_id:
             raise AdapterError("reset() must be called before ingest()")
 
+        client = self._get_client()
         self._text_cache[episode_id] = text
 
-        message = f"[{episode_id}] {timestamp}:\n\n{text}"
-        response = self._send_message(self._ingest_agent_id, message, max_steps=10)
+        # 1) Deterministic archival storage — guaranteed retrieval.
+        # Store in BOTH ingest and QA agents: Letta archival is per-agent,
+        # so the QA agent needs its own copy to search during answer_question().
+        tagged_text = f"[{episode_id}] {timestamp}\n\n{text}"
+        for agent_id, label in [
+            (self._ingest_agent_id, "ingest"),
+            (self._qa_agent_id, "qa"),
+        ]:
+            if not agent_id:
+                continue
+            try:
+                client.agents.passages.create(
+                    agent_id=agent_id,
+                    text=tagged_text,
+                )
+            except Exception as e:
+                log.warning("passages.create() failed for %s (%s): %s", episode_id, label, e)
+
+        # 2) Agent message — update entity tracker (send condensed summary, not full text)
+        # Truncate to ~2000 chars to keep messages manageable
+        summary = text[:2000]
+        if len(text) > 2000:
+            summary += f"... [truncated, {len(text)} chars total]"
+
+        response = self._send_message(
+            self._ingest_agent_id,
+            f"Episode [{episode_id}] ({timestamp}) stored in archival. "
+            f"Update entity tracker as needed.\n\n{summary}",
+            max_steps=10,
+        )
         if response:
             log.info("Ingest agent processed %s: %s", episode_id, response[:120])
         else:
             log.warning("Ingest agent returned empty response for %s", episode_id)
 
-        self._sync_entity_blocks()
+        # Reset conversation buffer to prevent context overflow
+        self._reset_message_buffer(self._ingest_agent_id, self._ingest_initial_msg_ids)
 
     def prepare(self, scope_id: str, checkpoint: int) -> None:
-        """Sync entity blocks at checkpoint (management happens at ingest time)."""
-        self._sync_entity_blocks()
+        """No special preparation needed — entity tracker is always up to date."""
+        pass
 
     def answer_question(self, prompt: str, question_id: str = "") -> AgentAnswer:
         """Send question to the Q&A agent."""

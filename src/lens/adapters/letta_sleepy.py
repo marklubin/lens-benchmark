@@ -52,7 +52,7 @@ _PERSONA = (
     "memory and provide detailed answers citing episode IDs."
 )
 
-_DEFAULT_LLM = "openai-proxy/casperhansen/Meta-Llama-3.3-70B-Instruct-AWQ-INT4"  # modal-llm provider
+_DEFAULT_LLM = "openai-proxy/Qwen/Qwen3.5-35B-A3B"  # modal-llm provider
 _DEFAULT_EMBED = "embed-proxy/text-embedding-3-small"
 
 

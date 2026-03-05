@@ -60,7 +60,7 @@ vllm_image = (
     secrets=[modal.Secret.from_name("huggingface")],
     timeout=10 * MINUTES,
     scaledown_window=5 * MINUTES,
-    min_containers=0,
+    min_containers=2,
 )
 @modal.concurrent(max_inputs=32)
 @modal.web_server(port=VLLM_PORT, startup_timeout=10 * MINUTES)

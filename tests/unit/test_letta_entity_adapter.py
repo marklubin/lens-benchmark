@@ -25,10 +25,16 @@ class _MockAgent:
         self.id = str(uuid.uuid4())
 
 
+class _MockPassagesNamespace:
+    def create(self, agent_id: str, text: str):
+        pass
+
+
 class _MockAgentsNamespace:
     def __init__(self):
         self._agents: dict[str, _MockAgent] = {}
         self.messages = _MockMessagesNamespace()
+        self.passages = _MockPassagesNamespace()
 
     def create(self, name: str, model: str, embedding: str,
                enable_sleeptime: bool = False, memory_blocks: list | None = None):
@@ -78,10 +84,16 @@ def _mock_httpx_success():
     mock.post.side_effect = lambda *a, **kw: _make_response(
         {"id": str(uuid.uuid4()), "label": "test", "value": "test"}
     )
-    # PATCH (attach block, update system prompt) returns 200
+    # PATCH (attach block, update system prompt, reset buffer) returns 200
     mock.patch.side_effect = lambda *a, **kw: _make_response({})
-    # GET (list tools, get blocks) returns empty list
-    mock.get.side_effect = lambda *a, **kw: _make_response([])
+    # GET (list tools, get agent for initial messages) returns empty list / message_ids
+    def _get_handler(*a, **kw):
+        url = a[0] if a else kw.get("url", "")
+        if "/tools/" in str(url):
+            return _make_response([])
+        # Agent detail (for capturing initial messages)
+        return _make_response({"message_ids": ["msg-1", "msg-2"]})
+    mock.get.side_effect = _get_handler
     # DELETE returns 200
     mock.delete.side_effect = lambda *a, **kw: _make_response({})
 
@@ -116,13 +128,6 @@ def _ingested_adapter(n: int = 3) -> "LettaEntityAdapter":
     """Adapter with reset + n ingested episodes."""
     adapter = _reset_adapter()
     mock_httpx = _mock_httpx_success()
-    # GET for _get_agent_blocks during _sync_entity_blocks
-    mock_httpx.get.side_effect = lambda *a, **kw: MagicMock(
-        status_code=200,
-        json=MagicMock(return_value=[
-            {"label": "persona", "id": adapter._persona_block_id or "persona-id"},
-        ]),
-    )
     with patch("lens.adapters.letta_entity.httpx", mock_httpx):
         for i in range(1, n + 1):
             adapter.ingest(
@@ -163,11 +168,9 @@ class TestLettaEntityReset:
         adapter = _reset_adapter()
         assert adapter._ingest_agent_id != adapter._qa_agent_id
 
-    def test_reset_clears_entity_blocks(self):
-        adapter = _make_adapter()
-        adapter._entity_blocks = {"old_entity": "block-id-123"}
-        _reset_adapter(adapter)
-        assert adapter._entity_blocks == {}
+    def test_reset_creates_entities_block(self):
+        adapter = _reset_adapter()
+        assert adapter._entities_block_id is not None
 
     def test_reset_clears_text_cache(self):
         adapter = _ingested_adapter(n=2)
@@ -175,9 +178,9 @@ class TestLettaEntityReset:
         _reset_adapter(adapter, scope_id="scope_new")
         assert adapter._text_cache == {}
 
-    def test_reset_creates_persona_block(self):
+    def test_reset_captures_initial_messages(self):
         adapter = _reset_adapter()
-        assert adapter._persona_block_id is not None
+        assert len(adapter._ingest_initial_msg_ids) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -199,14 +202,6 @@ class TestLettaEntityIngest:
     def test_ingest_sends_message_to_ingest_agent(self):
         adapter = _reset_adapter()
         mock_httpx = _mock_httpx_success()
-        mock_httpx.get.side_effect = lambda *a, **kw: MagicMock(
-            status_code=200,
-            json=MagicMock(return_value=[
-                {"label": "persona", "id": adapter._persona_block_id or "p-id"},
-            ]),
-        )
-        # Spy on _send_message
-        original_send = adapter._send_message
         calls = []
 
         def spy_send(agent_id, message, max_steps=10):
@@ -221,62 +216,26 @@ class TestLettaEntityIngest:
         assert calls[0][0] == adapter._ingest_agent_id
         assert "[ep_001]" in calls[0][1]
 
-
-# ---------------------------------------------------------------------------
-# Tests: _sync_entity_blocks
-# ---------------------------------------------------------------------------
-
-
-class TestLettaEntityBlockSync:
-    def test_sync_attaches_new_blocks_to_qa(self):
-        adapter = _reset_adapter()
-        new_block_id = str(uuid.uuid4())
-        mock_httpx = _mock_httpx_success()
-        # Simulate ingest agent has persona + a new entity block
-        mock_httpx.get.side_effect = lambda *a, **kw: MagicMock(
-            status_code=200,
-            json=MagicMock(return_value=[
-                {"label": "persona", "id": adapter._persona_block_id or "p-id"},
-                {"label": "alice_jones", "id": new_block_id},
-            ]),
-        )
-        with patch("lens.adapters.letta_entity.httpx", mock_httpx):
-            adapter._sync_entity_blocks()
-
-        assert "alice_jones" in adapter._entity_blocks
-        assert adapter._entity_blocks["alice_jones"] == new_block_id
-
-    def test_sync_detaches_deleted_blocks(self):
-        adapter = _reset_adapter()
-        old_block_id = str(uuid.uuid4())
-        adapter._entity_blocks["bob_smith"] = old_block_id
-
-        mock_httpx = _mock_httpx_success()
-        # Ingest agent only has persona (bob_smith was deleted)
-        mock_httpx.get.side_effect = lambda *a, **kw: MagicMock(
-            status_code=200,
-            json=MagicMock(return_value=[
-                {"label": "persona", "id": adapter._persona_block_id or "p-id"},
-            ]),
-        )
-        with patch("lens.adapters.letta_entity.httpx", mock_httpx):
-            adapter._sync_entity_blocks()
-
-        assert "bob_smith" not in adapter._entity_blocks
-
-    def test_sync_ignores_persona_block(self):
+    def test_ingest_stores_passage(self):
         adapter = _reset_adapter()
         mock_httpx = _mock_httpx_success()
-        mock_httpx.get.side_effect = lambda *a, **kw: MagicMock(
-            status_code=200,
-            json=MagicMock(return_value=[
-                {"label": "persona", "id": "persona-block-id"},
-            ]),
-        )
-        with patch("lens.adapters.letta_entity.httpx", mock_httpx):
-            adapter._sync_entity_blocks()
+        passage_calls = []
 
-        assert "persona" not in adapter._entity_blocks
+        original_create = adapter._client.agents.passages.create
+        def spy_passages(agent_id, text):
+            passage_calls.append((agent_id, text))
+            return original_create(agent_id=agent_id, text=text)
+
+        adapter._client.agents.passages.create = spy_passages
+        with patch("lens.adapters.letta_entity.httpx", mock_httpx):
+            adapter.ingest("ep_001", "scope_test", "2024-01-01", "Test text")
+
+        # Passages stored in both ingest + QA agents
+        assert len(passage_calls) == 2
+        assert "[ep_001]" in passage_calls[0][1]
+        assert "[ep_001]" in passage_calls[1][1]
+        # Verify they go to different agents
+        assert passage_calls[0][0] != passage_calls[1][0]
 
 
 # ---------------------------------------------------------------------------
@@ -289,13 +248,35 @@ class TestLettaEntityAnswer:
         adapter = _reset_adapter()
         adapter._scope_id = "scope_test"
 
-        # Mock _send_message to return text with refs
         adapter._send_message = lambda aid, msg, max_steps=15: (
             "Based on [ep_001] and ep_003, there is a pattern."
         )
         answer = adapter.answer_question("What happened?", question_id="q1")
         assert "scope_test_ep_001" in answer.refs_cited
         assert "scope_test_ep_003" in answer.refs_cited
+
+    def test_answer_handles_ep_prefix_doubling(self):
+        """Letta sometimes produces ep_scope_10_ep_001 — should strip leading ep_."""
+        adapter = _reset_adapter()
+        adapter._scope_id = "scope_10"
+
+        adapter._send_message = lambda aid, msg, max_steps=15: (
+            "Evidence from [ep_scope_10_ep_001] and ep_scope_10_ep_003."
+        )
+        answer = adapter.answer_question("What?", question_id="q_dup")
+        assert "scope_10_ep_001" in answer.refs_cited
+        assert "scope_10_ep_003" in answer.refs_cited
+
+    def test_answer_handles_bare_scope_refs(self):
+        """Bare scope-qualified refs without brackets should be extracted."""
+        adapter = _reset_adapter()
+        adapter._scope_id = "scope_10"
+
+        adapter._send_message = lambda aid, msg, max_steps=15: (
+            "According to scope_10_ep_005, the trend is clear."
+        )
+        answer = adapter.answer_question("What?", question_id="q_bare")
+        assert "scope_10_ep_005" in answer.refs_cited
 
     def test_answer_returns_agent_answer(self):
         from lens.core.models import AgentAnswer

@@ -233,7 +233,21 @@ def _extract_inline_refs(text: str, scope_id: str | None = None) -> list[str]:
         full = f"{scope_id}_ep_{num}" if scope_id else f"ep_{num}"
         refs.append(full)
 
-    return list(dict.fromkeys(refs))
+    # Bare scope-qualified refs without brackets: ep_scope_10_ep_001 or scope_10_ep_001
+    # These appear when Letta agents cite full ref IDs in prose
+    bare_scope_refs = re.findall(r'(?<![a-z0-9_\[])([a-z][a-z0-9_]*_ep_\d+)', text)
+    refs.extend(bare_scope_refs)
+
+    # Strip spurious leading "ep_" prefix that LLMs sometimes add
+    # e.g. "ep_zoning_corruption_11_ep_007" -> "zoning_corruption_11_ep_007"
+    cleaned: list[str] = []
+    for r in refs:
+        if r.startswith("ep_") and "_ep_" in r[3:]:
+            cleaned.append(r[3:])
+        else:
+            cleaned.append(r)
+
+    return list(dict.fromkeys(cleaned))
 
 
 def _extract_assistant_text(response: object) -> str:
@@ -297,6 +311,11 @@ class LettaV4Adapter(MemoryAdapter):
         self._scope_id: str | None = None
         self._text_cache: dict[str, str] = {}
 
+        # Initial message IDs for buffer reset
+        self._ingest_initial_msgs: list[str] = []
+        self._qa_initial_msgs: list[str] = []
+        self._sleep_initial_msgs: list[str] = []
+
     def _get_client(self):
         if self._client is None:
             try:
@@ -323,6 +342,59 @@ class LettaV4Adapter(MemoryAdapter):
         except Exception as e:
             log.warning("Letta agent %s message failed: %s", agent_id[:12], e)
             return ""
+
+    # ------------------------------------------------------------------
+    # Message buffer management
+    # ------------------------------------------------------------------
+
+    def _snapshot_initial_messages(self, agent_id: str) -> list[str]:
+        """Capture the agent's initial in-context message IDs."""
+        import httpx
+
+        try:
+            resp = httpx.get(
+                f"{self._base_url}/v1/agents/{agent_id}",
+                headers={"Authorization": "Bearer dummy"},
+                timeout=30.0,
+            )
+            if resp.status_code < 300:
+                data = resp.json()
+                ids = data.get("message_ids", [])
+                log.debug("Snapshot %d initial messages for %s", len(ids), agent_id[:12])
+                return ids
+            else:
+                log.warning("Failed to snapshot messages: HTTP %d", resp.status_code)
+                return []
+        except Exception as e:
+            log.warning("Failed to snapshot messages: %s", e)
+            return []
+
+    def _reset_message_buffer(self, agent_id: str, initial_msg_ids: list[str]) -> None:
+        """Reset an agent's in-context messages to the initial state."""
+        if not agent_id or not initial_msg_ids:
+            return
+
+        import httpx
+
+        try:
+            resp = httpx.patch(
+                f"{self._base_url}/v1/agents/{agent_id}",
+                headers={
+                    "Authorization": "Bearer dummy",
+                    "Content-Type": "application/json",
+                },
+                json={"message_ids": initial_msg_ids},
+                timeout=30.0,
+            )
+            if resp.status_code < 300:
+                log.debug("Reset message buffer for %s", agent_id[:12])
+            else:
+                log.warning(
+                    "Failed to reset message buffer for %s: HTTP %d",
+                    agent_id[:12], resp.status_code,
+                )
+        except Exception as e:
+            log.warning("Failed to reset message buffer for %s: %s", agent_id[:12], e)
 
     # ------------------------------------------------------------------
     # Agent lifecycle helpers
@@ -502,6 +574,62 @@ class LettaV4Adapter(MemoryAdapter):
         except Exception as e:
             log.warning("Error disabling auto-sleep: %s", e)
 
+    def _fix_sleeptime_frequency(self, agent_id: str) -> None:
+        """Fix sleeptime frequency to prevent triggering on first message.
+
+        Letta initializes turns_counter=-1 for new sleeptime groups, so
+        bump_turns_counter gives (-1+1)%freq=0 on the first message,
+        which triggers sleeptime immediately. We set turns_counter=0 and
+        a high frequency via the REST API to prevent this.
+        """
+        import httpx
+        import subprocess
+
+        _headers = {"Authorization": "Bearer dummy"}
+
+        try:
+            # Get the agent to find its group
+            resp = httpx.get(
+                f"{self._base_url}/v1/agents/{agent_id}",
+                headers=_headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            agent_data = resp.json()
+            group = agent_data.get("multi_agent_group")
+            if not group:
+                log.warning("No group found for agent %s", agent_id[:12])
+                return
+
+            group_id = group["id"]
+
+            # PATCH the group to set high frequency (prevents auto-trigger)
+            patch_resp = httpx.patch(
+                f"{self._base_url}/v1/groups/{group_id}",
+                headers=_headers,
+                json={
+                    "manager_config": {
+                        "manager_type": "sleeptime",
+                        "sleeptime_agent_frequency": 9999,
+                    }
+                },
+                timeout=10,
+            )
+            patch_resp.raise_for_status()
+
+            # Fix turns_counter via SQL (REST API doesn't expose this field)
+            subprocess.run(
+                [
+                    "podman", "exec", "letta",
+                    "psql", "-U", "letta", "-d", "letta", "-t", "-c",
+                    f"UPDATE groups SET turns_counter = 0 WHERE id = '{group_id}';",
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            log.info("Fixed sleeptime frequency on group %s (freq=9999, turns=0)", group_id[:14])
+        except Exception as e:
+            log.warning("Error fixing sleeptime frequency: %s", e)
+
     def _create_qa_agent(self, scope_id: str, shared_block_ids: list[str]) -> str:
         """Create the Q&A agent that shares blocks with the ingest agent."""
         client = self._get_client()
@@ -577,7 +705,7 @@ class LettaV4Adapter(MemoryAdapter):
                 log.warning("Failed to attach tool %s: %s", name, resp.text[:200])
 
     def reset(self, scope_id: str) -> None:
-        """Create three agents: ingest (with sleep) + Q&A, sharing memory blocks."""
+        """Create three agents: ingest + sleep + Q&A, sharing memory blocks."""
         client = self._get_client()
 
         # Clean up all existing V4 agents for this scope
@@ -608,13 +736,14 @@ class LettaV4Adapter(MemoryAdapter):
                 raise AdapterError(f"Failed to create {label} block")
             shared_block_ids.append(block_id)
 
-        # --- 2. Create ingest agent (with sleeptime) ---
+        # --- 2. Create ingest agent (NO sleeptime — avoids Letta's buggy
+        #     background sleeptime that causes "Run not found" agent deletion) ---
         try:
             ingest_agent = client.agents.create(
                 name=f"lens-v4-{scope_id}",
                 model=self._llm_model,
                 embedding=self._embed_model,
-                enable_sleeptime=True,
+                enable_sleeptime=False,
                 memory_blocks=[],
             )
         except Exception as e:
@@ -639,26 +768,40 @@ class LettaV4Adapter(MemoryAdapter):
         # Set ingest agent system prompt
         self._update_system_prompt(self._ingest_agent_id, _INGEST_SYSTEM)
 
-        # Configure the auto-created sleep agent
+        # --- 2b. Create standalone sleep/consolidation agent ---
         sleep_name = f"lens-v4-{scope_id}-sleeptime"
-        self._configure_sleep_agent(sleep_name)
-        self._disable_auto_sleep(sleep_name)
-
-        # Store sleep agent ID for manual triggering
-        sleep_agent = self._find_agent_by_name(sleep_name)
-        if sleep_agent:
-            self._sleep_agent_id = sleep_agent["id"]
-            # Attach shared blocks (409 expected for auto-shared ones)
+        try:
+            sleep_agent = client.agents.create(
+                name=sleep_name,
+                model=self._llm_model,
+                embedding=self._embed_model,
+                enable_sleeptime=False,
+                memory_blocks=[],
+            )
+            self._sleep_agent_id = sleep_agent.id
+            self._update_system_prompt(self._sleep_agent_id, _SLEEP_SYSTEM)
             for block_id in shared_block_ids:
-                self._attach_block(sleep_agent["id"], block_id)
-        else:
-            log.warning("Sleep agent %s not found — consolidation disabled", sleep_name)
+                self._attach_block(self._sleep_agent_id, block_id)
+            self._attach_tools(self._sleep_agent_id, [
+                "core_memory_append",
+                "core_memory_replace",
+            ])
+            log.info("Created standalone sleep agent %s (%s)", sleep_name, self._sleep_agent_id[:12])
+        except Exception as e:
+            log.warning("Failed to create sleep agent: %s — consolidation disabled", e)
+            self._sleep_agent_id = None
 
         # --- 3. Create Q&A agent (no sleeptime) ---
         self._qa_agent_id = self._create_qa_agent(scope_id, shared_block_ids)
 
+        # Snapshot initial message IDs for buffer reset
+        self._ingest_initial_msgs = self._snapshot_initial_messages(self._ingest_agent_id)
+        self._qa_initial_msgs = self._snapshot_initial_messages(self._qa_agent_id)
+        if self._sleep_agent_id:
+            self._sleep_initial_msgs = self._snapshot_initial_messages(self._sleep_agent_id)
+
         log.info(
-            "Created Letta V4 trio for %s: ingest=%s sleep=%s qa=%s (auto-sleep disabled)",
+            "Created Letta V4 trio for %s: ingest=%s sleep=%s qa=%s",
             scope_id,
             self._ingest_agent_id[:12],
             self._sleep_agent_id[:12] if self._sleep_agent_id else "NONE",
@@ -673,33 +816,67 @@ class LettaV4Adapter(MemoryAdapter):
         text: str,
         meta: dict | None = None,
     ) -> None:
-        """Send episode to the ingest agent for processing."""
+        """Ingest an episode: store via passages.create() + short agent message.
+
+        Two-pronged approach (borrowed from letta-sleepy):
+        Store episode via passages.create() only. Core memory updates happen
+        at checkpoints via prepare() to avoid crashing the Letta server.
+        """
         if not self._ingest_agent_id:
             raise AdapterError("reset() must be called before ingest()")
 
         self._text_cache[episode_id] = text
+        client = self._get_client()
 
-        message = f"[{episode_id}] {timestamp}:\n\n{text}"
-        response = self._send_message(self._ingest_agent_id, message, max_steps=10)
-        if response:
-            log.info("Ingest agent processed %s: %s", episode_id, response[:120])
-        else:
-            log.warning("Ingest agent returned empty response for %s", episode_id)
+        # Direct archival storage — guaranteed retrieval, no agent loop.
+        # Store in BOTH ingest and QA agents: Letta archival is per-agent,
+        # so the QA agent needs its own copy to search during answer_question().
+        tagged_text = f"[{episode_id}] {timestamp}\n\n{text}"
+        for agent_id, label in [
+            (self._ingest_agent_id, "ingest"),
+            (self._qa_agent_id, "qa"),
+        ]:
+            if not agent_id:
+                continue
+            try:
+                client.agents.passages.create(
+                    agent_id=agent_id,
+                    text=tagged_text,
+                )
+            except Exception as e:
+                log.warning("passages.create() failed for %s (%s): %s", episode_id, label, e)
+        log.info("Stored %s in ingest+qa archival", episode_id)
 
     def prepare(self, scope_id: str, checkpoint: int) -> None:
-        """Trigger the sleep agent to consolidate memory at this checkpoint."""
-        if not self._sleep_agent_id:
-            log.warning("No sleep agent — skipping consolidation at checkpoint %d", checkpoint)
-            return
+        """Consolidate core memory at this checkpoint.
 
-        log.info("Checkpoint %d — triggering sleep agent for consolidation", checkpoint)
-        self._send_message(
-            self._sleep_agent_id,
-            f"Checkpoint {checkpoint}: consolidate the memory blocks. "
-            f"Reconcile disparate information, update hypotheses, "
-            f"prune irrelevant entries, and strengthen well-supported patterns.",
-            max_steps=15,
-        )
+        Uses the ingest agent (which has archival access to all episodes)
+        to search archival memory and update the shared core memory blocks.
+        Then uses the sleep agent for cross-block consolidation.
+        """
+        log.info("Checkpoint %d — triggering core memory consolidation", checkpoint)
+
+        # Step 1: Ingest agent searches archival and updates core memory
+        if self._ingest_agent_id:
+            self._send_message(
+                self._ingest_agent_id,
+                f"Checkpoint {checkpoint}: Search your archival memory for recent episodes. "
+                f"Update your core memory blocks (patterns, hypotheses, entities, events) "
+                f"with key findings. Focus on patterns that emerge from multiple episodes.",
+                max_steps=15,
+            )
+            self._reset_message_buffer(self._ingest_agent_id, self._ingest_initial_msgs)
+
+        # Step 2: Sleep agent consolidates across blocks
+        if self._sleep_agent_id:
+            self._send_message(
+                self._sleep_agent_id,
+                f"Checkpoint {checkpoint}: consolidate the memory blocks. "
+                f"Reconcile disparate information, update hypotheses, "
+                f"prune irrelevant entries, and strengthen well-supported patterns.",
+                max_steps=15,
+            )
+            self._reset_message_buffer(self._sleep_agent_id, self._sleep_initial_msgs)
 
     # ------------------------------------------------------------------
     # Direct Q&A via the dedicated Q&A agent
@@ -725,7 +902,7 @@ class LettaV4Adapter(MemoryAdapter):
             # Refs are already fully qualified by _extract_inline_refs
             ep_map[r] = r
 
-        return AgentAnswer(
+        result = AgentAnswer(
             question_id=question_id,
             answer_text=answer_text,
             turns=[{"role": "letta_qa_agent", "content": answer_text}],
@@ -736,6 +913,11 @@ class LettaV4Adapter(MemoryAdapter):
             refs_cited=refs,
             ref_episode_map=ep_map,
         )
+
+        # Reset Q&A buffer between questions
+        self._reset_message_buffer(self._qa_agent_id, self._qa_initial_msgs)
+
+        return result
 
     # ------------------------------------------------------------------
     # MemoryAdapter abstract methods (stubs — Q&A goes through Letta)

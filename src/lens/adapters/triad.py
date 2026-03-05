@@ -8,10 +8,14 @@ from __future__ import annotations
 import logging
 import os
 
+import httpx
+
 try:
+    from openai import APITimeoutError as _APITimeoutError
     from openai import OpenAI as _OpenAI
 except ImportError:
     _OpenAI = None  # type: ignore[assignment,misc]
+    _APITimeoutError = None  # type: ignore[assignment,misc]
 
 from lens.adapters.base import (
     CapabilityManifest,
@@ -46,17 +50,23 @@ def _complete(
     user: str,
     max_tokens: int = 1500,
 ) -> str:
-    """Single chat completion call."""
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        max_tokens=max_tokens,
-        temperature=0.0,
-    )
-    return resp.choices[0].message.content or ""
+    """Single chat completion call with timeout handling."""
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.0,
+        )
+        return resp.choices[0].message.content or ""
+    except Exception as e:
+        if _APITimeoutError is not None and isinstance(e, _APITimeoutError):
+            logger.warning("LLM call timed out (120s): %s", str(e)[:200])
+            return "(timeout — no update)"
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +122,10 @@ class _TriadBase(MemoryAdapter):
         model_raw = os.environ.get("LENS_LLM_MODEL", "gpt-4o-mini")
         self._model = _strip_provider_prefix(model_raw)
 
-        kwargs: dict = {"api_key": api_key}
+        kwargs: dict = {
+            "api_key": api_key,
+            "timeout": httpx.Timeout(120.0),
+        }
         if base_url:
             kwargs["base_url"] = base_url
         self._oai = _OpenAI(**kwargs)

@@ -338,10 +338,10 @@ class TestInitClient:
         a = TriadV1PanelAdapter()
         a.reset("s")
         a._init_client()
-        mock_openai_cls.assert_called_once_with(
-            api_key="test-key",
-            base_url="http://localhost:8080/v1",
-        )
+        call_kwargs = mock_openai_cls.call_args[1]
+        assert call_kwargs["api_key"] == "test-key"
+        assert call_kwargs["base_url"] == "http://localhost:8080/v1"
+        assert call_kwargs["timeout"] is not None
         assert a._model == "meta-llama/Llama-3-70b"
 
     @patch.dict("os.environ", {}, clear=True)
@@ -350,7 +350,9 @@ class TestInitClient:
         a = TriadV1PanelAdapter()
         a.reset("s")
         a._init_client()
-        mock_openai_cls.assert_called_once_with(api_key="dummy")
+        call_kwargs = mock_openai_cls.call_args[1]
+        assert call_kwargs["api_key"] == "dummy"
+        assert call_kwargs["timeout"] is not None
         assert a._model == "gpt-4o-mini"
 
     @patch("lens.adapters.triad._OpenAI", None)

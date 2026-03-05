@@ -105,9 +105,14 @@ def _embed_texts_openai(
     model: str = _DEFAULT_OPENAI_EMBED_MODEL,
     api_key: str | None = None,
     base_url: str | None = None,
-    _max_retries: int = 3,
+    _max_retries: int = 6,
+    _batch_size: int = 5,
 ) -> list[list[float]]:
-    """Call OpenAI-compatible embedding API. Returns one vector per input text."""
+    """Call OpenAI-compatible embedding API. Returns one vector per input text.
+
+    Sends in micro-batches of ``_batch_size`` to avoid GPU OOM on the remote
+    server when many runners hit it concurrently.
+    """
     import logging
     import time
 
@@ -123,44 +128,51 @@ def _embed_texts_openai(
     else:
         embed_url = _OPENAI_EMBED_URL
 
-    body = json.dumps({"model": model, "input": texts}).encode()
-    for attempt in range(_max_retries):
-        req = urllib.request.Request(
-            embed_url,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                "User-Agent": "lens-benchmark/1.0",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read())
-                # OpenAI returns {"data": [{"embedding": [...], "index": 0}, ...]}
-                sorted_data = sorted(result["data"], key=lambda d: d["index"])
-                return [d["embedding"] for d in sorted_data]
-        except urllib.error.HTTPError as e:
-            resp_body = ""
+    # Split into micro-batches to reduce per-request GPU memory
+    all_vectors: list[list[float]] = []
+    for batch_start in range(0, len(texts), _batch_size):
+        batch = texts[batch_start : batch_start + _batch_size]
+        body = json.dumps({"model": model, "input": batch}).encode()
+        for attempt in range(_max_retries):
+            req = urllib.request.Request(
+                embed_url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "User-Agent": "lens-benchmark/1.0",
+                },
+            )
             try:
-                resp_body = e.read().decode(errors="replace")
-            except Exception:
-                pass
-            log.warning(
-                "OpenAI embed HTTP %s (attempt %d/%d): %s",
-                e.code, attempt + 1, _max_retries, resp_body[:500],
-            )
-            if attempt == _max_retries - 1:
-                raise
-            time.sleep(1 * (attempt + 1))
-        except (urllib.error.URLError, OSError) as e:
-            log.warning(
-                "OpenAI embed network error (attempt %d/%d): %s",
-                attempt + 1, _max_retries, e,
-            )
-            if attempt == _max_retries - 1:
-                raise
-            time.sleep(1 * (attempt + 1))
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    result = json.loads(resp.read())
+                    sorted_data = sorted(result["data"], key=lambda d: d["index"])
+                    all_vectors.extend([d["embedding"] for d in sorted_data])
+                    break  # success — move to next batch
+            except urllib.error.HTTPError as e:
+                resp_body = ""
+                try:
+                    resp_body = e.read().decode(errors="replace")
+                except Exception:
+                    pass
+                log.warning(
+                    "OpenAI embed HTTP %s (attempt %d/%d, batch %d-%d): %s",
+                    e.code, attempt + 1, _max_retries,
+                    batch_start, batch_start + len(batch), resp_body[:500],
+                )
+                if attempt == _max_retries - 1:
+                    raise
+                time.sleep(2 * (attempt + 1))
+            except (urllib.error.URLError, OSError) as e:
+                log.warning(
+                    "OpenAI embed network error (attempt %d/%d, batch %d-%d): %s",
+                    attempt + 1, _max_retries,
+                    batch_start, batch_start + len(batch), e,
+                )
+                if attempt == _max_retries - 1:
+                    raise
+                time.sleep(2 * (attempt + 1))
+    return all_vectors
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
