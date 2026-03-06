@@ -208,13 +208,14 @@ def _llm_extract_entities(
     """
     import time
 
-    model = model or os.environ.get("LENS_LLM_MODEL", "gpt-4o-mini")
+    model = model or os.environ.get("GRAPHRAG_LLM_MODEL") or os.environ.get("LENS_LLM_MODEL", "gpt-4o-mini")
     api_key = (
         api_key
+        or os.environ.get("GRAPHRAG_LLM_API_KEY")
         or os.environ.get("LENS_LLM_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
     )
-    base_url = base_url or os.environ.get("LENS_LLM_API_BASE", "https://api.openai.com/v1")
+    base_url = base_url or os.environ.get("GRAPHRAG_LLM_API_BASE") or os.environ.get("LENS_LLM_API_BASE", "https://api.openai.com/v1")
 
     chat_url = base_url.rstrip("/")
     if not chat_url.endswith("/chat/completions"):
