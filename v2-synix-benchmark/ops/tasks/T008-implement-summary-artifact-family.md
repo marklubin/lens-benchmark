@@ -1,4 +1,4 @@
-# T008 - Implement summary artifact family and policy exposure
+# T008 - Integrate the Synix summary family into benchmark policies
 
 status: ready
 priority: P1
@@ -6,41 +6,42 @@ phase: Artifact
 owner: unassigned
 created: 2026-03-06
 updated: 2026-03-06
-depends_on: [T005]
+depends_on: [T005, T013]
 blocks: [T010, T011]
 
 ## Purpose
 
-Implement summary-based memory artifacts with provenance-preserving checkpoint compilation.
+Integrate the released Synix summary family into the benchmark runtime and policy manifests without rebuilding that artifact family locally.
 
 ## Scope
 
 In scope:
 
-- summary artifact format
-- checkpoint or hierarchical summary generation
-- runtime exposure of summary artifacts under `policy_summary`
+- benchmark-side configuration for the Synix summary family
+- runtime exposure of the Synix `summaries` projection under `policy_summary`
+- provenance-preserving retrieval from the benchmark runtime through the Synix tool API
 
 Out of scope:
 
+- implementing the Synix summary artifact family itself
 - summary-only systems with no provenance path
 
 ## Deliverables
 
-- summary artifact compiler
 - `policy_summary` manifest and runtime exposure
-- tests for summary provenance and compilation behavior
+- tests for summary provenance and runtime access
+- benchmark-side configuration for the Synix summary family
 
 ## Files Or Areas Owned
 
-- summary artifact modules
+- benchmark policy and runtime integration modules
 - related tests
 
 ## Implementation Plan
 
-1. define summary artifact model
-2. implement checkpoint-scoped compilation path
-3. ensure summary outputs preserve links to source evidence
+1. configure the Synix summary family for the benchmark bank
+2. expose summary retrieval under `policy_summary` through the named projection handle
+3. ensure summary outputs preserve links to source evidence through the Synix tool API
 
 ## Verification
 
@@ -50,12 +51,12 @@ Out of scope:
 
 ## Done Criteria
 
-- `policy_summary` is runnable in pilot studies
+- `policy_summary` is runnable in pilot studies over released Synix summary artifacts
 
 ## Risks
 
-- summary compression may lose critical evidence details
+- upstream summary semantics may need one benchmark-specific configuration pass
 
 ## Handoff
 
-- to be filled by owner
+- waiting on the Synix upstream milestone and `T013`

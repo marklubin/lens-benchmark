@@ -1,4 +1,4 @@
-# T009 - Implement graph artifact family and policy exposure
+# T009 - Integrate the Synix graph family into benchmark policies
 
 status: ready
 priority: P1
@@ -6,45 +6,44 @@ phase: Artifact
 owner: unassigned
 created: 2026-03-06
 updated: 2026-03-06
-depends_on: [T005]
+depends_on: [T005, T013]
 blocks: [T011]
 
 ## Purpose
 
-Implement graph-based memory artifacts as a feature family on the shared substrate.
+Integrate the released Synix graph family into the benchmark runtime and policy manifests without rebuilding that artifact family locally.
 
 ## Scope
 
 In scope:
 
-- entity extraction
-- relation extraction
-- graph artifact indexing
-- graph-informed retrieval back to source evidence
-- runtime exposure under `policy_graph`
+- benchmark-side configuration for the Synix graph family
+- runtime exposure of the Synix `graph` projection under `policy_graph`
+- graph-informed retrieval back to source evidence through the Synix tool API
 
 Out of scope:
 
+- implementing the Synix graph artifact family itself
 - external graph databases
 - complex temporal graph research features not needed for V1
 
 ## Deliverables
 
-- graph artifact compiler
 - `policy_graph` manifest and runtime exposure
 - tests for graph provenance and retrieval
+- benchmark-side configuration for the Synix graph family
 
 ## Files Or Areas Owned
 
-- graph artifact modules
+- benchmark policy and runtime integration modules
 - related tests
 
 ## Implementation Plan
 
-1. define graph artifact model
-2. implement extraction and indexing path
-3. implement retrieval path over graph artifacts plus source evidence
-4. ensure compilation is checkpoint-scoped and resumable
+1. configure the Synix graph family for the benchmark bank
+2. expose graph retrieval under `policy_graph` through the named projection handle
+3. ensure graph hits resolve back to source evidence through the Synix tool API
+4. verify the benchmark runtime does not trigger graph rebuilds
 
 ## Verification
 
@@ -54,12 +53,12 @@ Out of scope:
 
 ## Done Criteria
 
-- `policy_graph` is runnable in feature-screening studies
+- `policy_graph` is runnable in feature-screening studies over released Synix graph artifacts
 
 ## Risks
 
-- graph retrieval semantics may not justify the additional build cost
+- upstream graph semantics may need one benchmark-specific configuration pass
 
 ## Handoff
 
-- to be filled by owner
+- waiting on the Synix upstream milestone and `T013`

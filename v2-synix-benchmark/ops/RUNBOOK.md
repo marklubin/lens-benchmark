@@ -19,7 +19,7 @@ This runbook defines the standard operating procedure for creating, compiling, r
 
 1. Create `study_manifest.json`.
 2. Materialize policy manifests.
-3. Materialize artifact-bank manifests for each `scope x checkpoint`.
+3. Materialize or select sealed bank manifests for each `scope x checkpoint`.
 4. Materialize run manifests.
 5. Initialize `state.sqlite`.
 6. Start `events.jsonl`.
@@ -32,10 +32,10 @@ For every study:
 
 1. record `bank_build_started`
 2. ingest the checkpoint prefix episodes
-3. compile required artifact families
-4. persist bank snapshot metadata
+3. compile or select the required named projections
+4. persist sealed bank manifest metadata
 5. record `bank_build_completed` or `bank_build_failed`
-6. execute policy runs against the compiled bank
+6. execute policy runs against the sealed bank manifest
 7. answer questions
 8. score outputs
 9. persist final artifacts
@@ -43,15 +43,15 @@ For every study:
 
 ## Compile-Once Rule
 
-Policy execution should reuse compiled artifact banks.
+Policy execution should reuse sealed bank manifests and their named projections.
 
 A repeated run under a different policy should not trigger artifact recompilation unless the bank manifest hash changed.
 
 ## On Failure
 
-1. Do not delete partial artifacts or partial bank snapshots.
+1. Do not delete partial artifacts, partial projection outputs, or partial sealed manifests.
 2. Record the failure event with stack trace and failure classification.
-3. Inspect `state.sqlite`, cache state, and bank snapshot status.
+3. Inspect `state.sqlite`, cache state, and bank manifest or projection-build status.
 4. Resume from the orchestrator.
 5. Verify that completed model calls and completed bank builds were not repeated.
 
@@ -77,13 +77,13 @@ Replay is for audit and reporting, not new inference.
 A study is considered valid only if all of the following are true:
 
 - every run has a study manifest, policy manifest, and run manifest
-- every compiled bank snapshot has a bank manifest
+- every compiled checkpoint bank has a sealed bank manifest
 - every run has an event trail
 - cached model responses exist for all completed calls
 - score artifacts exist for all completed answers
 - summary tables regenerate from saved artifacts
 - no unexplained missing cells remain
-- no evidence of future-leakage exists in any bank snapshot
+- no evidence of future-leakage exists in any checkpoint bank
 
 ## Cost Verification Checklist
 

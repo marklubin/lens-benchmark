@@ -120,3 +120,78 @@ Rationale:
 - prevents combinatorial artifact explosion
 - keeps cost and attribution tractable
 - makes the first study interpretable
+
+## D009 - Synix Owns The Snapshot, Bank, Artifact-Family, And Tooling Substrate
+
+Date: 2026-03-06
+Status: accepted
+
+Decision:
+
+Treat Synix as the upstream platform for immutable snapshots, checkpointed banks, built-in chunk and memory artifact families, and the default Python-local runtime and tool interface.
+
+Rationale:
+
+- keeps benchmark-specific logic out of the platform layer
+- prevents duplicated compiler work in this repository
+- gives the benchmark one stable upstream contract to consume
+
+## D010 - Checkpoint Isolation Must Be Enforced During Build, Not By Query Masking
+
+Date: 2026-03-06
+Status: accepted
+
+Decision:
+
+Implement checkpoint isolation by prefix-valid snapshot or projection semantics inside Synix. Post-hoc query masking is not an acceptable substitute.
+
+Rationale:
+
+- derived summaries, graphs, and rankings can leak future information before query-time filtering
+- build-time isolation is the only defensible scientific unit
+- this aligns the benchmark with the intended Synix snapshot model
+
+## D011 - Python-Local Synix Runtime Is The First Integration Path
+
+Date: 2026-03-06
+Status: accepted
+
+Decision:
+
+Use a Python-local Synix runtime and tool surface as the first benchmark integration path. Mesh or HTTP parity is a follow-on concern.
+
+Rationale:
+
+- reduces integration surface area for the first milestone
+- matches current Synix strengths more closely than the mesh layer
+- keeps benchmark policy work focused on one auditable runtime path
+
+## D012 - Named Projections And Sealed Manifests Are The Benchmark Integration Contract
+
+Date: 2026-03-06
+Status: accepted
+
+Decision:
+
+Treat sealed bank manifests plus named projection handles as the only benchmark-facing contract for compiled Synix banks. LENS runtime code, policies, and scoring may consume projections and refs through that contract, but must not couple to internal file layouts or mutable build directories.
+
+Rationale:
+
+- makes checkpoint isolation auditable at the manifest boundary
+- prevents downstream coupling to incidental Synix file structure
+- gives chunk, summary, core-memory, and graph integrations one uniform access pattern
+
+## D013 - Synix Build And Release Are Separate Lifecycle Boundaries
+
+Date: 2026-03-06
+Status: accepted
+
+Decision:
+
+Treat `synix build` as immutable snapshot construction only, and treat `synix release` as the only durable materialization path. Benchmark integration should rely on immutable build refs, release refs, and sealed manifests rather than mutable local build directories.
+
+Rationale:
+
+- removes ambiguity between immutable state and mutable realization
+- makes CI or CD promotion and rollback ref-addressed operations instead of workspace mutations
+- gives checkpoint banks and future runtime mounts a cleaner upstream contract

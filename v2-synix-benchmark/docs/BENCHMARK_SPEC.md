@@ -4,15 +4,40 @@
 
 Build a controlled benchmark of memory mechanisms for longitudinal question answering over the existing LENS datasets.
 
-The benchmark compares runtime policies implemented on one shared Synix-backed artifact compiler.
+The benchmark compares runtime policies implemented on one shared Synix-backed artifact bank substrate.
+
+## Platform Ownership
+
+### Synix Owns
+
+Synix is the upstream platform for:
+
+- immutable build snapshots and aliases
+- checkpoint projections and sealed bank manifests
+- shared artifact banks
+- layered hybrid search as a first-class artifact
+- built-in chunk, core-memory, summary, and graph families
+- the default Python-local runtime and tool interface for mounted banks
+
+### LENS Owns
+
+The benchmark repository owns:
+
+- study, policy, bank, run, event, and score manifests
+- the Modal broker, cache, and accounting policy
+- state, resume, and replay orchestration
+- benchmark policy matrices and study design
+- scoring, audit, and reporting
+
+The benchmark should consume Synix platform features rather than reimplement them locally.
 
 ## Benchmark Model
 
 ### Compile Once Per Checkpoint Prefix
 
-For each `scope x checkpoint`, Synix compiles a checkpoint-scoped artifact bank from the episode prefix available at that checkpoint.
+For each `scope x checkpoint`, Synix resolves the episode prefix into a prefix-valid checkpoint projection over an immutable snapshot and emits a sealed bank manifest for that projection.
 
-The artifact bank may include:
+The sealed manifest can expose named projections for:
 
 - raw episode artifacts
 - chunk artifacts
@@ -20,6 +45,8 @@ The artifact bank may include:
 - core-memory artifacts
 - summary artifacts
 - graph artifacts
+
+Policies consume the sealed manifest and its named projections rather than direct file paths inside a mutable build directory.
 
 This compilation is shared across policies.
 
@@ -30,6 +57,7 @@ A benchmark policy does not rebuild memory.
 A policy selects:
 
 - which artifact families are visible
+- which named projections are mounted
 - which search surfaces are queried
 - how hits are fused and ranked
 - what retrieval caps apply
@@ -42,6 +70,10 @@ This is the main cost and control advantage of the V2 design.
 No artifact bank may contain information from episodes beyond the active checkpoint prefix.
 
 That rule is mandatory. Violating it invalidates the run.
+
+Checkpoint isolation must be enforced by Synix snapshot or projection semantics during build.
+
+Post-hoc query masking is not a valid substitute.
 
 ## Primary Scope Set
 
@@ -126,7 +158,13 @@ If cost allows, add combined policies only after the main five are stable:
 
 Do not start with combined policies.
 
-## Memory Artifact Families To Build
+The first runtime integration path is a Python-local Synix tool surface mounted over one sealed bank.
+
+## Memory Artifact Families To Land
+
+The memory families below are expected to exist as Synix built-ins.
+
+LENS integrates them into benchmark policies and scoring, but does not define new local artifact-family abstractions unless a requirement is explicitly benchmark-specific.
 
 ### Shared Foundation
 
@@ -140,6 +178,11 @@ These are required for all non-null policies:
 - provenance mapping
 - stable citation ids
 - batch retrieval
+- checkpoint projections and sealed bank manifests
+- the Python-local Synix runtime and tool API
+
+These remain benchmark-side runtime requirements in LENS:
+
 - Modal call broker
 - append-only event log
 - cache, resume, replay
@@ -187,6 +230,8 @@ Time-aware retrieval weighting. Optional for later variants, not required for th
 5. All inference flows through Modal.
 6. All policies operate on checkpoint-scoped artifact banks.
 7. Policy execution must not trigger artifact rebuilds unless the build manifest changed.
+8. Checkpoint isolation is implemented by build-time snapshot projection, not by query-time masking.
+9. Benchmark integrations consume sealed manifests and named projection handles rather than file-system conventions inside Synix builds.
 
 ## Cost-Control Rules
 

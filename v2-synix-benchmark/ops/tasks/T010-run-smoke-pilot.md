@@ -6,7 +6,7 @@ phase: Study
 owner: unassigned
 created: 2026-03-06
 updated: 2026-03-06
-depends_on: [T004, T005, T006, T007, T008]
+depends_on: [T004, T005, T006, T007, T008, T013]
 blocks: [T011, T012]
 
 ## Purpose
@@ -44,7 +44,7 @@ Out of scope:
 ## Implementation Plan
 
 1. choose pilot scopes and policies
-2. compile the required bank snapshots
+2. compile or select the required sealed Synix bank manifests
 3. run the policy cells
 4. verify resume and replay under at least one injected failure
 5. export cost and runtime summary

@@ -11,6 +11,12 @@ V2 scoring is designed to be:
 - easier to rerun
 - less sensitive to arbitrary policy choices
 
+## Platform Boundary
+
+Scoring stays in the LENS benchmark layer.
+
+Synix should expose the artifact and tool payloads needed for scoring, but scoring logic, weighting, audit policy, and report generation should not move into Synix.
+
 ## Removed From The Primary Score
 
 These are removed from the primary composite:

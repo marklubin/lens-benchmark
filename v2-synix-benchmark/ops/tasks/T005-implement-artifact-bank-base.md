@@ -1,4 +1,4 @@
-# T005 - Implement checkpoint-scoped artifact-bank compiler for raw, chunk, and search artifacts
+# T005 - Integrate Synix checkpoint banks, chunk artifacts, and layered search into the benchmark base bank path
 
 status: ready
 priority: P0
@@ -7,65 +7,65 @@ owner: unassigned
 created: 2026-03-06
 updated: 2026-03-06
 depends_on: [T004]
-blocks: [T007, T008, T009, T010]
+blocks: [T013, T007, T008, T009, T010]
 
 ## Purpose
 
-Build the base artifact bank that all runtime policies depend on.
+Wire the benchmark to the released Synix base-bank substrate rather than rebuilding that compiler in this repository.
 
 ## Scope
 
 In scope:
 
-- raw evidence ingestion
-- chunking
-- FTS indexes
-- embedding indexes
-- RRF-ready hybrid retrieval
-- provenance-preserving retrieval and ref resolution
-- checkpoint-scoped bank snapshot metadata
+- benchmark-side configuration for Synix scope and checkpoint builds
+- integration with Synix chunk artifacts
+- integration with Synix layered search and ref resolution
+- benchmark-side selection of checkpoint-scoped sealed bank manifests
+- benchmark-side lookup of named `raw`, `chunk`, and `layered_search` projections
+- provenance-preserving retrieval through Synix runtime surfaces
 
 Out of scope:
 
+- implementing the Synix snapshot, checkpoint-bank, chunk, or search primitives themselves
 - core-memory artifacts
 - summary artifacts
 - graph artifacts
 
 ## Deliverables
 
-- base artifact-bank compiler
-- retrieval tools over the base bank
+- base-bank integration path over released Synix artifacts
+- benchmark-side bank manifest wiring
 - provenance tests
 - citation-resolution tests
 - checkpoint-isolation tests
 
 ## Files Or Areas Owned
 
-- `src/` artifact compiler and retrieval modules
+- `src/` benchmark bank integration and retrieval modules
 - related tests
 
 ## Implementation Plan
 
-1. ingest raw episodes by checkpoint prefix
-2. materialize chunks and indexes
-3. expose hybrid search over the compiled bank
-4. resolve refs back to canonical evidence
+1. wire the benchmark manifests to Synix scope and checkpoint build outputs
+2. mount the released Synix chunk and layered-search artifacts
+3. expose base retrieval handles through the benchmark runtime integration layer over named projection handles
+4. resolve refs back to canonical evidence without reading Synix internals directly
 
 ## Verification
 
-- search returns stable refs
+- search returns stable refs through the Synix runtime API and named projection path
 - retrieve resolves cited ids
 - provenance is preserved back to raw episodes
-- no bank snapshot includes future episodes
+- no checkpoint bank includes future episodes
 
 ## Done Criteria
 
-- the base artifact bank works end to end on a smoke-test scope
+- the benchmark base bank path works end to end on a smoke-test scope over released Synix artifacts and sealed manifests
 
 ## Risks
 
-- provenance shortcuts that break later scoring
+- upstream Synix contracts may still shift before the platform milestone closes
 
 ## Handoff
 
-- to be filled by owner
+- waiting on the Synix upstream milestone

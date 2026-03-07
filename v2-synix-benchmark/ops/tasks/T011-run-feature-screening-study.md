@@ -6,7 +6,7 @@ phase: Study
 owner: unassigned
 created: 2026-03-06
 updated: 2026-03-06
-depends_on: [T007, T008, T009, T010]
+depends_on: [T006, T007, T008, T009, T010, T013]
 blocks: [T012]
 
 ## Purpose
@@ -41,7 +41,7 @@ Out of scope:
 ## Implementation Plan
 
 1. freeze screening matrix
-2. compile any missing bank snapshots
+2. compile or select any missing sealed Synix bank manifests
 3. run all policy cells
 4. inspect results and cost
 5. shortlist final policies
