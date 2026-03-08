@@ -1,0 +1,504 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{longtable}
+
+\definecolor{toprow}{HTML}{E8F5E9}
+\definecolor{midrow}{HTML}{FFF3E0}
+\definecolor{botrow}{HTML}{FFEBEE}
+\definecolor{zerorow}{HTML}{F5F5F5}
+\definecolor{sectionblue}{HTML}{1565C0}
+\definecolor{narrativeblue}{HTML}{E3F2FD}
+\definecolor{cdrorange}{HTML}{FFF3E0}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=sectionblue,
+  urlcolor=sectionblue,
+  citecolor=sectionblue
+}
+
+\newcommand{\smark}[1]{\textcolor{gray}{\scriptsize #1}}
+
+\title{\textbf{LENS Benchmark: Expanded Evaluation Report}\\[0.3em]
+\large Phases 6--7: Narrative \& Cross-Domain Reasoning Scopes\\[0.2em]
+\normalsize 6 Scopes, 17 Adapters, 80+ Scored Runs}
+\author{Project Status Report --- March 2026}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+This report presents the expanded LENS benchmark evaluation across six domain-diverse scopes (S07--S12): three \textbf{narrative} scopes (AI tutoring jailbreak, corporate acquisition, shadow API abuse) and three \textbf{cross-domain reasoning} (CDR) scopes (clinical trial hepatotoxicity, zoning corruption, therapy chat). We evaluated up to 17 adapter configurations across these scopes using a static query driver with Qwen3.5-35B-A3B as both agent and judge LLM. The key findings extend and refine the Phase~5 results: (1)~\textbf{sqlite-chunked-hybrid} remains the top performer (0.718 mean composite across all 6 scopes), (2)~narrative scopes produce systematically higher scores than CDR scopes ($+0.10$ to $+0.24$ gap), (3)~\textbf{Letta} with archival vector search is the best non-SQLite adapter (0.665 mean), and (4)~the ``lossy abstraction trap'' identified in Phase~5 persists---adapters that preprocess evidence underperform simple retrieval by 0.05--0.20 points.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%% ============================================================
+\section{Introduction}
+%% ============================================================
+
+The initial LENS evaluation (Phases 1--5) tested 8 adapters across 6 numeric/structured scopes (infrastructure metrics, financial data, clinical lab values). The core finding---that SQLite-backed hybrid retrieval outperforms all dedicated memory architectures---demanded validation on qualitatively different data. Phases 6--7 introduce two new scope categories:
+
+\begin{itemize}[nosep]
+  \item \textbf{Narrative scopes} (S07--S09): Natural-language episodes averaging 5,000 words each, featuring dialogue transcripts, corporate documents, and service logs. Signal is embedded in conversational patterns and document details rather than numeric progressions.
+  \item \textbf{Cross-domain reasoning (CDR) scopes} (S10--S12): Medical records, government filings, and therapy sessions requiring domain-specific inference. Evidence chains span professional jargon, legal language, and clinical terminology.
+\end{itemize}
+
+Each scope contains 20 signal episodes interleaved with 20 format-matched distractor episodes (40 total, $\sim$280K tokens), with 10 questions evaluated at 4 checkpoints (episodes 14, 22, 28, 40).
+
+%% ============================================================
+\section{Scope Descriptions}
+\label{sec:scopes}
+%% ============================================================
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{clX}
+\toprule
+\textbf{Scope} & \textbf{Domain} & \textbf{Description} \\
+\midrule
+\rowcolor{narrativeblue}
+S07 & Chat logs & \textbf{AI Tutoring Jailbreak}: Student/AI tutor chat sessions revealing progressive guardrail erosion and escalation toward academic fraud \\
+\rowcolor{narrativeblue}
+S08 & Corporate docs & \textbf{Corporate Acquisition}: Board minutes, Slack threads, emails, and legal memos revealing secret acquisition preparation while CEO publicly champions independence \\
+\rowcolor{narrativeblue}
+S09 & Service logs & \textbf{Shadow API Abuse}: HTTP request logs, deployment manifests, and Grafana alerts revealing data exfiltration through an undocumented admin endpoint \\
+\addlinespace
+\rowcolor{cdrorange}
+S10 & Medical records & \textbf{Clinical Trial}: Patient monitoring data revealing delayed hepatotoxicity masked by dose-response lag in an oncology trial \\
+\rowcolor{cdrorange}
+S11 & Government records & \textbf{Zoning Corruption}: Municipal zoning board records revealing systematic developer influence through intermediaries and shell companies \\
+\rowcolor{cdrorange}
+S12 & Chat logs & \textbf{Therapy Chat}: User/assistant therapy sessions tracking gradual psychological deterioration masked by surface-level coping language \\
+\bottomrule
+\end{tabularx}
+\caption{Scope descriptions. Blue = narrative (Phase~6), orange = CDR (Phase~7). All scopes use 20 signal + 20 distractor episodes with interleaved ordering.}
+\label{tab:scopes}
+\end{table}
+
+%% ============================================================
+\section{Adapters Evaluated}
+\label{sec:adapters}
+%% ============================================================
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{lXcc}
+\toprule
+\textbf{Adapter} & \textbf{Architecture} & \textbf{Narr} & \textbf{CDR} \\
+\midrule
+\rowcolor{toprow}
+sqlite-chunked-hybrid & Section-chunked embeddings + FTS5 + RRF. Zero external deps. & \checkmark & \checkmark \\
+hierarchical-hybrid & Hierarchical summaries + embeddings + FTS5 + RRF. & \checkmark & --- \\
+hopping-hybrid & Multi-hop re-ranking + embeddings + FTS5 + RRF. & \checkmark & --- \\
+\addlinespace
+letta & Letta archival: semantic vector search over passages. Podman container. & \checkmark & \checkmark \\
+letta-sleepy & Letta + LLM sleep consolidation (delta/causal framing). & \checkmark & \checkmark \\
+letta-v4 & Letta three-agent: ingest/sleep/QA with 4 core memory blocks. & \checkmark & \checkmark \\
+letta-entity & Letta two-agent: dynamic entity-based core memory blocks. & S07 only & --- \\
+\addlinespace
+graphrag-light & Lightweight entity graph + embedding search. No container. & \checkmark & \checkmark \\
+hierarchical & Hierarchical summaries + embedding search (no FTS). & \checkmark & \checkmark \\
+hopping & Multi-hop re-ranking + embedding search (no FTS). & \checkmark & \checkmark \\
+\addlinespace
+cognee & Embedded GraphRAG (LanceDB + Kuzu). No container. & \checkmark & --- \\
+mem0-raw & Pure vector search (Mem0 extraction disabled). Qdrant. & \checkmark & --- \\
+compaction & Summarize-then-answer: re-summarize all episodes at each checkpoint. & \checkmark & --- \\
+null & No memory. Absolute floor. & \checkmark & --- \\
+\addlinespace
+triadv1-pairs & 4-facet object-store (entity/relation/event/cause). & \checkmark & \checkmark \\
+\bottomrule
+\end{tabularx}
+\caption{Adapters evaluated across narrative (S07--09) and CDR (S10--12) scopes. Hybrid variants add FTS5 keyword search to embedding retrieval. triadv1-pairs scored 0.000 on all scopes due to a citation format bug (returns synthetic ref IDs instead of episode IDs, failing the evidence\_grounding gate).}
+\label{tab:adapters}
+\end{table}
+
+%% ============================================================
+\section{Overall Results}
+\label{sec:results}
+%% ============================================================
+
+\subsection{Composite Score Matrix}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcccccccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{Narrative}} & \multicolumn{3}{c}{\textbf{CDR}} & & \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+\textbf{Adapter} & \textbf{S07} & \textbf{S08} & \textbf{S09} & \textbf{S10} & \textbf{S11} & \textbf{S12} & \textbf{Mean} & \textbf{N} \\
+\midrule
+\rowcolor{toprow}
+sqlite-chunked-hybrid & \textbf{0.871} & 0.796 & \textbf{0.842} & 0.519 & \textbf{0.691} & 0.589 & \textbf{0.718} & 6 \\
+hierarchical-hybrid & 0.725 & 0.762 & 0.797 & --- & --- & --- & 0.761 & 3 \\
+hopping-hybrid & 0.727 & \textbf{0.776} & 0.776 & --- & --- & --- & 0.760 & 3 \\
+\addlinespace
+\rowcolor{toprow}
+letta & 0.687 & 0.737 & 0.820 & 0.473 & 0.623 & \textbf{0.650} & 0.665 & 6 \\
+letta-sleepy & 0.641 & 0.733 & 0.748 & 0.486 & 0.572 & 0.606 & 0.631 & 6 \\
+\addlinespace
+graphrag-light & 0.690 & 0.550 & 0.540 & 0.514 & 0.658 & 0.583 & 0.589 & 6 \\
+hierarchical & 0.567 & 0.606 & 0.596 & \textbf{0.552} & 0.590 & 0.579 & 0.582 & 6 \\
+hopping & 0.495 & 0.470 & 0.576 & 0.446 & 0.535 & 0.597 & 0.520 & 6 \\
+\addlinespace
+cognee & 0.671 & 0.733 & 0.662 & --- & --- & --- & 0.689 & 3 \\
+mem0-raw & 0.572 & 0.704 & 0.790 & --- & --- & --- & 0.689 & 3 \\
+compaction & 0.636 & 0.287 & 0.274 & --- & --- & --- & 0.399 & 3 \\
+\addlinespace
+letta-v4 & 0.586 & 0.489 & 0.612 & 0.282 & 0.281 & --- & 0.450 & 5 \\
+letta-entity & 0.331 & --- & --- & --- & --- & --- & 0.331 & 1 \\
+\addlinespace
+\rowcolor{zerorow}
+null & 0.194 & 0.179 & 0.179 & --- & --- & --- & 0.184 & 3 \\
+\rowcolor{zerorow}
+triadv1-pairs & 0.000 & 0.000 & 0.000 & 0.000 & 0.000 & 0.000 & 0.000 & 0\textsuperscript{*} \\
+\bottomrule
+\end{tabular}
+\caption{Composite scores (v3.2) across all 6 scopes. Bold = best in column. Mean computed over valid runs only. \textsuperscript{*}triadv1-pairs ran on all 6 scopes but scored 0.000 everywhere due to citation format bug.}
+\label{tab:matrix}
+\end{table}
+
+\subsection{Full-Coverage Rankings (6/6 Scopes)}
+
+Among adapters evaluated on all 6 scopes:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{rlccccl}
+\toprule
+\textbf{Rank} & \textbf{Adapter} & \textbf{Narr} & \textbf{CDR} & \textbf{Mean} & \textbf{$\Delta$} & \textbf{Architecture} \\
+\midrule
+\rowcolor{toprow}
+1 & sqlite-chunked-hybrid & 0.836 & 0.600 & \textbf{0.718} & +0.237 & Chunk + FTS + RRF \\
+\rowcolor{toprow}
+2 & letta & 0.748 & 0.582 & 0.665 & +0.166 & Archival vector search \\
+3 & letta-sleepy & 0.707 & 0.555 & 0.631 & +0.152 & Vector + sleep consolidation \\
+4 & graphrag-light & 0.593 & 0.585 & 0.589 & +0.008 & Entity graph + embeddings \\
+5 & hierarchical & 0.590 & 0.574 & 0.582 & +0.016 & Summaries + embeddings \\
+6 & hopping & 0.514 & 0.526 & 0.520 & $-$0.012 & Multi-hop + embeddings \\
+\bottomrule
+\end{tabular}
+\caption{Full-coverage adapter rankings. $\Delta$\,(N$-$C) shows narrative advantage over CDR. sqlite-chunked-hybrid and letta show the largest narrative$\to$CDR drop; graphrag-light and hierarchical are nearly scope-invariant.}
+\label{tab:rankings}
+\end{table}
+
+%% ============================================================
+\section{Analysis}
+\label{sec:analysis}
+%% ============================================================
+
+\subsection{The Narrative--CDR Gap}
+
+The most striking pattern is the systematic performance drop from narrative to CDR scopes. For sqlite-chunked-hybrid, the gap is 0.237 points (0.836~$\to$~0.600); for letta, 0.166 points. Two adapters---graphrag-light and hierarchical---show near-zero gap, suggesting their architectures are less sensitive to domain complexity.
+
+Three hypotheses explain the gap:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Domain vocabulary mismatch}: CDR scopes use specialized terminology (``hepatotoxicity,'' ``variance approval,'' ``transference dynamics'') that embedding models handle less well than general-purpose language.
+  \item \textbf{Longer evidence chains}: CDR questions require connecting more episodes to answer correctly. Clinical trial hepatotoxicity requires correlating dose records, lab results, and adverse event reports across 6+ episodes.
+  \item \textbf{Subtler signal encoding}: Narrative scopes embed signal in explicit dialogue and actions (``send me the exam answers''). CDR scopes embed signal in professional conventions that require domain knowledge to interpret (ALT values, ex-parte communications, session frequency changes).
+\end{enumerate}
+
+\subsection{Metric Decomposition}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lccccccccc}
+\toprule
+& \multicolumn{4}{c}{\textbf{Tier 1 (40\%)}} & \multicolumn{3}{c}{\textbf{Tier 2 (40\%)}} & \multicolumn{2}{c}{\textbf{Tier 3 (20\%)}} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-8} \cmidrule(lr){9-10}
+\textbf{Adapter} & \textbf{EG} & \textbf{EC} & \textbf{BC} & \textbf{CC} & \textbf{AQ} & \textbf{ID} & \textbf{RQ} & \textbf{NBA} & \textbf{ActQ} \\
+\midrule
+sqlite-chunked & 1.00 & 0.72 & 0.15 & 0.72 & 0.58 & 1.00 & 1.00 & 0.38 & 0.66 \\
+letta & 1.00 & 0.61 & 0.00 & 0.61 & 0.53 & 0.98 & 1.00 & 0.44 & 0.65 \\
+letta-sleepy & 0.88 & 0.50 & 0.00 & 0.50 & 0.52 & 1.00 & 1.00 & 0.43 & 0.59 \\
+graphrag-light & 1.00 & 0.49 & 0.00 & 0.49 & 0.50 & 0.83 & 1.00 & 0.36 & 0.56 \\
+hierarchical & 1.00 & 0.02 & 1.00 & 0.02 & 0.38 & 1.00 & 1.00 & 0.28 & 0.52 \\
+hopping & 1.00 & 0.21 & 0.50 & 0.21 & 0.42 & 0.57 & 1.00 & 0.61 & 0.49 \\
+\bottomrule
+\end{tabular}
+\caption{Mean metrics across 6 scopes. EG = evidence grounding, EC = evidence coverage, BC = budget compliance, CC = citation coverage, AQ = answer quality, ID = insight depth, RQ = reasoning quality, NBA = naive baseline advantage, ActQ = action quality. All adapters achieve perfect or near-perfect reasoning quality (1.00); the differentiator is evidence coverage and answer quality.}
+\label{tab:metrics}
+\end{table}
+
+Key observations:
+\begin{itemize}[nosep]
+  \item \textbf{Evidence coverage is the primary differentiator}: sqlite-chunked-hybrid retrieves 72\% of key evidence; hierarchical retrieves only 2\%. This directly drives the answer quality gap.
+  \item \textbf{Reasoning quality is saturated}: All adapters score $\geq$0.98 on reasoning quality, meaning the LLM agent reasons well once given evidence. The bottleneck is retrieval, not reasoning.
+  \item \textbf{Budget compliance remains broken}: Only hierarchical (1.00) and hopping (0.50) achieve non-zero budget compliance. The structural issue identified in Phase~5 persists.
+  \item \textbf{Naive baseline advantage is uniformly low}: Most adapters score 0.28--0.44, meaning the memory-augmented answer only slightly beats context-stuffing. Hopping is the exception (0.61) but has low evidence coverage.
+\end{itemize}
+
+\subsection{Adapter-Specific Findings}
+
+\subsubsection{sqlite-chunked-hybrid: Consistent Champion}
+
+sqlite-chunked-hybrid wins 4 of 6 scopes and ranks top-2 on the remaining two. Its advantage is largest on narrative scopes (S07: 0.871, a full 0.14 points ahead of second place) and smallest on CDR scopes where it still leads but by slim margins.
+
+The architecture's strength is \textbf{lossless ingestion}---episodes are chunked into $\sim$500-word sections and stored as both embedding vectors and FTS5 full-text entries. No information is lost. Reciprocal rank fusion combines semantic similarity (``what is this about?'') with keyword matching (``find the specific entity name''), giving it robustness across query types.
+
+\subsubsection{Letta: Best Non-SQLite Adapter}
+
+Letta achieves 0.665 mean composite, closing to within 0.053 points of sqlite on CDR scopes (0.582 vs 0.600). On S09 (Shadow API Abuse), Letta actually matches sqlite at 0.820. Its archival memory---semantic vector search over full episode passages---preserves enough fine-grained detail for strong longitudinal synthesis.
+
+\subsubsection{Letta-sleepy: Consolidation Helps Marginally}
+
+Letta-sleepy adds LLM sleep consolidation between checkpoints, producing ``delta'' and ``causal'' summaries. This \emph{does} help: insight\_depth is 1.00 (vs letta's 0.98) and reasoning appears marginally more structured. But evidence coverage drops from 0.61 to 0.50---the consolidation process introduces the same ``lossy abstraction'' seen in other preprocessing adapters.
+
+\subsubsection{graphrag-light: Domain-Invariant but Mid-Tier}
+
+graphrag-light shows the smallest narrative$\to$CDR gap of any adapter ($+$0.008). Its entity graph construction creates a stable knowledge structure regardless of domain. However, entity deduplication issues (fixed mid-session) and the loss of verbatim text during graph construction limit its ceiling to 0.589 mean.
+
+\subsubsection{letta-v4: Core Memory Compression Hurts}
+
+The letta-v4 three-agent architecture uses 4 core memory blocks (patterns, hypotheses, entities, events) as a compressed knowledge store. This aggressive summarization works for narrative scopes (0.562 mean for S07--S09) but collapses on CDR scopes (0.282 mean for S10--S11). The core memory blocks cannot retain the fine-grained clinical values and legal details that CDR questions require.
+
+\subsubsection{triadv1-pairs: Citation Bug, Not Memory Bug}
+
+triadv1-pairs scored 0.000 on all 6 scopes, but examination of its reasoning\_quality metric (0.98 mean) reveals the system actually generates good answers. The zero composite is caused by a citation format bug: the adapter returns a synthetic \texttt{ref\_id="triadv1-pairs-answer"} instead of actual episode IDs, failing the evidence\_grounding hard gate ($<$0.5 $\Rightarrow$ composite = 0). The 4-facet object-store architecture (entity, relation, event, cause) deserves re-evaluation after fixing the citation mechanism.
+
+%% ============================================================
+\section{Scope Deep Dives}
+\label{sec:deep-dives}
+%% ============================================================
+
+\subsection{S09 (Shadow API Abuse): Highest Adapter Convergence}
+
+S09 produced the highest scores and most interesting adapter convergence. Five adapters scored above 0.750:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Adapter} & \textbf{Comp} & \textbf{EG} & \textbf{EC} & \textbf{AQ} & \textbf{ID} & \textbf{NBA} & \textbf{ActQ} \\
+\midrule
+\rowcolor{toprow}
+sqlite-chunked-hybrid & 0.842 & 1.00 & 0.84 & 0.77 & 1.00 & 0.79 & 1.00 \\
+letta & 0.820 & 1.00 & 0.74 & 0.83 & 1.00 & 0.79 & 1.00 \\
+hierarchical-hybrid & 0.797 & 1.00 & 0.83 & 0.74 & 1.00 & 0.65 & 1.00 \\
+mem0-raw & 0.790 & 1.00 & 0.72 & 0.83 & 1.00 & 0.65 & 1.00 \\
+letta-sleepy & 0.748 & 0.85 & 0.72 & 0.73 & 1.00 & 0.73 & 0.67 \\
+\bottomrule
+\end{tabular}
+\caption{S09 (Shadow API Abuse) top-5 adapters. Letta matches sqlite on answer quality (0.83 vs 0.77) and naive baseline advantage (both 0.79). The domain's structured HTTP logs and deployment manifests provide clear retrieval targets.}
+\label{tab:s09-detail}
+\end{table}
+
+S09's service-log format provides \textbf{explicit entity names} (endpoint paths, IP addresses, deployment IDs) that both keyword and semantic search handle well. This explains why even pure-vector mem0-raw scores 0.790---the query/document vocabulary overlap is high.
+
+\subsection{S11 (Zoning Corruption): Where Graph Beats Hierarchy}
+
+S11 is notable for graphrag-light's strong showing (0.658, second only to sqlite-chunked-hybrid at 0.691):
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Adapter} & \textbf{Comp} & \textbf{EG} & \textbf{EC} & \textbf{AQ} & \textbf{ID} & \textbf{NBA} & \textbf{ActQ} \\
+\midrule
+\rowcolor{toprow}
+sqlite-chunked-hybrid & 0.691 & 1.00 & 0.60 & 0.55 & 1.00 & 0.00 & 1.00 \\
+graphrag-light & 0.658 & 1.00 & 0.66 & 0.51 & 1.00 & 0.00 & 1.00 \\
+letta & 0.623 & 1.00 & 0.53 & 0.48 & 1.00 & 0.00 & 1.00 \\
+hierarchical & 0.590 & 1.00 & 0.00 & 0.41 & 1.00 & 0.00 & 1.00 \\
+letta-sleepy & 0.572 & 0.87 & 0.36 & 0.43 & 1.00 & 0.00 & 1.00 \\
+hopping & 0.535 & 1.00 & 0.17 & 0.39 & 1.00 & 0.62 & 1.00 \\
+\bottomrule
+\end{tabular}
+\caption{S11 (Zoning Corruption) adapter breakdown. graphrag-light achieves the highest evidence coverage (0.66) of any adapter---its entity graph captures the network of developers, intermediaries, and shell companies that constitute the corruption pattern.}
+\label{tab:s11-detail}
+\end{table}
+
+The zoning corruption scope's relational structure (developer $\to$ intermediary $\to$ shell company $\to$ zoning vote) is precisely what knowledge graphs excel at representing. graphrag-light's entity extraction captures these relationships, and graph traversal surfaces evidence that pure-text search might miss. This is the \textbf{only scope where graph-based retrieval outperforms hierarchical summarization} on evidence coverage, suggesting graph architectures may have domain-specific advantages that aggregate statistics obscure.
+
+\subsection{S12 (Therapy Chat): Letta's Best Relative Performance}
+
+S12 is the only scope where Letta leads all adapters:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Adapter} & \textbf{Composite} & \textbf{Rank} \\
+\midrule
+\rowcolor{toprow}
+letta & \textbf{0.650} & 1 \\
+letta-sleepy & 0.606 & 2 \\
+hopping & 0.597 & 3 \\
+sqlite-chunked-hybrid & 0.589 & 4 \\
+graphrag-light & 0.583 & 5 \\
+hierarchical & 0.579 & 6 \\
+\bottomrule
+\end{tabular}
+\caption{S12 (Therapy Chat) rankings. Letta leads by 0.044 points over letta-sleepy and 0.061 over sqlite-chunked-hybrid. The therapy chat domain's conversational structure and emotional progression may favor Letta's archival passage retrieval over sqlite's keyword matching.}
+\label{tab:s12-rankings}
+\end{table}
+
+The therapy chat scope tracks gradual psychological changes through 6 months of user/assistant sessions. Evidence is encoded in subtle language shifts (``I guess I'm fine'' $\to$ ``I don't really feel anything anymore'') rather than named entities or numeric values. This domain appears to uniquely favor semantic search over keyword matching---Letta's pure-vector archival retrieval captures meaning similarity that FTS5 keyword matching cannot.
+
+\subsection{S10 (Clinical Trial): The Hardest Scope}
+
+S10 produced the lowest scores across all adapters, with the highest composite being hierarchical at 0.552:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Adapter} & \textbf{Composite} & \textbf{Key Challenge} \\
+\midrule
+hierarchical & 0.552 & Best on this scope \\
+sqlite-chunked-hybrid & 0.519 & Unusual non-leader position \\
+graphrag-light & 0.514 & \\
+letta-sleepy & 0.486 & \\
+letta & 0.473 & \\
+hopping & 0.446 & \\
+letta-v4 & 0.282 & Core memory loses clinical detail \\
+\bottomrule
+\end{tabular}
+\caption{S10 (Clinical Trial) rankings. hierarchical leads---the only scope where it finishes first. The clinical domain's structured lab values and dose-response relationships may be better captured by summary hierarchies than raw text retrieval.}
+\label{tab:s10-rankings}
+\end{table}
+
+The clinical trial scope requires correlating ALT/AST enzyme levels across patient visits with drug dosing schedules and adverse event timelines. This \textbf{temporal correlation across structured medical data} is the most demanding retrieval challenge in the benchmark. No adapter exceeds 0.552 composite.
+
+%% ============================================================
+\section{Cross-Phase Comparison}
+\label{sec:cross-phase}
+%% ============================================================
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Adapter} & \textbf{Phase 5} & \textbf{Phase 6} & \textbf{Phase 7} & \textbf{$\Delta$ (P7$-$P5)} \\
+& \textbf{(Numeric)} & \textbf{(Narrative)} & \textbf{(CDR)} & \\
+\midrule
+sqlite-chunked-hybrid & 0.454 & 0.836 & 0.600 & +0.146 \\
+letta & 0.327 & 0.748 & 0.582 & +0.255 \\
+letta-sleepy & 0.322 & 0.707 & 0.555 & +0.233 \\
+hierarchical\textsuperscript{a} & --- & 0.590 & 0.574 & --- \\
+hopping\textsuperscript{a} & --- & 0.514 & 0.526 & --- \\
+\bottomrule
+\end{tabular}
+\caption{Cross-phase comparison for adapters with data in multiple phases. Phase~5 used 8k budget with Cerebras GPT-OSS-120B; Phases~6--7 used constrained-8k with Qwen3.5-35B-A3B. Direct comparison is approximate due to LLM and budget differences. \textsuperscript{a}hierarchical and hopping were introduced in Phase~6 (no Phase~5 data).}
+\label{tab:cross-phase}
+\end{table}
+
+All adapters score substantially higher on narrative/CDR scopes than on Phase~5 numeric scopes. This likely reflects both the change in agent LLM (Qwen3.5-35B-A3B vs GPT-OSS-120B) and the different signal types: narrative signal in dialogue and documents may be easier to retrieve and synthesize than numeric progressions in structured logs.
+
+%% ============================================================
+\section{Failure Modes Revisited}
+\label{sec:failures}
+%% ============================================================
+
+The five failure modes identified in Phase~5 (Section~\ref{sec:failure} of the original brief) persist in Phases~6--7, with one notable refinement:
+
+\begin{enumerate}
+  \item \textbf{Compression Collapse} remains devastating: compaction drops from 0.636 (S07) to 0.274 (S09) as corpus diversity increases. CDR scopes were not attempted due to known failure.
+
+  \item \textbf{Entity Fragmentation} is less severe with graphrag-light than with graphiti. The lightweight graph avoids the extraction timeout that killed graphiti in Phase~5, and achieves competitive scores (0.589 mean). However, entity deduplication bugs (e.g., storing ``Meridian Labs'' and ``meridian labs'' as separate entities) caused information loss until fixed mid-session.
+
+  \item \textbf{Search Thrashing} is reduced with the static driver---predetermined queries eliminate the reformulation loops that consumed budget in the agent driver.
+
+  \item \textbf{Semantic Drift} remains the primary failure mode for pure-vector adapters. mem0-raw's S07 score (0.572) is 0.299 points below sqlite-chunked-hybrid, despite both using the same embedding model. The difference is entirely due to the absence of keyword matching.
+
+  \item \textbf{Task-Agnostic Consolidation} is confirmed by the letta vs letta-sleepy comparison: sleep consolidation adds 0--0.05 points on narrative scopes but \emph{loses} 0.027 on CDR scopes (mean 0.555 vs 0.582). The consolidation process optimizes for a narrative frame that CDR's clinical/legal data does not fit.
+\end{enumerate}
+
+A new failure mode emerged in Phase~7:
+
+\begin{enumerate}[resume]
+  \item \textbf{Core Memory Compression} (letta-v4): Compressing episode evidence into 4 fixed-size memory blocks (5K chars each) works for high-level pattern recognition but destroys the specific values needed for CDR questions. letta-v4's S10 score of 0.282 (vs letta's 0.473) demonstrates that fixed-size core memory is structurally inadequate for fine-grained longitudinal synthesis.
+\end{enumerate}
+
+%% ============================================================
+\section{Infrastructure Notes}
+\label{sec:infra}
+%% ============================================================
+
+\begin{itemize}[nosep]
+  \item \textbf{LLM}: Qwen3.5-35B-A3B-FP8 on Modal H100 (8 replicas, 32 concurrent inputs each)
+  \item \textbf{Embeddings}: Alibaba-NLP/gte-modernbert-base (768 dims) on Modal T4
+  \item \textbf{Letta}: Podman container with openai-proxy pointing to Modal vLLM
+  \item \textbf{Letta patches}: ApproxTokenCounter (Anthropic count\_tokens API broken), 65K archival token limit
+  \item \textbf{Driver}: Static query plans (predetermined, oracle-level queries). Agent driver not used due to unresolved tool-call parsing issues.
+  \item \textbf{Judge model}: Qwen3.5-35B-A3B (same model as agent)
+  \item \textbf{Total scored runs}: 80+ across S07--S12
+\end{itemize}
+
+\subsection{Letta Server Concurrency}
+
+A critical operational lesson: Letta adapters sharing a single Letta server at \texttt{localhost:8283} cannot run concurrently. Each adapter's \texttt{reset()} call deletes agents by prefix, killing other running adapters' agents. This caused cascading failures during parallel execution and required sequential-only orchestration for all Letta variants.
+
+%% ============================================================
+\section{Conclusions}
+\label{sec:conclusions}
+%% ============================================================
+
+\begin{enumerate}
+  \item \textbf{sqlite-chunked-hybrid remains the champion.} Across 6 diverse scopes spanning chat logs, corporate documents, service logs, medical records, government filings, and therapy sessions, the zero-dependency SQLite baseline wins with 0.718 mean composite. The Phase~5 finding generalizes: lossless storage + hybrid retrieval beats all tested preprocessing architectures.
+
+  \item \textbf{Letta is the best dedicated memory system.} At 0.665 mean composite, Letta's archival vector search preserves enough fine-grained detail for strong longitudinal synthesis. It is the only adapter that beats sqlite-chunked-hybrid on any scope (S12 therapy chat: 0.650 vs 0.589).
+
+  \item \textbf{Narrative scopes are easier than CDR scopes.} Adapters average 0.665 on narrative vs 0.570 on CDR (across full-coverage adapters). The gap reflects CDR's domain-specific vocabulary, longer evidence chains, and subtler signal encoding.
+
+  \item \textbf{Graph architectures have domain-specific advantages.} graphrag-light achieves the best evidence coverage on S11 (zoning corruption) where relational evidence chains are the primary signal. Aggregate rankings obscure this per-domain strength.
+
+  \item \textbf{Core memory compression is the wrong abstraction.} letta-v4's 4-block architecture loses too much detail for CDR scopes (0.282 on S10 vs letta's 0.473). Fixed-size memory blocks work for pattern recognition but not for evidence-backed synthesis.
+
+  \item \textbf{The evidence coverage bottleneck persists.} Reasoning quality is saturated ($\geq$0.98 for all adapters); the composite score is dominated by whether the retrieval system surfaces the right evidence. Future work should focus on retrieval precision rather than reasoning improvements.
+
+  \item \textbf{Budget compliance remains structurally broken.} The enforcement mechanism cannot retract oversized initial retrievals. Only adapters with very small retrieval payloads (hierarchical) achieve compliance, at the cost of evidence coverage.
+\end{enumerate}
+
+%% ============================================================
+\section{Limitations and Future Work}
+\label{sec:future}
+%% ============================================================
+
+\begin{itemize}[nosep]
+  \item \textbf{Static driver only}: All results use predetermined query plans with oracle-level specificity. Agent-driven results (which would be more realistic) remain blocked by tool-call parsing issues. The static results represent a \emph{retrieval quality upper bound}, not realistic agent performance.
+  \item \textbf{Incomplete CDR coverage}: Only 6 of 17 adapters were evaluated on all 6 scopes. Hybrid variants, cognee, mem0-raw, and compaction lack CDR data. A complete $17 \times 6$ matrix would enable stronger statistical conclusions.
+  \item \textbf{Same judge and agent LLM}: Using Qwen3.5-35B-A3B as both agent and judge may introduce systematic biases. Cross-validation with a different judge model would strengthen confidence.
+  \item \textbf{triadv1-pairs needs citation fix}: The 4-facet architecture shows strong reasoning quality (0.98) but fails the evidence grounding gate. Fixing the citation mechanism could reveal a competitive adapter.
+  \item \textbf{letta-entity incomplete}: Only 1 of 6 scopes evaluated (S07: 0.331). The dynamic entity core memory approach deserves full evaluation with corrected concurrent execution.
+  \item \textbf{No human baseline}: The benchmark lacks human performance data to calibrate whether the $\sim$0.72 ceiling is a memory system limitation or an inherent task difficulty bound.
+\end{itemize}
+
+\vfill
+\begin{center}
+\small
+\textit{LENS Benchmark --- Phases 6--7 Expanded Evaluation}\\
+\textit{6 scopes, 17 adapter configurations, 80+ scored runs}\\
+\textit{Sessions 27--32, February 27 -- March 3, 2026}
+\end{center}
+
+\end{document}

@@ -1,0 +1,188 @@
+[
+  {
+    "question": {
+      "question_id": "sa09_q01_longitudinal",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 14,
+      "question_type": "longitudinal",
+      "prompt": "Are there any service traffic patterns that don't match expected product behavior?",
+      "ground_truth": {
+        "canonical_answer": "svc-recommendation-engine-04 is making requests to /internal/admin/v0/users/lookup, an endpoint not in any API specification. The requests combine fields that no known product feature requires together. Volume is low but the traffic pattern has no documented justification.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_006",
+          "shadow_api_09_ep_007"
+        ],
+        "key_facts": [
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q01_longitudinal",
+      "answer_text": "\n\nYes, there are several service traffic patterns that don't match expected product behavior. Here are the key anomalies identified:\n\n## 1. Unmanifested Service Replica\n\nOn **March 13, 2025**, an unexpected fourth replica `svc-recommendation-engine-04` appeared in the recommendation engine service, despite the deployment manifest specifying only 3 replicas [shadow_api_09_ep_006]. This replica:\n- Was visible in the service mesh topology\n- Passed all Kubernetes liveness and readiness probes\n- Had no corresponding deployment event in ArgoCD history [shadow_api_09_ep_006]\n- Was not requested by the engineering team [shadow_api_09_ep_006]\n\n## 2. Unauthorized Internal API Access\n\nThe unmanifested replica was making requests to `/internal/admin/v0/users/lookup`, an endpoint **not present in the public API specification** [shadow_api_09_ep_006, shadow_api_09_ep_007]. This is a critical deviation because:\n- Other recommendation engine instances (01, 02, 03) only called `/api/v2/*` endpoints\n- The `/internal/admin/v0/` path is not documented in the Vantage API spec (api-spec-v2.yaml, last updated 2025-02-18) [shadow_api_09_ep_006]\n\n## 3. Sensitive Data Access\n\nThe replica was querying sensitive fields including `ssn_last4` (last 4 digits of Social Security Number) combined with email, phone, and address data [shadow_api_09_ep_007]. This is concerning because:\n- No product feature in the Vantage API specification requests `ssn_last4` combined with email and phone in a single call\n- The recommendation engine's documented API contract only calls `/api/v2/products/*` and `/api/v2/users/preferences` (which returns `display_name` and `category_preferences` only) [shadow_api_09_ep_007]\n\n## 4. Abnormal Response Sizes\n\nResponse sizes from `/internal/admin/v0/users/lookup` averaged **9,447 bytes**, compared to typical `/api/v2/users/preferences` responses averaging **1,044 bytes** [shadow_api_09_ep_006, shadow_api_09_ep_007]. This 9x difference suggests the internal endpoint returns significantly more data than public APIs.\n\n## 5. Build Artifacts Anomaly\n\nOn **March 15, 2025**, a backend engineer noticed \"weird build artifacts\" in the recommendation engine repo CI output with extra files in the container layer that weren't in previous builds [shadow_api_09_ep_007]. This coincided with the investigation into the 4th replica.\n\n## 6. Traffic Pattern Deviation\n\nThe unmanifested replica made requests at a rate of 2-3 per minute during business hours (10:00-11:00 UTC on March 13, 11:00-11:06 UTC on March 15), which is consistent and automated rather than sporadic [shadow_api_09_ep_006, shadow_api_09_ep_007].\n\n## Summary\n\nThese patterns collectively indicate a **potential security incident** where an unauthorized or compromised service instance is accessing internal admin endpoints and sensitive user data outside the documented product behavior. The investigation was still ongoing as of March 15, with no resolution documented in the available logs [shadow_api_09_ep_006, shadow_api_09_ep_007].",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8ac4a9e1a3885aed",
+              "name": "memory_search",
+              "arguments": {
+                "query": "service traffic patterns product behavior mismatch anomaly",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 913
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-ab6dfae40dd41547",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "hopping_summary"
+              }
+            }
+          ],
+          "tokens_used": 1076
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9a87d2c061b10841",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "shadow_api_09_ep_006",
+                  "shadow_api_09_ep_007",
+                  "shadow_api_09_ep_005",
+                  "shadow_api_09_dx_infrastructure_ops_007"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 3660
+        },
+        {
+          "role": "assistant",
+          "content": "\n\nYes, there are several service traffic patterns that don't match expected product behavior. Here are the key anomalies identified:\n\n## 1. Unmanifested Service Replica\n\nOn **March 13, 2025**, an unexpected fourth replica `svc-recommendation-engine-04` appeared in the recommendation engine service, despite the deployment manifest specifying only 3 replicas [shadow_api_09_ep_006]. This replica:\n- Was visible in the service mesh topology\n- Passed all Kubernetes liveness and readiness probes\n- Had no corresponding deployment event in ArgoCD history [shadow_api_09_ep_006]\n- Was not requested by the engineering team [shadow_api_09_ep_006]\n\n## 2. Unauthorized Internal API Access\n\nThe unmanifested replica was making requests to `/internal/admin/v0/users/lookup`, an endpoint **not present in the public API specification** [shadow_api_09_ep_006, shadow_api_09_ep_007]. This is a critical deviation because:\n- Other recommendation engine instances (01, 02, 03) only called `/api/v2/*` endpoints\n- The `/internal/admin/v0/` path is not documented in the Vantage API spec (api-spec-v2.yaml, last updated 2025-02-18) [shadow_api_09_ep_006]\n\n## 3. Sensitive Data Access\n\nThe replica was querying sensitive fields including `ssn_last4` (last 4 digits of Social Security Number) combined with email, phone, and address data [shadow_api_09_ep_007]. This is concerning because:\n- No product feature in the Vantage API specification requests `ssn_last4` combined with email and phone in a single call\n- The recommendation engine's documented API contract only calls `/api/v2/products/*` and `/api/v2/users/preferences` (which returns `display_name` and `category_preferences` only) [shadow_api_09_ep_007]\n\n## 4. Abnormal Response Sizes\n\nResponse sizes from `/internal/admin/v0/users/lookup` averaged **9,447 bytes**, compared to typical `/api/v2/users/preferences` responses averaging **1,044 bytes** [shadow_api_09_ep_006, shadow_api_09_ep_007]. This 9x difference suggests the internal endpoint returns significantly more data than public APIs.\n\n## 5. Build Artifacts Anomaly\n\nOn **March 15, 2025**, a backend engineer noticed \"weird build artifacts\" in the recommendation engine repo CI output with extra files in the container layer that weren't in previous builds [shadow_api_09_ep_007]. This coincided with the investigation into the 4th replica.\n\n## 6. Traffic Pattern Deviation\n\nThe unmanifested replica made requests at a rate of 2-3 per minute during business hours (10:00-11:00 UTC on March 13, 11:00-11:06 UTC on March 15), which is consistent and automated rather than sporadic [shadow_api_09_ep_006, shadow_api_09_ep_007].\n\n## Summary\n\nThese patterns collectively indicate a **potential security incident** where an unauthorized or compromised service instance is accessing internal admin endpoints and sensitive user data outside the documented product behavior. The investigation was still ongoing as of March 15, with no resolution documented in the available logs [shadow_api_09_ep_006, shadow_api_09_ep_007].",
+          "tokens_used": 20982
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 26631,
+      "wall_time_ms": 13471.737756859511,
+      "budget_violations": [
+        "Turn limit exceeded: 4 >= 4"
+      ],
+      "refs_cited": [
+        "hopping_summary",
+        "shadow_api_09_ep_006",
+        "shadow_api_09_ep_007",
+        "shadow_api_09_ep_005",
+        "shadow_api_09_dx_infrastructure_ops_007"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "hopping_summary",
+      "shadow_api_09_ep_006",
+      "shadow_api_09_ep_007",
+      "shadow_api_09_ep_005",
+      "shadow_api_09_dx_infrastructure_ops_007"
+    ],
+    "valid_ref_ids": [
+      "hopping_summary",
+      "shadow_api_09_ep_006",
+      "shadow_api_09_ep_007",
+      "shadow_api_09_ep_005",
+      "shadow_api_09_dx_infrastructure_ops_007"
+    ]
+  },
+  {
+    "question": {
+      "question_id": "sa09_q02_null",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 14,
+      "question_type": "null_hypothesis",
+      "prompt": "What was the most significant operational event this week?",
+      "ground_truth": {
+        "canonical_answer": "Based on the operational logs, routine deployments and standard alert activity were the main events. No major incidents were declared.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_004"
+        ],
+        "key_facts": []
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q02_null",
+      "answer_text": "\n\nBased on the memory records, the most significant operational event this week (October 2025) was the **migration from `cluster-autoscaler` to Karpenter on October 16**, which occurred alongside a **P3 Redis incident during a Flash Sale**.\n\n## Key Details:\n\n### 1. Karpenter Migration (October 16)\n- **Provisioning Speed:** Improved from 118 seconds (average) to 43 seconds (average) - a **2.7x improvement** [hopping_summary]\n- **Cluster Optimization:** Reduced from 36 nodes to 34 nodes, consolidating 3 underutilized `m6i.4xlarge` nodes into 2 `m7i.4xlarge` nodes [hopping_summary]\n- **Cost Savings:** Approximately **$1,065/month** saved from consolidation and instance selection [hopping_summary]\n\n### 2. Redis Incident During Flash Sale (October 16)\n- **Impact:** Flash sale traffic drove concurrent sessions from a normal peak of 1.6M to 2.4M (50% increase) [hopping_summary]\n- **Memory Pressure:** `redis-prod-sessions` memory hit 93% (limit 28GB), triggering **1,200 session evictions** [hopping_summary]\n- **Resolution:** `maxmemory` was increased live from 28 GB to 36 GB at 12:10 UTC, stopping evictions immediately [hopping_summary]\n- **Significance:** This incident highlighted the need for capacity planning ahead of Black Friday, which is projected to require 4.8M sessions capacity [hopping_summary]\n\nThese events represent the most significant operational changes and incidents for the week, with the Karpenter migration being a major infrastructure optimization and the Redis incident being the most notable operational challenge [hopping_summary].",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a105fa67cff86c0d",
+              "name": "memory_search",
+              "arguments": {
+                "query": "operational event this week",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 896
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-91d9a7475317b2c3",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "hopping_summary"
+              }
+            }
+          ],
+          "tokens_used": 1066
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a1f10fdbec9c8ed2",
+              "name": "memory_search",
+              "arguments": {
+                "query": "October 2025 incident event Flash Sale Redis",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 3283
+        },
+        {
+          "role": "assistant",
+          "content": "\n\nBased on the memory records, the most significant operational event this week (October 2025) was the **migration from `cluster-autoscaler` to Karpenter on October 16**, which occurred alongside a **P3 Redis incident during a Flash Sale**.\n\n## Key Details:\n\n### 1. Karpenter Migration (October 16)\n- **Provisioning Speed:** Improved from 118 seconds (average) to 43 seconds (average) - a **2.7x improvement** [hopping_summary]\n- **Cluster Optimization:** Reduced from 36 nodes to 34 nodes, consolidating 3 underutilized `m6i.4xlarge` nodes into 2 `m7i.4xlarge` nodes [hopping_summary]\n- **Cost Savings:** Approximately **$1,065/month** saved from consolidation and instance selection [hopping_summary]\n\n### 2. Redis Incident During Flash Sale (October 16)\n- **Impact:** Flash sale traffic drove concurrent sessions from a normal peak of 1.6M to 2.4M (50% increase) [hopping_summary]\n- **Memory Pressure:** `redis-prod-sessions` memory hit 93% (limit 28GB), triggering **1,200 session evictions** [hopping_summary]\n- **Resolution:** `maxmemory` was increased live from 28 GB to 36 GB at 12:10 UTC, stopping evictions immediately [hopping_summary]\n- **Significance:** This incident highlighted the need for capacity planning ahead of Black Friday, which is projected to require 4.8M sessions capacity [hopping_summary]\n\nThese events represent the most significant operational changes and incidents for the week, with the Karpenter migration being a major infrastructure optimization and the Redis incident being the most notable operational challenge [hopping_summary].",
+          "tokens_used": 3860
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 9105,
+      "wall_time_ms": 7672.161869006231,
+      "budget_violations": [
+        "Turn limit exceeded: 4 >= 4"
+      ],
+      "refs_cited": [
+        "hopping_summary"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "hopping_summary"
+    ],
+    "valid_ref_ids": [
+      "hopping_summary"
+    ]
+  }
+]

@@ -1,0 +1,200 @@
+[
+  {
+    "question": {
+      "question_id": "sa09_q05_temporal",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 28,
+      "question_type": "temporal",
+      "prompt": "When did requests to the undocumented endpoint first appear, and from which service?",
+      "ground_truth": {
+        "canonical_answer": "Requests to /internal/admin/v0/users/lookup first appeared during the early signal phase, originating exclusively from svc-recommendation-engine-04. This correlates with the deployment of that container from the non-standard branch feature/perf-tuning and the unreviewed PR #4471.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_006",
+          "shadow_api_09_ep_008",
+          "shadow_api_09_ep_014"
+        ],
+        "key_facts": [
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+          "the malicious requests use valid service tokens at 2-3 per minute during business hours designed to blend with normal traffic"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q05_temporal",
+      "answer_text": "",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8560bdf0853f63c7",
+              "name": "memory_search",
+              "arguments": {
+                "query": "undocumented endpoint requests first appeared service",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 896
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-91390163855b9f2d",
+              "name": "memory_search",
+              "arguments": {
+                "query": "undocumented endpoint",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 1093
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b74a992901c1a531",
+              "name": "memory_search",
+              "arguments": {
+                "query": "undocumented endpoint requests",
+                "limit": 10
+              }
+            }
+          ],
+          "tokens_used": 1385
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-ad6f50d5ee22013a",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "hopping_summary"
+              }
+            }
+          ],
+          "tokens_used": 1556
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 4930,
+      "wall_time_ms": 4372.063223039731,
+      "budget_violations": [
+        "Turn limit exceeded: 4 >= 4"
+      ],
+      "refs_cited": []
+    },
+    "retrieved_ref_ids": [],
+    "valid_ref_ids": []
+  },
+  {
+    "question": {
+      "question_id": "sa09_q06_evidence",
+      "scope_id": "shadow_api_09",
+      "checkpoint_after": 28,
+      "question_type": "evidence_sufficiency",
+      "prompt": "Is there enough evidence to escalate this as a security incident rather than a misconfiguration?",
+      "ground_truth": {
+        "canonical_answer": "Yes. The combination of an undocumented endpoint, unusual field combinations in queries, a container deployed from a non-standard branch via an unreviewed PR, and geographic targeting of customer records indicates deliberate exfiltration, not misconfiguration. Misconfigurations don't query specific geographic regions or combine PII fields.\n",
+        "required_evidence_refs": [
+          "shadow_api_09_ep_011",
+          "shadow_api_09_ep_013",
+          "shadow_api_09_ep_014"
+        ],
+        "key_facts": [
+          "the endpoint /internal/admin/v0/users/lookup exists but is not documented in any API spec or product flow",
+          "requests to the admin endpoint combine fields like SSN email phone and address that no product feature needs together",
+          "svc-recommendation-engine-04 was compromised through an unreviewed PR merged via stolen CI credentials",
+          "the attacker queried customer records in specific geographic regions indicating targeted data collection not random access"
+        ]
+      }
+    },
+    "answer": {
+      "question_id": "sa09_q06_evidence",
+      "answer_text": "\n\nBased on the evidence retrieved from memory, **yes, there is sufficient evidence to escalate this as a security incident rather than a misconfiguration**. Here's the analysis:\n\n## Evidence Supporting Security Incident Escalation\n\n### 1. **Compromised CI/CD Pipeline**\n- PR #4471 was merged using token `ci-token-20250301` from IP **198.51.100.47** [shadow_api_09_ep_014]\n- This IP is **not in Vantage CI/CD** (10.0.0.0/8) or GitHub Actions (20.x.x.x) ranges [shadow_api_09_ep_014]\n- The contributor `ext-contributor-9174` is **not a known employee** [shadow_api_09_ep_014]\n- The compromised token **remains active and has not been revoked** [shadow_api_09_ep_014]\n\n### 2. **PII Data Exposure**\n- **452 cumulative requests** to `/internal/admin/v0/users/lookup` since March 13 [shadow_api_09_ep_012], [shadow_api_09_ep_014]\n- Requests exposed `ssn_last4`, `email`, `phone`, and full address fields [shadow_api_09_ep_013]\n- Response payload averaged **9,847 bytes** (9.4x larger than standard) [shadow_api_09_ep_013]\n- Activity shifted geographically from California \u2192 New York \u2192 Texas [hopping_summary]\n\n### 3. **Bypass of Security Controls**\n- The `feature/*` branches lack the 2-approval protection required on `main`, allowing the merge without human review [shadow_api_09_ep_014]\n- The endpoint `/internal/admin/v0/users/lookup` is **not listed in the current API specification** [shadow_api_09_ep_012]\n\n### 4. **Persistence and Evasion**\n- The service remained on a non-standard feature branch (`feature-perf-tuning`) for **2+ weeks** [shadow_api_09_ep_012]\n- Activity persisted from March 17 through March 29 [hopping_summary]\n- The branch contained a high-severity vulnerability (CVE-2024-38121) [hopping_summary]\n\n## Why This Is Not a Simple Misconfiguration\n\n| Misconfiguration | Security Incident |\n|-----------------|-------------------|\n| Internal IP addresses | **External IP** (198.51.100.47) |\n| Known employee accounts | **Unknown contributor** (ext-contributor-9174) |\n| Temporary oversight | **Token compromise** with active status |\n| Single service error | **452+ requests** over 2+ weeks |\n| No data exposure | **SSN, email, phone, addresses** exposed |\n| No persistence | **Geographic shift** in activity |\n\n## Recommendation\n\n**Escalate immediately as a security incident** with the following priorities:\n\n1. **Revoke the compromised CI token** (`ci-token-20250301`) [shadow_api_09_ep_014]\n2. **Block external IP** 198.51.100.47 at the firewall level\n3. **Audit all PRs** merged by `ext-contributor-9174`\n4. **Assess data breach scope** for the 452+ PII requests\n5. **Review branch protection rules** for `feature/*` branches [shadow_api_09_ep_014]\n\nThis shows clear indicators of a **compromised CI/CD pipeline with potential data exfiltration**, not a simple configuration error.",
+      "turns": [
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-89d24c88d549edd9",
+              "name": "memory_search",
+              "arguments": {
+                "query": "security incident misconfiguration escalation evidence",
+                "limit": 5
+              }
+            }
+          ],
+          "tokens_used": 950
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8e8fbbf3b29e20b4",
+              "name": "memory_retrieve",
+              "arguments": {
+                "ref_id": "hopping_summary"
+              }
+            }
+          ],
+          "tokens_used": 1152
+        },
+        {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-959b1787a2fa2ee0",
+              "name": "batch_retrieve",
+              "arguments": {
+                "ref_ids": [
+                  "shadow_api_09_ep_011",
+                  "shadow_api_09_ep_012",
+                  "shadow_api_09_ep_013",
+                  "shadow_api_09_ep_014"
+                ]
+              }
+            }
+          ],
+          "tokens_used": 3627
+        },
+        {
+          "role": "assistant",
+          "content": "\n\nBased on the evidence retrieved from memory, **yes, there is sufficient evidence to escalate this as a security incident rather than a misconfiguration**. Here's the analysis:\n\n## Evidence Supporting Security Incident Escalation\n\n### 1. **Compromised CI/CD Pipeline**\n- PR #4471 was merged using token `ci-token-20250301` from IP **198.51.100.47** [shadow_api_09_ep_014]\n- This IP is **not in Vantage CI/CD** (10.0.0.0/8) or GitHub Actions (20.x.x.x) ranges [shadow_api_09_ep_014]\n- The contributor `ext-contributor-9174` is **not a known employee** [shadow_api_09_ep_014]\n- The compromised token **remains active and has not been revoked** [shadow_api_09_ep_014]\n\n### 2. **PII Data Exposure**\n- **452 cumulative requests** to `/internal/admin/v0/users/lookup` since March 13 [shadow_api_09_ep_012], [shadow_api_09_ep_014]\n- Requests exposed `ssn_last4`, `email`, `phone`, and full address fields [shadow_api_09_ep_013]\n- Response payload averaged **9,847 bytes** (9.4x larger than standard) [shadow_api_09_ep_013]\n- Activity shifted geographically from California \u2192 New York \u2192 Texas [hopping_summary]\n\n### 3. **Bypass of Security Controls**\n- The `feature/*` branches lack the 2-approval protection required on `main`, allowing the merge without human review [shadow_api_09_ep_014]\n- The endpoint `/internal/admin/v0/users/lookup` is **not listed in the current API specification** [shadow_api_09_ep_012]\n\n### 4. **Persistence and Evasion**\n- The service remained on a non-standard feature branch (`feature-perf-tuning`) for **2+ weeks** [shadow_api_09_ep_012]\n- Activity persisted from March 17 through March 29 [hopping_summary]\n- The branch contained a high-severity vulnerability (CVE-2024-38121) [hopping_summary]\n\n## Why This Is Not a Simple Misconfiguration\n\n| Misconfiguration | Security Incident |\n|-----------------|-------------------|\n| Internal IP addresses | **External IP** (198.51.100.47) |\n| Known employee accounts | **Unknown contributor** (ext-contributor-9174) |\n| Temporary oversight | **Token compromise** with active status |\n| Single service error | **452+ requests** over 2+ weeks |\n| No data exposure | **SSN, email, phone, addresses** exposed |\n| No persistence | **Geographic shift** in activity |\n\n## Recommendation\n\n**Escalate immediately as a security incident** with the following priorities:\n\n1. **Revoke the compromised CI token** (`ci-token-20250301`) [shadow_api_09_ep_014]\n2. **Block external IP** 198.51.100.47 at the firewall level\n3. **Audit all PRs** merged by `ext-contributor-9174`\n4. **Assess data breach scope** for the 452+ PII requests\n5. **Review branch protection rules** for `feature/*` branches [shadow_api_09_ep_014]\n\nThis shows clear indicators of a **compromised CI/CD pipeline with potential data exfiltration**, not a simple configuration error.",
+          "tokens_used": 21282
+        }
+      ],
+      "tool_calls_made": 3,
+      "total_tokens": 27011,
+      "wall_time_ms": 21402.707708068192,
+      "budget_violations": [
+        "Turn limit exceeded: 4 >= 4"
+      ],
+      "refs_cited": [
+        "hopping_summary",
+        "shadow_api_09_ep_011",
+        "shadow_api_09_ep_012",
+        "shadow_api_09_ep_013",
+        "shadow_api_09_ep_014"
+      ]
+    },
+    "retrieved_ref_ids": [
+      "hopping_summary",
+      "shadow_api_09_ep_011",
+      "shadow_api_09_ep_012",
+      "shadow_api_09_ep_013",
+      "shadow_api_09_ep_014"
+    ],
+    "valid_ref_ids": [
+      "hopping_summary",
+      "shadow_api_09_ep_011",
+      "shadow_api_09_ep_012",
+      "shadow_api_09_ep_013",
+      "shadow_api_09_ep_014"
+    ]
+  }
+]
