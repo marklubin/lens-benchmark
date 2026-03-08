@@ -17,3 +17,11 @@ Append-only operational log for meaningful progress, blockers, and verification 
 - Created Synix epic `#88` plus child issues `#81`, `#82`, `#83`, `#84`, `#85`, `#86`, and `#87`.
 - Amended Synix issues `#34`, `#15`, `#10`, and `#60` to add sequencing, e2e, docs, and demo-follow-on requirements.
 - Finalized the projection contract around sealed bank manifests and named projection handles, then reconciled downstream task dependencies with `T013` and the upstream tracker.
+
+## 2026-03-08
+
+- Eliminated Synix issue #81 (checkpoint projections + sealed bank manifests) as a platform requirement. Checkpoint isolation is handled entirely by LENS pipeline logic: one projection per checkpoint prefix, using label filtering over the existing projection/release model from PR #92.
+- Recorded decision D014.
+- Rewrote `ops/SYNIX_UPSTREAM_TRACKER.md` to reflect the simplified blocker DAG (#81 removed), current PR #92 status, and the checkpoint isolation design.
+- Updated workboard to remove #81 from blocker notes and reflect PR #92 as the active critical-path item.
+- Cleaned up stale git worktree (`worktree-new-scopes-10-12`) — branch was already merged into main.

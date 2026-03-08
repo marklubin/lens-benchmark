@@ -6,26 +6,38 @@ Epic: [#88](https://github.com/marklubin/synix/issues/88) `LENS support: checkpo
 
 Reference design note: [ops/SYNIX_EXECUTION_MODEL.md](./SYNIX_EXECUTION_MODEL.md)
 
-## Current Benchmark Read
+## Current Status (2026-03-08)
 
-Assume the current upstream baseline includes:
+PR [#92](https://github.com/marklubin/synix/pull/92) is in progress. This is the critical-path PR — it implements the projection release v2 RFC and removes `build/` as a platform concept.
 
-- build-time search capability via `SearchSurface`
-- explicit transform access via `TransformContext` and `ctx.search(...)`
-- canonical search outputs via `SynixSearch`
+#81 (checkpoint projections) has been eliminated as a Synix platform requirement. Checkpoint isolation is implemented entirely in the LENS pipeline definition by filtering which artifact labels are included in each projection. See D014 in `ops/DECISIONS.md`.
 
-Do not treat mutable local directories as part of the stable Synix contract. The remaining milestone should be planned around immutable builds, explicit releases, sealed banks, and the mounted runtime surface.
+## Checkpoint Isolation Design
 
-## Sequential Remaining DAG
+Checkpoints are LENS domain logic, not a Synix platform feature. The pipeline defines one projection per checkpoint, each scoped to an episode prefix:
+
+```python
+for cp_id, max_ep in [("cp01", 6), ("cp02", 12), ("cp03", 16), ("cp04", 20)]:
+    pipeline.add(SearchIndex(
+        f"bank-{cp_id}",
+        sources=[episodes, chunks, core, summaries, graph],
+        filter=EpisodePrefix(max_ordinal=max_ep),
+        search=["fulltext", "semantic"],
+        embedding_config={...},
+    ))
+```
+
+One `synix build` compiles all artifacts from the full corpus. Each projection declares its input artifacts by label convention (e.g., artifacts derived from episodes 1-N). Each `synix release` materializes one projection into a sealed release with a receipt. The release receipt is the bank manifest.
+
+No Synix-side checkpoint concept is needed.
+
+## Revised Sequential DAG
 
 ```text
-[#34 Snapshot/projection/release closeout]
+[#34 / PR #92 — projection release v2]       ← IN PROGRESS
     |
     v
-[#81 Checkpoint projections + sealed bank manifests]
-    |
-    v
-[#82 Python-local runtime/tool API, including retrieval over named search surfaces]
+[#82 Python-local runtime/tool API]
     |
     v
 [#83 Built-in chunk artifact family]
@@ -44,39 +56,44 @@ Do not treat mutable local directories as part of the stable Synix contract. The
 [#87 Mesh/API parity]
 ```
 
-## Landed Foundation Versus Remaining Blockers
+Compared to the prior DAG, #81 is removed entirely. The first blocker is PR #92.
 
-### Landed enough to stop reopening
+## Landed Foundation
 
 - `SearchSurface`: build-time search dependency declaration
 - `TransformContext` and `ctx.search(...)`: explicit transform-side search interface
 - `SynixSearch`: canonical search output contract
-- the first immutable snapshot substrate: object store, build refs, and run refs
+- first immutable snapshot substrate: object store, build refs, run refs
 
-### Remaining blockers in order
+## Remaining Blockers In Order
 
-1. finish snapshot or projection or release closeout so builds only commit immutable state and releases become explicit
-2. emit sealed checkpoint banks and immutable bank manifests
-3. expose one Python-local runtime or tool API over those sealed banks, including search or retrieval
-4. land the built-in chunk family that all downstream memory families will anchor to
-5. land built-in summary, core-memory, and graph families
-6. close out typed schemas and only then worry about mesh parity
+1. **PR #92 / #34** (IN PROGRESS): projection release v2 — immutable builds, explicit release lifecycle, SnapshotView, release-aware search, no `build/` directory. 1653 tests passing, 5 demos green. ~9K additions, ~15K deletions.
+2. **#82**: Python-local runtime/tool API over sealed banks, including retrieval over named search surfaces. First integration path for LENS policies.
+3. **#83**: built-in chunk artifact family with stable IDs and provenance anchors. Required substrate for all derived families.
+4. **#84/#85/#86** (parallel): built-in summary, core-memory, and graph families.
+5. **#60**: typed schemas closeout — follow-on.
+6. **#87**: mesh/API parity — follow-on.
 
 ## Feature Checklist
 
-| Order | Issue | Status In Benchmark View | Purpose | Unblocks In LENS | Demo Or Template Follow-On |
-|------:|-------|--------------------------|---------|------------------|----------------------------|
-| 1 | [#34](https://github.com/marklubin/synix/issues/34) | partially landed, closeout still open | immutable snapshots plus canonical projection capture, release refs, receipts, diff, and revert | T005, T013, all later bank work | extend `05-batch-build` |
-| 2 | [#81](https://github.com/marklubin/synix/issues/81) | open blocker | checkpoint projections and sealed bank manifests | T005 and checkpoint-isolation verification | future `checkpointed-memory-bank` demo |
-| 3 | [#15](https://github.com/marklubin/synix/issues/15) | materially landed | explicit build-time search dependencies in the DAG | prerequisite already satisfied for T005 and T013 design | topical-search style demo refresh |
-| 4 | [#10](https://github.com/marklubin/synix/issues/10) | fold into #82 runtime surface | retrieval over named search surfaces as part of the mounted runtime contract | T013 and downstream family retrieval | extend `02-tv-returns` |
-| 5 | [#82](https://github.com/marklubin/synix/issues/82) | open blocker | Python-local runtime or tool API over sealed banks, including retrieval | T013, T007, T008, T009 | future `agent-tool-runtime` demo |
-| 6 | [#83](https://github.com/marklubin/synix/issues/83) | open blocker | built-in chunk family with stable IDs and provenance anchors | T005 and all derived-family integrations | revisit template issue `#42` |
-| 7 | [#84](https://github.com/marklubin/synix/issues/84) | open blocker | built-in summary family | T008, T010, T011 | extend `01-chatbot-export-synthesis` |
-| 8 | [#85](https://github.com/marklubin/synix/issues/85) | open blocker | built-in core-memory family | T007, T010, T011 | future `persistent-user-memory` demo |
-| 9 | [#86](https://github.com/marklubin/synix/issues/86) | open blocker | built-in graph family with source-backed graph retrieval | T009, T011 | future `graph-memory-investigation` demo |
-| 10 | [#60](https://github.com/marklubin/synix/issues/60) | open follow-on | typed schemas for built-ins and tool payloads | schema and runtime payload stabilization | template docs should cite schemas |
-| 11 | [#87](https://github.com/marklubin/synix/issues/87) | open follow-on | Mesh or HTTP parity after local runtime is stable | optional follow-on after first benchmark milestone | extend an existing mesh demo |
+| Order | Issue | Status | Purpose | Unblocks In LENS |
+|------:|-------|--------|---------|------------------|
+| 1 | [PR #92](https://github.com/marklubin/synix/pull/92) / [#34](https://github.com/marklubin/synix/issues/34) | in progress | immutable snapshots, explicit release lifecycle, projection declarations, release receipts | T005, T013, all later bank work |
+| 2 | [#82](https://github.com/marklubin/synix/issues/82) | open blocker | Python-local runtime/tool API over sealed banks | T013, T007, T008, T009 |
+| 3 | [#83](https://github.com/marklubin/synix/issues/83) | open blocker | built-in chunk family with stable IDs and provenance | T005, all derived families |
+| 4 | [#84](https://github.com/marklubin/synix/issues/84) | open blocker | built-in summary family | T008, T010, T011 |
+| 5 | [#85](https://github.com/marklubin/synix/issues/85) | open blocker | built-in core-memory family | T007, T010, T011 |
+| 6 | [#86](https://github.com/marklubin/synix/issues/86) | open blocker | built-in graph family | T009, T011 |
+| 7 | [#60](https://github.com/marklubin/synix/issues/60) | open follow-on | typed schemas | schema stabilization |
+| 8 | [#87](https://github.com/marklubin/synix/issues/87) | open follow-on | mesh/HTTP parity | optional |
+
+Removed:
+
+| Issue | Reason |
+|-------|--------|
+| [#81](https://github.com/marklubin/synix/issues/81) | checkpoint projections are LENS pipeline logic, not a platform feature — handled by per-checkpoint projection declarations in the pipeline definition over the existing PR #92 model |
+| [#15](https://github.com/marklubin/synix/issues/15) | materially landed, prerequisite satisfied |
+| [#10](https://github.com/marklubin/synix/issues/10) | folded into #82 |
 
 ## Definition Of Done Per Synix Feature
 
@@ -88,14 +105,6 @@ Every issue above must land with:
 - at least one automated end-to-end test
 - documentation updates
 - a recorded demo or template follow-on note
-
-For the snapshot or projection or release closeout specifically, the benchmark should consider the feature done only when the upstream design matches `ops/SYNIX_EXECUTION_MODEL.md`:
-
-- `synix build` commits immutable state only
-- `synix release` is the only durable materialization command
-- immutable refs are inspectable without relying on a mutable build directory
-- release refs, receipts, diff, and revert are all first-class
-- checkpoint releases are suitable substrate for sealed bank manifests
 
 ## LENS Follow-On After The Synix Milestone
 

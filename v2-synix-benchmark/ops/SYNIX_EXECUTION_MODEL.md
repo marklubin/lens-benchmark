@@ -285,25 +285,33 @@ Why this is better for LENS:
 Goal:
 treat each checkpoint-scoped memory bank as a sealed, auditable object that can later be mounted by the runtime.
 
+Checkpoints are not a Synix platform concept. They are LENS pipeline logic (see D014 in `ops/DECISIONS.md`).
+
+The pipeline defines one projection per checkpoint, each scoped to an episode prefix via label filtering. A single `synix build` compiles all artifacts from the full corpus. Each projection selects only the artifacts derived from the checkpoint's episode prefix.
+
 Operator flow:
 
 ```bash
-synix build --checkpoint ckpt-042
+synix build                          # one build, all artifacts, all checkpoint projections
 synix refs show HEAD
-synix release HEAD --to refs/releases/checkpoints/ckpt-042 --target-root /srv/synix/checkpoints/ckpt-042
+synix release HEAD --to cp01         # materializes cp01 projection (episodes 1-6)
+synix release HEAD --to cp02         # materializes cp02 projection (episodes 1-12)
+synix release HEAD --to cp04         # materializes cp04 projection (episodes 1-20)
 ```
 
-How it should work:
+How it works:
 
-- the checkpoint build commits an immutable snapshot over the visible prefix only
-- release produces sealed projection outputs and receipts for that checkpoint
-- later bank manifests can point at that immutable snapshot and its released outputs without ambiguity
+- the pipeline definition declares per-checkpoint projections with prefix-filtered input artifacts
+- one build produces all artifacts and all projection declarations
+- each release materializes one checkpoint's projection with its own receipt
+- the release receipt is the sealed bank manifest
 
 Why this is better for LENS:
 
-- checkpoint isolation is enforced at build time
-- runtime mounting can consume immutable bank manifests instead of mutable directories
-- study replay and audit can cite concrete upstream refs and receipts
+- checkpoint isolation is enforced at projection declaration time
+- no Synix platform concept needed — just label filtering over existing projection model
+- runtime mounting consumes release receipts
+- study replay and audit cite concrete refs and receipts
 
 ## Remaining Upstream Execution Critical Path
 
@@ -317,11 +325,12 @@ Already landed enough to stop reopening:
 
 Still open and sequential:
 
-1. snapshot or projection or release closeout under the snapshot epic
-2. sealed checkpoint banks and bank manifests
-3. Python-local runtime or tool API, including retrieval over named search surfaces
-4. built-in chunk family with stable IDs and provenance anchors
-5. built-in summary, core-memory, and graph families
-6. typed schema closeout and optional mesh parity later
+1. projection release v2 (PR #92 / #34) — in progress
+2. Python-local runtime or tool API (#82), including retrieval over named search surfaces
+3. built-in chunk family (#83) with stable IDs and provenance anchors
+4. built-in summary, core-memory, and graph families (#84, #85, #86 — parallel)
+5. typed schema closeout (#60) and optional mesh parity (#87) later
 
-For LENS planning, `T005` and `T013` should stay blocked until items 1 through 4 are materially landed, not just sketched.
+Checkpoint isolation (#81) has been eliminated as a Synix requirement — handled by LENS pipeline logic (D014).
+
+For LENS planning, `T005` and `T013` should stay blocked until items 1 through 3 are materially landed.

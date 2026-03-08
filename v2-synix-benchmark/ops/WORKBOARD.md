@@ -12,11 +12,12 @@
 
 ## Active Priorities
 
-1. Complete the Synix platform milestone before starting LENS runtime integration.
-2. Land immutable snapshots, checkpointed banks, and the default Python-local runtime/tool API in Synix sequentially.
+1. Land PR #92 (projection release v2) in Synix — this is the critical-path blocker.
+2. Land the Python-local runtime/tool API (#82) and built-in chunk family (#83) in Synix sequentially after PR #92.
 3. Require unit coverage, at least one automated e2e test, docs updates, and a demo-extension note for every Synix feature.
 4. Keep LENS focused on manifests, Modal broker, state/replay, scoring, and study execution until Synix contracts stabilize.
-5. Do not start study work before checkpoint isolation, resume, replay, and bank reuse are proven.
+5. Checkpoint isolation is handled in the LENS pipeline definition (D014) — no Synix platform work needed for this.
+6. Do not start study work before resume, replay, and bank reuse are proven.
 
 ## Task Board
 
@@ -47,7 +48,8 @@ None recorded yet.
 - Track the upstream Synix milestone in `ops/SYNIX_UPSTREAM_TRACKER.md` and do not treat `T005` or later as locally unblocked until the relevant upstream issues are closed.
 - The Synix platform milestone is sequential and upstream-first. LENS tasks `T005` and later consume released Synix contracts rather than reimplementing those platform features locally.
 - `ready` on downstream tasks means the local task definition is frozen; execution still waits on the mapped upstream Synix issues in `ops/SYNIX_UPSTREAM_TRACKER.md`.
-- Do not start `T005` before the upstream Synix milestone covers immutable snapshots, checkpointed banks, the Python-local runtime/tool API, and the built-in chunk family.
+- Do not start `T005` before PR #92 lands plus #82 (runtime API) and #83 (chunk family).
+- Checkpoint isolation is LENS pipeline logic (D014), not a Synix blocker. The pipeline defines one projection per checkpoint prefix using label filtering.
 - Do not start `T007`, `T008`, or `T009` before the corresponding Synix built-in family exists and `T013` has landed the benchmark runtime integration path.
-- Do not start `T010` before replay, resume, checkpoint isolation, and bank reuse checks are proven.
+- Do not start `T010` before replay, resume, and bank reuse checks are proven.
 - Do not start `T011` until compilation cost and policy-run cost are known from the smoke pilot.

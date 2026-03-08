@@ -195,3 +195,21 @@ Rationale:
 - removes ambiguity between immutable state and mutable realization
 - makes CI or CD promotion and rollback ref-addressed operations instead of workspace mutations
 - gives checkpoint banks and future runtime mounts a cleaner upstream contract
+
+## D014 - Checkpoint Isolation Is LENS Pipeline Logic, Not A Synix Platform Feature
+
+Date: 2026-03-08
+Status: accepted
+Supersedes: #81 (closed as not needed)
+
+Decision:
+
+Implement checkpoint isolation entirely in the LENS pipeline definition by declaring one projection per checkpoint, each scoped to an episode prefix via label filtering. Do not add a checkpoint concept to Synix.
+
+Rationale:
+
+- checkpoint prefixes are benchmark domain logic specific to LENS
+- Synix already provides the needed primitives: projections declare input artifacts, releases materialize them
+- one `synix build` compiles all artifacts, multiple projections select subsets — no special platform support required
+- adding checkpoint semantics to Synix would couple the platform to one consumer's use case
+- label-convention-based filtering works today with no Synix changes
