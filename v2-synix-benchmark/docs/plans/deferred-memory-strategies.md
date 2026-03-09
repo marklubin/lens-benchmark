@@ -376,12 +376,16 @@ The deeper insight: *memory organization should evolve with the agent's understa
 | 3 | Multi-Agent Shared Memory | Low at current scale | Medium — SDK v2 buffer + orchestration is LENS-side | Defer; not a Synix concern |
 | 4 | Procedural / Skill Memory | None | N/A | Out of scope for LENS entirely |
 | 5 | Associative / Spreading Activation | Medium | High — lateral links, activation retrieval, retroactive mutation | Research; may partially model as graph variant |
-| 6 | Observation / Event Memory | High | **Low — already buildable as FoldSynthesis prompt variant** | **Consider promoting to first-pass ablation** |
+| ~~6~~ | ~~Observation / Event Memory~~ | ~~High~~ | ~~Low~~ | **PROMOTED** to first-pass ablation as `policy_core_structured` + `policy_core_faceted`. See `memory-strategy-ablation.md`. |
 | 7 | Memory-as-Filesystem | None for LENS | Medium | Defer to unified-memory use case |
 
-### Immediate Action Item
+### Promoted Strategies
 
-**Observation memory (#6) should be re-evaluated for first-pass inclusion.** It maps cleanly to existing Synix primitives (FoldSynthesis with a structured-observation prompt + MapSynthesis refinement). The only question is whether the prompt engineering to produce structured observations vs. free-form core memory is different enough to warrant a separate policy, or whether it's a within-policy hyperparameter.
+**Observation / Event Memory (#6)** was promoted to first-pass inclusion as two policies:
+- **policy_core_structured** — Mastra/ACE equivalent. Single FoldSynthesis with structured observation prompt.
+- **policy_core_faceted** — Triad/MAGMA equivalent. 4 parallel FoldSynthesis transforms decomposed by cognitive facet (entity/relation/event/cause), each maintaining a structured object store.
+
+Both use existing Synix primitives (FoldSynthesis, MapSynthesis). No platform work required.
 
 ## References
 

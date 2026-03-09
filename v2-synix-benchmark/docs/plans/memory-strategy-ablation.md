@@ -98,7 +98,50 @@ V2 eliminates implementation noise by building all strategies on the same Synix 
 
 ---
 
-### 5. policy_summary
+### 5. policy_core_structured
+
+**Strategy class**: Structured observation fold (Mastra / ACE pattern)
+
+**What the agent sees**: Search tool (same as base) + structured observation log in system prompt. Each entry is a dated, prioritized, categorized observation — not prose.
+
+**Synix primitives**: policy_base + FoldSynthesis (same as policy_core, different prompt: emit structured dated observations instead of free-form narrative)
+
+**Fold prompt style**: Instead of "update your understanding," the prompt says "extract dated, prioritized observations and append to the log." The accumulated state is a structured event log, not a narrative summary.
+
+**Real-world analogs**:
+- **Mastra Observational Memory** (Feb 2026) — Observer agent extracts structured observations, Reflector garbage-collects. 94.87% on LongMemEval. 10x cost reduction via prompt caching on append-only log.
+- **Stanford ACE** (Oct 2025) — Agentic Context Engineering. Treats contexts as evolving playbooks, structured incremental updates. +10.6% on agent benchmarks.
+- **Cofounder** (General Intelligence Company, 2026) — event-based decision log, structured operational audit trail
+
+**Relationship to other policies**: Same architecture as policy_core (single FoldSynthesis), different prompt engineering. Tests whether *structured observations* outperform *free-form distillation* as the fold output format.
+
+**Tests**: Does structured observation format (dated/prioritized events) outperform free-form core memory for the same fold architecture? Isolates the value of output structure.
+
+---
+
+### 6. policy_core_faceted
+
+**Strategy class**: Parallel faceted folds (Triad / cognitive decomposition)
+
+**What the agent sees**: Search tool (same as base) + 4 parallel facet memory blocks in system prompt (entity store, relation store, event store, cause store).
+
+**Synix primitives**: policy_base + 4× FoldSynthesis in parallel (one per facet: entity, relation, event, cause), each with facet-specific prompts. Optionally + ReduceSynthesis to merge facets into a unified context block.
+
+**Architecture**: Each facet agent maintains its own structured object store with a fixed meta-schema (identity, schema, interface, state, lifecycle). Per episode, each facet fold applies INSTANTIATE (new object), UPDATE (modify existing), or ACCOMMODATE (restructure model when observations contradict). The 4 folds run in parallel on the same episode stream.
+
+**Real-world analogs**:
+- **Our V1 Triad adapter** — 4-facet decomposition (Entity/Relation/Event/Cause) with object store protocol. Panel variant: 4 parallel consults + synthesis. Pairs variant: 6 cross-reference pair consults + synthesis. Never got a clean benchmark run in V1.
+- **ACE Framework** (Shapiro, 2023) — Autonomous Cognitive Entities with 6 layered cognitive modules, each maintaining own state
+- **MAGMA** (Jan 2026) — multi-graph memory with orthogonal semantic, temporal, causal, and entity graphs. Same decomposition intuition.
+- **Cognitive science dual-process theory** — System 1 (fast encoding per facet) + System 2 (slow cross-reference at query time)
+
+**Key design question**: At query time, does the agent see all 4 facet stores separately (panel approach), or a single merged synthesis (reduce approach)? The panel approach preserves facet boundaries but costs more tokens. The reduce approach compresses but may lose facet-specific insights. Both are testable.
+
+**Tests**: Does decomposing memory into orthogonal cognitive facets (what exists, how things relate, what happened, why) outperform a single monolithic fold? Isolates the value of *structured decomposition* vs. *holistic distillation*.
+
+---
+
+### 7. policy_summary
 
 **Strategy class**: Multi-level recursive summarization / compression hierarchy
 
@@ -128,9 +171,24 @@ V2 eliminates implementation noise by building all strategies on the same Synix 
 | `base - null` | Value of retrieval (finding relevant chunks) |
 | `core - base` | Marginal value of fold-based core memory on top of retrieval |
 | `core_maintained - core` | Marginal value of consolidation/refinement pass |
+| `core_structured - core` | Value of structured observation format vs. free-form fold |
+| `core_faceted - core` | Value of faceted decomposition (4 parallel folds) vs. monolithic fold |
 | `summary - base` | Marginal value of hierarchical summarization on top of retrieval |
 | `core vs summary` | Head-to-head: incremental distillation vs. batch compression |
+| `core_faceted vs summary` | Structured decomposition vs. hierarchical compression |
 | `*_16k - *_8k` | Whether more budget (more chunks) outweighs better synthesis |
+
+### Core Family Sub-Ablation
+
+Policies 3–6 form a core memory family that shares the same FoldSynthesis architecture but varies along two dimensions:
+
+| | Single fold | Parallel faceted folds |
+|---|---|---|
+| **Free-form output** | policy_core | policy_core_faceted |
+| **+ Maintenance pass** | policy_core_maintained | (future: faceted + maintained) |
+| **Structured output** | policy_core_structured | (future: faceted + structured) |
+
+The first pass tests the four corners that differ along *one* dimension each. Combinations (faceted + maintained, faceted + structured) are follow-up ablations if initial results warrant.
 
 ### Budget Dimension
 
@@ -142,25 +200,29 @@ Each policy at two token budgets:
 | policy_base | base_8k | base_16k |
 | policy_core | core_8k | core_16k |
 | policy_core_maintained | core_maintained_8k | core_maintained_16k |
+| policy_core_structured | core_structured_8k | core_structured_16k |
+| policy_core_faceted | core_faceted_8k | core_faceted_16k |
 | policy_summary | summary_8k | summary_16k |
 
 ### Scope Selection
 
-**Screening study (32-40 configs)**: 4 scopes (2 numeric + 2 narrative) × 5 policies × 2 budgets.
+**Screening study (56 configs)**: 4 scopes (2 numeric + 2 narrative) × 7 policies × 2 budgets.
 
-**Full study (72-90 configs)**: 9 scopes (6 numeric + 3 narrative) × 5 policies × 2 budgets.
+**Full study (126 configs)**: 9 scopes (6 numeric + 3 narrative) × 7 policies × 2 budgets.
 
 Numeric scopes test strategies on structured telemetry data (where V1 sqlite-chunked-hybrid dominated). Narrative scopes test on long-form text (where V1 Letta family dominated). If strategies are domain-dependent, this split will reveal it.
 
 ## Strategy Coverage Assessment
 
-The 5 first-pass policies cover 3 of the ~7 major strategy classes in production today:
+The 7 first-pass policies cover 5 of the ~8 major strategy classes in production today:
 
 | Class | Covered | Policies |
 |---|---|---|
 | Stateless | Yes | null |
 | Chunked RAG | Yes | policy_base |
-| Incremental distillation | Yes | policy_core, policy_core_maintained |
+| Incremental distillation (free-form) | Yes | policy_core, policy_core_maintained |
+| Structured observation / event memory | Yes | policy_core_structured |
+| Faceted cognitive decomposition | Yes | policy_core_faceted |
 | Hierarchical compression | Yes | policy_summary |
 | Knowledge graphs | No | kill list |
 | Temporal knowledge graphs | No | kill list |
@@ -220,16 +282,6 @@ Strategies that can't be faithfully modeled with Synix v1 primitives. Tracked he
 **Synix blocker**: Graph query at runtime, not build-time. Requires dynamic link resolution in the search/retrieval path.
 
 **Priority**: Low — academic, few production implementations.
-
-### Observation / Event Memory
-
-**Products**: Observational memory (VentureBeat 2025), Cofounder event-based decision log
-
-**Strategy**: Real-time event stream with structured extraction. Each observation is a dated, prioritized, structured record (not prose). Query by event type, time range, priority.
-
-**Synix blocker**: SDK v2 buffer for instant structured writes. Partially modelable via FoldSynthesis if we accept batch-only processing.
-
-**Priority**: Medium — emerging pattern, partially covered by policy_core_maintained.
 
 ### Memory-as-Filesystem
 
