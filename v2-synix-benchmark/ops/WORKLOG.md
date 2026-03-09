@@ -25,3 +25,4 @@ Append-only operational log for meaningful progress, blockers, and verification 
 - Rewrote `ops/SYNIX_UPSTREAM_TRACKER.md` to reflect the simplified blocker DAG (#81 removed), current PR #92 status, and the checkpoint isolation design.
 - Updated workboard to remove #81 from blocker notes and reflect PR #92 as the active critical-path item.
 - Cleaned up stale git worktree (`worktree-new-scopes-10-12`) — branch was already merged into main.
+- T003 partial: Implemented `ResponseCache` (SQLite WAL, content-addressed, thread-safe with lock) and `ModalBroker` (cache-through LLM + embedding calls, retry with backoff, token/cost accounting). 31 unit tests passing. Parameterized `min_containers` in `infra/modal/llm_server.py` via `LENS_MIN_CONTAINERS` env var (default 0). Embedding model unchanged (gte-modernbert-base). Design doc at `docs/plans/2026-03-08-modal-infra-and-cache-design.md`.

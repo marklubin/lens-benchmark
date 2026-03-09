@@ -26,7 +26,7 @@
 | [T000](./tasks/T000-bootstrap-v2-workspace.md) | Bootstrap v2 workspace and process docs | done | P0 | Program | - | codex |
 | [T001](./tasks/T001-freeze-v2-benchmark-spec.md) | Freeze scope policy, runtime policy set, artifact-bank model, and scoring v2 | done | P0 | Program | T000 | codex |
 | [T002](./tasks/T002-design-manifest-and-event-schemas.md) | Design study, policy, bank, run, event, and score schemas | ready | P0 | Runtime | T001 | unassigned |
-| [T003](./tasks/T003-build-modal-broker-and-cache.md) | Implement Modal broker, cache, and idempotent call layer | ready | P0 | Runtime | T002 | unassigned |
+| [T003](./tasks/T003-build-modal-broker-and-cache.md) | Implement Modal broker, cache, and idempotent call layer | in_progress | P0 | Runtime | T002 | claude |
 | [T004](./tasks/T004-build-state-store-resume-and-replay.md) | Implement state store, bank or run resume, and replay | ready | P0 | Runtime | T003 | unassigned |
 | [T005](./tasks/T005-implement-artifact-bank-base.md) | Integrate Synix checkpoint banks, chunk artifacts, and layered search into the benchmark base bank path | ready | P0 | Artifact | T004 | unassigned |
 | [T013](./tasks/T013-integrate-synix-runtime-policy-layer.md) | Integrate the Synix runtime/tool API into benchmark policy execution | ready | P0 | Runtime | T005 | unassigned |
