@@ -292,3 +292,43 @@ class TestHelpers:
 
     def test_try_json_invalid(self) -> None:
         assert _try_json("NOT JSON") == "NOT JSON"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent write safety
+# ---------------------------------------------------------------------------
+
+import threading
+
+
+class TestCacheConcurrency:
+    def test_concurrent_writes_no_corruption(self, tmp_db: Path) -> None:
+        cache = ResponseCache(tmp_db)
+        errors: list[Exception] = []
+
+        def writer(n: int) -> None:
+            try:
+                for i in range(20):
+                    key = f"thread{n}_entry{i}"
+                    cache.put_llm(
+                        key,
+                        model="m",
+                        request={"i": i},
+                        response={"r": n},
+                        latency_ms=1.0,
+                        prompt_tokens=1,
+                        completion_tokens=1,
+                    )
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=writer, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"Concurrent write errors: {errors}"
+        stats = cache.llm_stats()
+        assert stats["total_entries"] == 80  # 4 threads * 20 entries
+        cache.close()

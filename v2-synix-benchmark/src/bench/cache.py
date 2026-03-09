@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,7 @@ class ResponseCache:
 
     def __init__(self, db_path: str | Path) -> None:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_CREATE_LLM)
         self._conn.execute(_CREATE_EMBED)
@@ -116,17 +118,18 @@ class ResponseCache:
 
         On hit, ``hit_count`` is incremented *before* the row is returned.
         """
-        self._conn.execute(
-            "UPDATE llm_responses SET hit_count = hit_count + 1 WHERE key = ?",
-            (key,),
-        )
-        self._conn.commit()
-        row = self._conn.execute(
-            "SELECT key, model, request, response, created_at, latency_ms, "
-            "prompt_tokens, completion_tokens, hit_count "
-            "FROM llm_responses WHERE key = ?",
-            (key,),
-        ).fetchone()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE llm_responses SET hit_count = hit_count + 1 WHERE key = ?",
+                (key,),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT key, model, request, response, created_at, latency_ms, "
+                "prompt_tokens, completion_tokens, hit_count "
+                "FROM llm_responses WHERE key = ?",
+                (key,),
+            ).fetchone()
         if row is None:
             return None
         return {
@@ -153,23 +156,24 @@ class ResponseCache:
         completion_tokens: int,
     ) -> None:
         """Insert or replace an LLM response entry."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO llm_responses "
-            "(key, model, request, response, created_at, latency_ms, "
-            "prompt_tokens, completion_tokens, hit_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
-            (
-                key,
-                model,
-                _to_json(request),
-                _to_json(response),
-                time.time(),
-                latency_ms,
-                prompt_tokens,
-                completion_tokens,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO llm_responses "
+                "(key, model, request, response, created_at, latency_ms, "
+                "prompt_tokens, completion_tokens, hit_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (
+                    key,
+                    model,
+                    _to_json(request),
+                    _to_json(response),
+                    time.time(),
+                    latency_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                ),
+            )
+            self._conn.commit()
 
     # ── Embed operations ─────────────────────────────────────────────────
 
@@ -178,17 +182,18 @@ class ResponseCache:
 
         On hit, ``hit_count`` is incremented *before* the row is returned.
         """
-        self._conn.execute(
-            "UPDATE embed_responses SET hit_count = hit_count + 1 WHERE key = ?",
-            (key,),
-        )
-        self._conn.commit()
-        row = self._conn.execute(
-            "SELECT key, model, request, response, created_at, latency_ms, "
-            "token_count, hit_count "
-            "FROM embed_responses WHERE key = ?",
-            (key,),
-        ).fetchone()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE embed_responses SET hit_count = hit_count + 1 WHERE key = ?",
+                (key,),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT key, model, request, response, created_at, latency_ms, "
+                "token_count, hit_count "
+                "FROM embed_responses WHERE key = ?",
+                (key,),
+            ).fetchone()
         if row is None:
             return None
         return {
@@ -213,32 +218,34 @@ class ResponseCache:
         token_count: int,
     ) -> None:
         """Insert or replace an embedding response entry."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO embed_responses "
-            "(key, model, request, response, created_at, latency_ms, "
-            "token_count, hit_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-            (
-                key,
-                model,
-                _to_json(request),
-                _to_json(response),
-                time.time(),
-                latency_ms,
-                token_count,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO embed_responses "
+                "(key, model, request, response, created_at, latency_ms, "
+                "token_count, hit_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+                (
+                    key,
+                    model,
+                    _to_json(request),
+                    _to_json(response),
+                    time.time(),
+                    latency_ms,
+                    token_count,
+                ),
+            )
+            self._conn.commit()
 
     # ── Stats ────────────────────────────────────────────────────────────
 
     def llm_stats(self) -> dict[str, Any]:
         """Aggregate statistics for the LLM response cache."""
-        row = self._conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), "
-            "COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(latency_ms), 0.0) "
-            "FROM llm_responses"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), "
+                "COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(latency_ms), 0.0) "
+                "FROM llm_responses"
+            ).fetchone()
         return {
             "total_entries": row[0],
             "total_prompt_tokens": row[1],
@@ -248,11 +255,12 @@ class ResponseCache:
 
     def embed_stats(self) -> dict[str, Any]:
         """Aggregate statistics for the embedding response cache."""
-        row = self._conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(token_count), 0), "
-            "COALESCE(SUM(latency_ms), 0.0) "
-            "FROM embed_responses"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(token_count), 0), "
+                "COALESCE(SUM(latency_ms), 0.0) "
+                "FROM embed_responses"
+            ).fetchone()
         return {
             "total_entries": row[0],
             "total_tokens": row[1],
@@ -263,4 +271,5 @@ class ResponseCache:
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
