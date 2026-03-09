@@ -16,6 +16,7 @@ Test:
 Debugging:
     modal app logs lens-llm
 """
+import os
 import subprocess
 
 import modal
@@ -31,6 +32,8 @@ MODEL_ID = "Qwen/Qwen3.5-35B-A3B-FP8"
 SERVED_MODEL_NAME = "Qwen/Qwen3.5-35B-A3B"
 VLLM_PORT = 8000
 MINUTES = 60
+
+MIN_CONTAINERS = int(os.environ.get("LENS_MIN_CONTAINERS", "0"))
 
 # Qwen3.5 requires vLLM nightly (qwen3_5_moe arch not in 0.13.0)
 CHAT_TEMPLATE = "/root/qwen3_permissive.jinja"
@@ -60,7 +63,7 @@ vllm_image = (
     secrets=[modal.Secret.from_name("huggingface")],
     timeout=10 * MINUTES,
     scaledown_window=5 * MINUTES,
-    min_containers=2,
+    min_containers=MIN_CONTAINERS,
 )
 @modal.concurrent(max_inputs=32)
 @modal.web_server(port=VLLM_PORT, startup_timeout=10 * MINUTES)
