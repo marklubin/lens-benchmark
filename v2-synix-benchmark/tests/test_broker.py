@@ -368,3 +368,230 @@ class TestBrokerStats:
         assert stats["llm"]["total_completion_tokens"] == 8
         assert stats["embed"]["total_entries"] == 0
         cache.close()
+
+
+# ---------------------------------------------------------------------------
+# TestBrokerCacheConfig
+# ---------------------------------------------------------------------------
+
+class TestBrokerCacheConfig:
+    """Cache configuration: enable/disable, per-call-type, namespacing."""
+
+    def test_cache_disabled_no_db_created(self, tmp_path: Path) -> None:
+        cache_dir = tmp_path / "should_not_exist"
+        mock_response = _make_chat_response("no cache")
+
+        with (
+            patch("bench.broker.openai") as mock_openai,
+            patch("bench.broker.time") as mock_time,
+        ):
+            mock_client = MagicMock()
+            mock_openai.OpenAI.return_value = mock_client
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_time.time.side_effect = [0.0, 0.1, 0.0, 0.1]
+            mock_time.sleep = MagicMock()
+
+            from bench.broker import ModalBroker
+
+            broker = ModalBroker(
+                llm_base_url="http://fake-llm",
+                embed_base_url="http://fake-embed",
+                cache_enabled=False,
+                cache_dir=str(cache_dir),
+            )
+            # Two identical calls — both should hit API since cache is off
+            broker.chat_completion(model="m", messages=[{"role": "user", "content": "hi"}])
+            broker.chat_completion(model="m", messages=[{"role": "user", "content": "hi"}])
+
+        assert mock_client.chat.completions.create.call_count == 2
+        assert not (cache_dir / "responses.db").exists()
+
+    def test_cache_disabled_stats_returns_empty(self, tmp_path: Path) -> None:
+        with patch("bench.broker.openai") as mock_openai:
+            mock_openai.OpenAI.return_value = MagicMock()
+
+            from bench.broker import ModalBroker
+
+            broker = ModalBroker(
+                llm_base_url="http://fake-llm",
+                embed_base_url="http://fake-embed",
+                cache_enabled=False,
+                cache_dir=str(tmp_path / "none"),
+            )
+            stats = broker.stats()
+
+        assert stats["cache_enabled"] is False
+        assert stats["llm"] == {}
+        assert stats["embed"] == {}
+
+    def test_cache_llm_false_skips_llm_caching(self, tmp_db: Path) -> None:
+        cache = ResponseCache(tmp_db)
+        mock_response = _make_chat_response("not cached")
+
+        with (
+            patch("bench.broker.openai") as mock_openai,
+            patch("bench.broker.time") as mock_time,
+        ):
+            mock_client = MagicMock()
+            mock_openai.OpenAI.return_value = mock_client
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_time.time.side_effect = [0.0, 0.1, 0.0, 0.1]
+            mock_time.sleep = MagicMock()
+
+            from bench.broker import ModalBroker
+
+            broker = ModalBroker(
+                cache=cache,
+                llm_base_url="http://fake-llm",
+                embed_base_url="http://fake-embed",
+                cache_llm=False,
+            )
+            broker.chat_completion(model="m", messages=[{"role": "user", "content": "a"}])
+            broker.chat_completion(model="m", messages=[{"role": "user", "content": "a"}])
+
+        # Both calls hit API — LLM cache disabled
+        assert mock_client.chat.completions.create.call_count == 2
+        assert cache.llm_stats()["total_entries"] == 0
+        cache.close()
+
+    def test_cache_embed_false_skips_embed_caching(self, tmp_db: Path) -> None:
+        cache = ResponseCache(tmp_db)
+        embed_data = _make_embed_response([[0.1, 0.2]])
+
+        with (
+            patch("bench.broker.openai") as mock_openai,
+            patch("bench.broker.httpx") as mock_httpx,
+            patch("bench.broker.time") as mock_time,
+        ):
+            mock_openai.OpenAI.return_value = MagicMock()
+            mock_http_client = MagicMock()
+            mock_httpx.Client.return_value = mock_http_client
+
+            mock_http_response = MagicMock()
+            mock_http_response.json.return_value = embed_data
+            mock_http_response.raise_for_status = MagicMock()
+            mock_http_client.post.return_value = mock_http_response
+
+            mock_time.time.side_effect = [0.0, 0.1, 0.0, 0.1]
+            mock_time.sleep = MagicMock()
+
+            from bench.broker import ModalBroker
+
+            broker = ModalBroker(
+                cache=cache,
+                llm_base_url="http://fake-llm",
+                embed_base_url="http://fake-embed",
+                cache_embed=False,
+            )
+            broker.embed(input=["hello"], model="m")
+            broker.embed(input=["hello"], model="m")
+
+        # Both calls hit API — embed cache disabled
+        assert mock_http_client.post.call_count == 2
+        assert cache.embed_stats()["total_entries"] == 0
+        cache.close()
+
+    def test_cache_llm_false_but_embed_still_cached(self, tmp_db: Path) -> None:
+        cache = ResponseCache(tmp_db)
+        mock_response = _make_chat_response("llm no cache")
+        embed_data = _make_embed_response([[0.5, 0.6]])
+
+        with (
+            patch("bench.broker.openai") as mock_openai,
+            patch("bench.broker.httpx") as mock_httpx,
+            patch("bench.broker.time") as mock_time,
+        ):
+            mock_client = MagicMock()
+            mock_openai.OpenAI.return_value = mock_client
+            mock_client.chat.completions.create.return_value = mock_response
+
+            mock_http_client = MagicMock()
+            mock_httpx.Client.return_value = mock_http_client
+            mock_http_response = MagicMock()
+            mock_http_response.json.return_value = embed_data
+            mock_http_response.raise_for_status = MagicMock()
+            mock_http_client.post.return_value = mock_http_response
+
+            mock_time.time.side_effect = [0.0, 0.1, 0.0, 0.1, 0.0, 0.1, 0.0, 0.1]
+            mock_time.sleep = MagicMock()
+
+            from bench.broker import ModalBroker
+
+            broker = ModalBroker(
+                cache=cache,
+                llm_base_url="http://fake-llm",
+                embed_base_url="http://fake-embed",
+                cache_llm=False,
+                cache_embed=True,
+            )
+            # LLM: two identical calls, both should hit API
+            broker.chat_completion(model="m", messages=[{"role": "user", "content": "x"}])
+            broker.chat_completion(model="m", messages=[{"role": "user", "content": "x"}])
+            # Embed: two identical calls, second should be cached
+            broker.embed(input=["test"], model="m")
+            broker.embed(input=["test"], model="m")
+
+        assert mock_client.chat.completions.create.call_count == 2  # no LLM cache
+        assert mock_http_client.post.call_count == 1  # embed cached
+        cache.close()
+
+    def test_cache_dir_namespaces_independently(self, tmp_path: Path) -> None:
+        mock_response = _make_chat_response("namespaced")
+
+        with (
+            patch("bench.broker.openai") as mock_openai,
+            patch("bench.broker.time") as mock_time,
+        ):
+            mock_client = MagicMock()
+            mock_openai.OpenAI.return_value = mock_client
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_time.time.side_effect = [0.0, 0.1, 0.0, 0.1]
+            mock_time.sleep = MagicMock()
+
+            from bench.broker import ModalBroker
+
+            # Broker A with namespace "study_01"
+            broker_a = ModalBroker(
+                llm_base_url="http://fake-llm",
+                embed_base_url="http://fake-embed",
+                cache_dir=tmp_path / "study_01",
+            )
+            broker_a.chat_completion(model="m", messages=[{"role": "user", "content": "q"}])
+
+            # Broker B with namespace "study_02" — should NOT see A's cache
+            mock_client.chat.completions.create.reset_mock()
+            mock_time.time.side_effect = [0.0, 0.1]
+
+            broker_b = ModalBroker(
+                llm_base_url="http://fake-llm",
+                embed_base_url="http://fake-embed",
+                cache_dir=tmp_path / "study_02",
+            )
+            broker_b.chat_completion(model="m", messages=[{"role": "user", "content": "q"}])
+
+        # Both called API — different namespaces don't share
+        assert mock_client.chat.completions.create.call_count == 1  # only B's call (A's was before reset)
+        assert (tmp_path / "study_01" / "responses.db").exists()
+        assert (tmp_path / "study_02" / "responses.db").exists()
+
+    def test_stats_includes_config_flags(self, tmp_db: Path) -> None:
+        cache = ResponseCache(tmp_db)
+
+        with patch("bench.broker.openai") as mock_openai:
+            mock_openai.OpenAI.return_value = MagicMock()
+
+            from bench.broker import ModalBroker
+
+            broker = ModalBroker(
+                cache=cache,
+                llm_base_url="http://fake-llm",
+                embed_base_url="http://fake-embed",
+                cache_llm=True,
+                cache_embed=False,
+            )
+            stats = broker.stats()
+
+        assert stats["cache_enabled"] is True
+        assert stats["cache_llm"] is True
+        assert stats["cache_embed"] is False
+        cache.close()
