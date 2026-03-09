@@ -26,16 +26,16 @@
 | [T000](./tasks/T000-bootstrap-v2-workspace.md) | Bootstrap v2 workspace and process docs | done | P0 | Program | - | codex |
 | [T001](./tasks/T001-freeze-v2-benchmark-spec.md) | Freeze scope policy, runtime policy set, artifact-bank model, and scoring v2 | done | P0 | Program | T000 | codex |
 | [T002](./tasks/T002-design-manifest-and-event-schemas.md) | Design study, policy, bank, run, event, and score schemas | ready | P0 | Runtime | T001 | unassigned |
-| [T003](./tasks/T003-build-modal-broker-and-cache.md) | Implement Modal broker, cache, and idempotent call layer | in_progress | P0 | Runtime | T002 | claude |
+| [T003](./tasks/T003-build-modal-broker-and-cache.md) | Implement Modal broker, cache, and idempotent call layer | done | P0 | Runtime | T002 | claude |
 | [T004](./tasks/T004-build-state-store-resume-and-replay.md) | Implement state store, bank or run resume, and replay | ready | P0 | Runtime | T003 | unassigned |
 | [T005](./tasks/T005-implement-artifact-bank-base.md) | Integrate Synix checkpoint banks, chunk artifacts, and layered search into the benchmark base bank path | ready | P0 | Artifact | T004 | unassigned |
 | [T013](./tasks/T013-integrate-synix-runtime-policy-layer.md) | Integrate the Synix runtime/tool API into benchmark policy execution | ready | P0 | Runtime | T005 | unassigned |
 | [T006](./tasks/T006-implement-scoring-v2.md) | Implement simplified scoring and audit path | ready | P0 | Scoring | T002,T005 | unassigned |
 | [T007](./tasks/T007-implement-core-artifact-family.md) | Integrate the Synix core-memory family into benchmark policies | ready | P1 | Artifact | T005,T013 | unassigned |
 | [T008](./tasks/T008-implement-summary-artifact-family.md) | Integrate the Synix summary family into benchmark policies | ready | P1 | Artifact | T005,T013 | unassigned |
-| [T009](./tasks/T009-implement-graph-artifact-family.md) | Integrate the Synix graph family into benchmark policies | ready | P1 | Artifact | T005,T013 | unassigned |
+| [T009](./tasks/T009-implement-graph-artifact-family.md) | Integrate the Synix graph family into benchmark policies | deferred | P2 | Artifact | T005,T013 | unassigned |
 | [T010](./tasks/T010-run-smoke-pilot.md) | Run 2-scope artifact-bank smoke pilot and calibrate cost/runtime | proposed | P0 | Study | T004,T005,T006,T007,T008,T013 | unassigned |
-| [T011](./tasks/T011-run-feature-screening-study.md) | Run 4-scope runtime-policy screening study | proposed | P1 | Study | T006,T007,T008,T009,T010,T013 | unassigned |
+| [T011](./tasks/T011-run-feature-screening-study.md) | Run 4-scope runtime-policy screening study | proposed | P1 | Study | T006,T007,T008,T010,T013 | unassigned |
 | [T012](./tasks/T012-freeze-main-study-and-reporting.md) | Freeze main-study matrix and reproducible reporting package | proposed | P1 | Study | T011 | unassigned |
 | [T014](./tasks/T014-refresh-synix-execution-model-tracker.md) | Refresh Synix execution-model tracker and closeout design | done | P0 | Program | T001 | codex |
 
@@ -50,6 +50,7 @@ None recorded yet.
 - `ready` on downstream tasks means the local task definition is frozen; execution still waits on the mapped upstream Synix issues in `ops/SYNIX_UPSTREAM_TRACKER.md`.
 - Do not start `T005` before PR #92 lands plus #82 (runtime API) and #83 (chunk family).
 - Checkpoint isolation is LENS pipeline logic (D014), not a Synix blocker. The pipeline defines one projection per checkpoint prefix using label filtering.
-- Do not start `T007`, `T008`, or `T009` before the corresponding Synix built-in family exists and `T013` has landed the benchmark runtime integration path.
+- Do not start `T007` or `T008` before the corresponding Synix built-in family exists and `T013` has landed the benchmark runtime integration path.
+- `T009` (graph) is deferred from v2 first pass — open design questions on how multi-stage structured pipelines fit the Synix artifact model. See `docs/plans/synix-capability-requirements.md`.
 - Do not start `T010` before replay, resume, and bank reuse checks are proven.
 - Do not start `T011` until compilation cost and policy-run cost are known from the smoke pilot.

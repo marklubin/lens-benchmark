@@ -2,6 +2,17 @@
 
 Requirements derived from memory strategy analysis. Each section lists what the Synix platform must provide.
 
+## V2 First Pass Policy Set (graph deferred)
+
+| Policy | Artifact Families | Synix Primitives |
+|--------|------------------|-----------------|
+| `null` | none | — |
+| `policy_base` | chunks + search indexes | MapSynthesis + SearchSurface |
+| `policy_core` | base + core memory | + FoldSynthesis |
+| `policy_summary` | base + summaries | + GroupSynthesis + ReduceSynthesis |
+
+All four policies compose from existing Synix transform primitives. `policy_graph` deferred — see section 4.
+
 ---
 
 ## 1. Chunks + Search Indexes (policy_base)
