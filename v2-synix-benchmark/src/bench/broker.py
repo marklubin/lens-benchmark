@@ -62,6 +62,8 @@ class ModalBroker:
         cache_embed: bool = True,
         # Allow injecting a pre-built cache (for tests / advanced use)
         cache: ResponseCache | None = None,
+        # Extra body params merged into every LLM request (e.g. chat_template_kwargs)
+        default_extra_body: dict[str, Any] | None = None,
     ) -> None:
         self._cache_enabled = cache_enabled
         self._cache_llm = cache_llm and cache_enabled
@@ -76,9 +78,12 @@ class ModalBroker:
         else:
             self._cache = None  # type: ignore[assignment]
 
+        self._llm_base_url = llm_base_url
+        self._llm_api_key = llm_api_key
         self._llm_client = openai.OpenAI(base_url=llm_base_url, api_key=llm_api_key)
         self._embed_client = httpx.Client(base_url=embed_base_url, timeout=embed_timeout)
         self._embed_base_url = embed_base_url
+        self._default_extra_body = default_extra_body or {}
 
     # ── LLM ───────────────────────────────────────────────────────────────
 
@@ -88,6 +93,11 @@ class ModalBroker:
         On cache miss, calls the LLM API with retry logic, captures latency
         and token usage, and stores the result in the cache.
         """
+        # Merge default extra_body (e.g. chat_template_kwargs for disabling thinking)
+        if self._default_extra_body:
+            existing = kwargs.get("extra_body", {}) or {}
+            kwargs["extra_body"] = {**self._default_extra_body, **existing}
+
         use_cache = self._cache_llm and not bypass_cache
 
         if use_cache:

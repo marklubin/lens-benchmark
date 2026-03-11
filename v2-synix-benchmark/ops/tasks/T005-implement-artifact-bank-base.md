@@ -1,11 +1,11 @@
 # T005 - Integrate Synix checkpoint banks, chunk artifacts, and layered search into the benchmark base bank path
 
-status: ready
+status: done
 priority: P0
 phase: Artifact
-owner: unassigned
+owner: claude
 created: 2026-03-06
-updated: 2026-03-06
+updated: 2026-03-10
 depends_on: [T004]
 blocks: [T013, T007, T008, T009, T010]
 
