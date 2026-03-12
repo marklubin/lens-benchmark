@@ -169,6 +169,35 @@ CEO Aldric negotiates selling Nextera to Meridian Corp under codename "Project L
 
 **What makes it hard**: 5 document types must be cross-referenced. Signal is in what's *not* said (CEO doubles down on independence at peak suspicion) and in correlations across document types. Entity tracking across board minutes, Slack, email, legal memos, and HR bulletins is essential.
 
+**Episode excerpt** (signal episode 7, early_signal phase — legal memo):
+```
+DOCUMENT 1 OF 3
+Type: Legal Memorandum
+Date: January 24, 2025
+From: Nathan Foley, Senior Corporate Counsel
+To: Rachel Dominguez, General Counsel
+Subject: Executive Employment Agreement — Change of Control Provisions Review
+Classification: Attorney-Client Privileged
+
+I. EXECUTIVE SUMMARY
+
+Per your request, I have completed the review of change-of-control
+provisions across all 14 executive employment agreements. This
+memorandum summarizes the current state of the provisions, identifies
+areas where our agreements deviate from current market practice, and
+proposes revisions to align with benchmarking data...
+
+C-Suite Executives (5):
+1. David Aldric, Chief Executive Officer — agreement effective March 15, 2019
+2. Priya Vasquez, Chief Financial Officer — agreement effective June 1, 2020
+...
+
+Estimated equity value subject to acceleration across all 14 executives
+is approximately $42 million.
+```
+
+This is one of 3 documents in this episode. The legal memo reviews change-of-control provisions — individually a routine corporate governance task. But combined with a vendor contract freeze in another episode and board minutes referencing "strategic options" in a third, the pattern of acquisition preparation emerges. The CEO's all-hands speech in the same week emphasizes "building for the next decade."
+
 **Sample questions:**
 
 | Checkpoint | Type | Question | Ground truth (abbreviated) |
@@ -192,6 +221,35 @@ A compromised container (svc-recommendation-engine-04) makes low-rate requests t
 **Key facts** (8): undocumented endpoint, compromised container via stolen CI credentials, unusual field combinations (SSN+email+phone), traffic designed to blend in, QA test unrelated, no error signatures, geographic targeting, ~8,000 records exfiltrated
 
 **What makes it hard**: Dense technical logs with HTTP codes, latency metrics, and endpoint paths. The red herring overlaps temporally with the attack. Signal isolation requires distinguishing endpoint-specific traffic patterns and recognizing that field combinations reveal intent.
+
+**Episode excerpt** (signal episode 7, early_signal phase — HTTP logs):
+```
+[Entry 1]
+  request_id=req_q2281da4 method=POST
+  path=/internal/admin/v0/users/lookup
+  source=svc-recommendation-engine-04
+  token=sa-prod-20250310-rec04 status=200 latency_ms=87 bytes=9241
+  request_body={"fields":["email","phone","address_zip"]}
+
+[Entry 2]
+  request_id=req_q2282eb8 method=POST
+  path=/internal/admin/v0/users/lookup
+  source=svc-recommendation-engine-04
+  token=sa-prod-20250310-rec04 status=200 latency_ms=92 bytes=9887
+  request_body={"fields":["ssn_last4","email","phone","address_zip"]}
+
+--- LOG ANALYSIS NOTES ---
+  - No product feature in the Vantage API specification requests
+    ssn_last4 combined with email and phone in a single call
+  - The recommendation engine's documented API contract calls only
+    /api/v2/products/* and /api/v2/users/preferences
+  - Response sizes from /internal/admin/v0/users/lookup average
+    9,447 bytes — /api/v2/users/preferences average 1,044 bytes
+  - svc-recommendation-engine instances 01, 02, 03 made zero
+    requests to /internal/* paths
+```
+
+This episode also contains a normal code review (PR #4462: Stripe SDK upgrade, properly reviewed, 2 approvals, all tests passing) — showing what legitimate engineering activity looks like alongside the anomalous traffic. The agent must notice that only instance -04 makes admin endpoint requests, that the field combinations are unusual, and that response sizes are 9× larger than the legitimate API — all while the same episode contains routine ops that look normal.
 
 **Sample questions:**
 
