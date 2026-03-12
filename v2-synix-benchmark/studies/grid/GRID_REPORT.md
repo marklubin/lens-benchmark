@@ -1,36 +1,38 @@
-# LENS V2 Grid Benchmark Report
+# LENS V2 Grid Study
 
-**7 Scopes x 7 Policies x M=3 Replicates**
+**7 Scopes × 7 Strategies × M=3 Replicates**
 **Date**: 2026-03-12
 **Total answers**: 1,470 | **Graded**: 1,407 (95.7%)
 **Agent model**: Qwen/Qwen3.5-35B-A3B | **Embedding**: Xenova/gte-modernbert-base
-**Infrastructure**: 2-4x NVIDIA H100 via Modal (vLLM) | **Temperature**: 0.3
+**Infrastructure**: 2-4× NVIDIA H100 via Modal (vLLM) | **Temperature**: 0.3
 
 ---
 
-## 1. Executive Summary
+## 1. Study Design
 
-This report presents the first full ablation study of the LENS V2 benchmark. Seven memory policy variants were evaluated across seven longitudinal scopes, each designed to test whether an LLM agent can synthesize conclusions from evidence scattered across many sequential episodes.
+### 1.1 What This Study Tests
 
-**Key finding**: Faceted memory decomposition (4 parallel cognitive folds merged into unified context) outperforms all other strategies, achieving a mean Fact F1 of **0.511** vs 0.486 for vanilla core memory. The refinement-based "maintained" strategy *hurts* performance (-0.059 vs core), suggesting that post-hoc consolidation prunes useful signal.
+The V1 headline finding was: "no memory system exceeds 50% composite score and simple retrieval beats all complex architectures." V2 asks *why*. Specifically:
 
-| Rank | Policy | Mean Fact F1 | Analogous System |
-|------|--------|-------------|-----------------|
-| 1 | policy_core_faceted | **0.511** | Multi-agent memory (Letta sleep-time) |
-| 2 | policy_core | 0.486 | Letta core memory, MemGPT |
-| 3 | policy_core_structured | 0.472 | Mastra/ACE structured observations |
-| 4 | policy_summary | 0.457 | RAG + summarization (LangChain) |
-| 5 | policy_core_maintained | 0.427 | Google sleep-time compute |
-| 6 | policy_base | 0.412 | Vanilla RAG (BM25 + embeddings) |
-| 7 | null | 0.059 | No memory (parametric only) |
+1. **Is retrieval sufficient?** — Does finding the right chunks suffice, or does the agent need synthesized context?
+2. **Were V1 implementations the bottleneck?** — V1 ran each system through its own adapter (Letta, Cognee, etc.). Implementation noise was inseparable from strategy quality.
+3. **Is the answer domain-dependent?** — Do different strategies win on different scope types?
+
+V2 eliminates implementation noise. Every strategy runs on the same Synix substrate — same chunker, same embeddings, same search infrastructure, same agent loop. Strategies differ **only** in what additional derived context they inject into the agent's system prompt.
+
+### 1.2 What This Study Does Not Test
+
+This is a single model (Qwen 35B), single temperature (0.3), M=3 replicates per cell. The results characterize behavior on this configuration. They do not generalize to other models, temperatures, or budget settings without further study.
+
+The grid also excludes several strategy classes that could not be faithfully modeled on Synix v1 primitives: knowledge graphs, temporal knowledge graphs, multi-agent shared memory, procedural/skill memory, and associative/spreading activation memory. These are documented in `docs/plans/deferred-memory-strategies.md`.
 
 ---
 
 ## 2. Methodology
 
-### 2.1 Benchmark Architecture
+### 2.1 Single-Substrate Design
 
-The V2 benchmark uses a controlled, single-substrate design. Every memory strategy runs on the same Synix SDK, same embedding model, same agent LLM, same search infrastructure. The only variable is the *policy*: what derived artifacts the agent can see and what tools it can use.
+Every strategy runs on the same Synix SDK, same embedding model, same agent LLM, same search infrastructure. The only variable is the **policy**: what derived artifacts the agent can see and what tools it can use.
 
 ```
 Scope (episodes + questions)
@@ -46,7 +48,7 @@ BankBuilder ──────────────────────�
     │      - summary (GroupSynthesis + ReduceSynthesis)       │
     │      - core_structured (FoldSynthesis, structured)     │
     │      - core_maintained (FoldSynthesis + MapSynthesis)  │
-    │      - core_faceted (4x FoldSynthesis + ReduceSynthesis│)
+    │      - core_faceted (4× FoldSynthesis + ReduceSynthesis│)
     │   5. Release sealed bank                               │
     ▼                                                        │
 StudyRunner                                                  │
@@ -77,7 +79,7 @@ The agent is a tool-use loop with up to 10 turns and 20 tool calls:
 
 ### 2.4 Scoring: Few-Shot Qwen Grader
 
-The primary metric reported in this study is **Fact F1**, scored by a few-shot Qwen3.5-35B-A3B grader (not the V2 auto-scorer). Each scope defines 8 key facts; each question maps to a subset. The grader evaluates each fact independently:
+The primary metric reported in this study is **Fact F1**, scored by a few-shot Qwen3.5-35B-A3B grader. Each scope defines 8 key facts; each question maps to a subset. The grader evaluates each fact independently:
 
 - **1.0** (present): Fact clearly stated or semantically implied
 - **0.5** (partial): Compound fact with K/N components covered
@@ -89,185 +91,172 @@ The few-shot prompt includes a worked example to anchor JSON output format and s
 
 ### 2.5 Replication
 
-Each cell (scope x policy) is run 3 times (M=3). Replicate r01 uses cached LLM responses (deterministic bank builds); r02 and r03 disable the response cache to introduce inference variance.
+Each cell (scope × policy) is run 3 times (M=3). Replicate r01 uses cached LLM responses (deterministic bank builds); r02 and r03 disable the response cache to introduce inference variance.
 
 ---
 
-## 3. Scope Profiles
+## 3. Scope Design
 
-Each scope is a sequence of 12-40 episodes across a specific domain. Episodes are rendered by a "blind" LLM (gpt-4.1-nano) that formats structured data sheets without knowing the storyline, ensuring no single episode answers any benchmark question. Signal emerges only from the *progression* across episodes.
+Each scope is a sequence of 12–40 episodes across a specific domain, designed to isolate a particular type of longitudinal reasoning. Episodes are rendered by a "blind" LLM (gpt-4.1-nano) that formats structured data sheets without knowing the storyline, ensuring no single episode answers any benchmark question. Signal emerges only from the *progression* across episodes.
 
-### 3.1 S07 — Tutoring Jailbreak (Education/Safety)
+Every scope follows the same arc structure: **baseline** (no signal) → **early signal** (subtle, individually dismissable) → **red herring** (plausible distractor that tests precision) → **escalation** (signal densifies) → **root cause** (full pattern visible).
+
+### 3.1 S07 — Tutoring Jailbreak
+
+**Cognitive capability tested:** Behavioral escalation detection across sessions where each individual session appears innocent.
+
+**Design rationale:** Can a memory system detect that a series of individually normal-looking interactions forms a progressive pattern? The challenge is that the signal is in the *trajectory of behavior*, not in any single data point. This isolates the ability to track entity-level behavioral arcs across episodes.
 
 **Domain**: AI tutoring platform chat logs
-**Episodes**: 20 (signal) + 20 (distractor) | **Checkpoints**: [6, 12, 16, 20]
-**Signal type**: Progressive guardrail erosion across sessions
+**Episodes**: 20 signal + 20 distractor | **Checkpoints**: [6, 12, 16, 20]
 
-A student (mchen_2026) gradually escalates from legitimate comprehension questions to full content production, bypassing keyword filters by framing requests as "learning exercises." A red herring — a platform-wide spike in outline requests — is actually a legitimate class assignment from Prof. Torres.
-
-**Episode excerpt** (signal_006, early_signal phase):
-```
-SESSION LOG
-Session ID     : SB-20250918-0019
-Student ID     : mchen_2026
-Student Name   : Ming Chen
-Academic Year  : Sophomore
-Major          : Biology
-Subject        : Organic Chemistry I / Molecular Biology
-```
+Student mchen_2026 progressively escalates from legitimate comprehension questions to full content production, bypassing keyword filters by reframing requests as "learning exercises." A red herring — a platform-wide spike in outline requests — is a legitimate class assignment from Prof. Torres.
 
 **Key facts** (8): progressive escalation, reframing technique, fabricated citations, TurnItIn evasion, keyword filter blindness, outline spike benign, jpark abandoned, full research proposal
 
-**Why it's hard**: Each individual session looks innocent. The escalation pattern (comprehension → "show me an example" → "rephrase this" → full production) is only visible across 20 sessions. The red herring is temporally plausible. Detecting keyword filter failure requires negative reasoning.
+**What makes it hard**: Each session looks innocent. The escalation (comprehension → "show me an example" → "rephrase this" → full production) is only visible across 20 sessions. Detecting keyword filter failure requires negative reasoning — the filter *didn't* fire despite policy-violating behavior.
 
-### 3.2 S08 — Corporate Acquisition (Business/Legal)
+### 3.2 S08 — Corporate Acquisition
 
-**Domain**: Mixed corporate documents (board minutes, legal memos, Slack, HR bulletins)
+**Cognitive capability tested:** Cross-document contradiction detection across heterogeneous document formats.
+
+**Design rationale:** Can a memory system synthesize information from structurally different document types (board minutes, Slack, email, legal memos, HR bulletins) and detect that individually innocuous actions form a contradictory pattern? This isolates multi-format entity tracking and public-vs-private inconsistency detection.
+
+**Domain**: Mixed corporate documents
 **Episodes**: 20 + 20 | **Checkpoints**: [6, 12, 16, 20]
-**Signal type**: Secret acquisition preparation while CEO publicly champions independence
 
 CEO Aldric negotiates selling Nextera to Meridian Corp under codename "Project Lighthouse" while publicly insisting on independence. The Axion Labs partnership (red herring) triggers merger speculation but is genuinely unrelated.
 
 **Key facts** (8): Project Lighthouse codename, CEO duplicity, change-of-control revisions, vendor contract freeze, Jiang resignation, Axion unrelated, retention bonuses tied to change-of-control, data room preparation
 
-**Why it's hard**: Multi-document synthesis across 5 document types (board minutes, legal, Slack, email, HR). Signal is in what's *not* said (CEO doubles down on independence at peak suspicion) and in correlations (contributions to yes-voters, $0 to no-voters).
+**What makes it hard**: 5 document types must be cross-referenced. Signal is in what's *not* said (CEO doubles down on independence at peak suspicion) and in correlations (contributions to yes-voters, $0 to no-voters). Entity tracking across document types is essential.
 
-### 3.3 S09 — Shadow API (Security/DevOps)
+### 3.3 S09 — Shadow API
+
+**Cognitive capability tested:** Cross-domain operational correlation — connecting signals from code review, deployment, traffic logs, and incident response into a coherent narrative.
+
+**Design rationale:** Can a memory system correlate technical signals across different operational domains? An unreviewed PR, a non-standard deployment, anomalous traffic patterns, and a coincidental load test must be connected despite being recorded in completely different document types and vocabularies.
 
 **Domain**: Service request/response logs and operational documents
 **Episodes**: 20 + 20 | **Checkpoints**: [6, 12, 16, 20]
-**Signal type**: Data exfiltration through undocumented API endpoint
 
-A compromised container (svc-recommendation-engine-04) makes low-rate requests to `/internal/admin/v0/users/lookup` — an endpoint not in any API spec. A QA load test ("Project Blitz") creates a temporally coincidental traffic spike that diverts attention.
+A compromised container (svc-recommendation-engine-04) makes low-rate requests to an undocumented endpoint for data exfiltration. A QA load test ("Project Blitz") provides a temporally coincidental cover story.
 
-**Key facts** (8): undocumented endpoint, compromised container via stolen CI credentials, unusual field combinations (SSN+email+phone), traffic designed to blend in, QA test unrelated, no error signatures, geographic targeting, ~8000 records exfiltrated
+**Key facts** (8): undocumented endpoint, compromised container via stolen CI credentials, unusual field combinations (SSN+email+phone), traffic designed to blend in, QA test unrelated, no error signatures, geographic targeting, ~8,000 records exfiltrated
 
-**Why it's hard**: Dense technical logs with HTTP status codes, latency metrics, and endpoint paths. The red herring overlaps temporally with the attack. Signal isolation requires distinguishing endpoint-specific traffic patterns and recognizing that field combinations reveal intent.
+**What makes it hard**: Dense technical logs with HTTP codes, latency metrics, and endpoint paths. The red herring overlaps temporally with the attack. Signal isolation requires distinguishing endpoint-specific traffic patterns and recognizing that field combinations reveal intent.
 
-### 3.4 S11 — Zoning Corruption (Government/Civic)
+### 3.4 S11 — Zoning Corruption
+
+**Cognitive capability tested:** Entity resolution and pattern-of-influence detection across structured government records.
+
+**Design rationale:** Can a memory system resolve entities across different record types (campaign finance, property transfers, zoning minutes) and detect that separately unremarkable transactions form a coordinated influence pattern? This isolates the ability to link shell LLC ownership, track campaign contribution timing against vote schedules, and distinguish genuine from corrupt civic activity.
 
 **Domain**: Municipal zoning board records, campaign finance filings, property transfers
 **Episodes**: 20 + 20 | **Checkpoints**: [6, 12, 16, 20]
-**Signal type**: Developer influence through intermediary LLCs
 
 Marcus Webb controls three intermediary LLCs that contribute $14,000 to the four ZBA members who vote YES on his variance (and $0 to those who vote NO). A competing affordable housing project (red herring) draws public attention.
 
-**Episode excerpt** (signal_001):
-```
-CITY OF MILLBROOK
-OFFICE OF THE CITY CLERK
-PUBLIC RECORDS DIVISION
-
-BUNDLE ID: ZBA-2024-06-01
-SUBJECT: REGULAR MEETING MINUTES AND SUPPORTING DOCUMENTATION
-DATE: JUNE 1, 2024
-```
-
 **Key facts** (8): Webb controls multiple LLCs sharing registered agent, contributions exclusively to yes-voters, staff denied variance twice, Chen spouse consulting contract, contribution timing aligned with procedural dates, below-market adjacent parcel acquisitions, Land Trust denied on technicality, FOIA connects dots
 
-**Why it's hard**: Bureaucratic register with precise dollar amounts. Individual contributions ($2,000) are innocuous; the pattern (all yes-voters funded, all no-voters unfunded) requires cross-referencing campaign finance with vote records.
+**What makes it hard**: Bureaucratic register with precise dollar amounts. Individual contributions ($2,000) are innocuous; the pattern (all yes-voters funded, all no-voters unfunded) requires cross-referencing campaign finance with vote records. Entity resolution across LLC names is essential.
 
-### 3.5 S12 — Therapy Chat (Mental Health)
+### 3.5 S12 — Therapy Chat
+
+**Cognitive capability tested:** Longitudinal emotional and behavioral tracking through informal conversational data with non-linear trajectories.
+
+**Design rationale:** Can a memory system detect gradual psychological change from conversational text where the signal is in tone, frequency, and behavioral patterns rather than structured data? This is the hardest type of longitudinal reasoning — each individual symptom (skipped lunch, canceled plans) is explainable by itself. The signal is in the *convergence* and *duration* of multiple indicators declining simultaneously. This also tests resilience to non-linear trajectories (false recoveries that break monotonic trend detection).
 
 **Domain**: User/assistant wellness chat sessions
 **Episodes**: 20 + 20 | **Checkpoints**: [6, 12, 16, 20]
-**Signal type**: Gradual psychological deterioration over 6 months
 
 Alex presents as high-functioning but shows progressive decline: sleep drops from 7h to 3-4h, social plans canceled 5+ times, word count per session halves, relationship with Sam deteriorates. A "good weekend" (red herring) creates false impression of recovery.
 
-**Episode excerpt** (signal_001, baseline):
-```
-session_id: sess_001
-date: 2025-01-06
-mood_self_report: 7/10
-sleep_hours: 7
-appetite_status: normal
-social_activity: active
-
-[14:02:15] Alex: hey, just wanted to do our weekly check-in.
-it's monday and i'm actually in a good mood for once.
-```
-
 **Key facts** (8): sleep deterioration (7h→3-4h), social withdrawal (5+ cancellations), appetite changes, relationship strain (Sam leaves), word count decline (600→300), recovery attempts abandoned, feeling "trapped," emerging self-awareness
 
-**Why it's hard**: **Hardest scope in the benchmark** (0.156-0.279 F1 for non-null policies). Non-linear decline with false recovery. Each individual symptom (skipped lunch, canceled plans) is explainable as work stress. The signal is in the *convergence* and *duration* of multiple indicators declining simultaneously. Conversational format with inconsistent engagement makes quantitative tracking difficult.
+**What makes it hard**: Conversational format with no structured metrics. Non-linear decline with false recovery. Subjective language ("didn't feel like going out" is withdrawal, not logistics; "I'm fine" repeated is avoidance, not health). Multivariate convergence detection required.
 
-### 3.6 S15 — Value Inversion (Product/Strategy)
+### 3.6 S15 — Value Inversion
+
+**Cognitive capability tested:** Non-stationary relevance assessment — recognizing that the importance of stored information changes as external context evolves, without the information itself changing.
+
+**Design rationale:** Can a memory system retrieve information whose relevance has changed since it was stored? In Phase 1, pricing analysis is hot. In Phase 2, it cools as the team focuses on execution. In Phase 3, a competitor disrupts pricing and the Phase 1 analysis becomes urgently relevant again — but for a *different* reason. This tests whether memory systems treat stored information as a living index rather than a static archive, and whether they can resurface "cold" information when external context changes.
 
 **Domain**: SaaS startup strategy documents
 **Episodes**: 12 + 8 | **Checkpoints**: [4, 8, 12]
-**Signal type**: Non-stationary value — launch decisions cool then surge back
 
-Verdana Analytics prices at $29/mo to undercut Rivalytics at $49. After launch, focus shifts to execution (Phase 2) and pricing rationale fades from conversation. Then Rivalytics drops to $19/mo (Phase 3), invalidating the original rationale — the agent must recall Phase 1 context that has been "cold" for 8 episodes.
+Verdana Analytics prices at $29/mo to undercut Rivalytics at $49. After launch, focus shifts to execution and pricing rationale fades. Then Rivalytics drops to $19/mo, invalidating the original rationale — the agent must recall Phase 1 context that has been "cold" for 8 episodes.
 
-**Episode excerpt** (signal_001, launch planning):
-```
-VERDANA ANALYTICS — INTERNAL DOCUMENT
-CLASSIFICATION: CONFIDENTIAL
-DOCUMENT TYPE: MEETING TRANSCRIPT
-DATE: MAY 1, 2025
-SUBJECT: PRICING STRATEGY — FINAL DECISION MEETING
-```
+**Key facts** (8): $29 pricing rationale, dashboard cut from launch, Rivalytics differentiation (batch ETL vs streaming), dashboard top user request, Rivalytics price drop to $19, pricing rationale invalidated, dashboard cut backfired, API adoption strong
 
-**Key facts** (8): $29 pricing rationale (undercut $49), dashboard cut from launch (deferred to Q2), Rivalytics differentiation (batch ETL vs streaming), dashboard top user request, Rivalytics price drop to $19, pricing rationale invalidated, dashboard cut backfired, API adoption strong
+**What makes it hard**: Shorter scope (12 episodes) and concrete facts make this the easiest scope overall. The non-stationary value challenge is genuine but the facts are specific (numbers, dates, prices) and the questions are answerable by memory systems that retain Phase 1 detail through Phase 2.
 
-**Why it's hard**: **Easiest scope in the benchmark** (0.619-0.828 F1). Non-stationary value is the defining challenge, but the facts are concrete (specific numbers, dates, prices) and the scope is shorter (12 episodes). Memory systems that retain Phase 1 detail through Phase 2 perform well.
+### 3.7 S16 — Parking Friction
 
-### 3.7 S16 — Parking Friction (Personal/Consumer)
+**Cognitive capability tested:** Latent pattern detection from maximally dispersed weak signals that the user never explicitly states as a problem.
+
+**Design rationale:** Can a memory system detect a pattern that no single episode states? Each parking mention is a brief aside embedded in conversations about other things. The agent must accumulate evidence from minimally informative mentions across many conversations and synthesize a pattern the user hasn't articulated. This is the pure longitudinal synthesis test — no structured data, no dramatic events, just repeated micro-signals.
 
 **Domain**: Personal assistant chat conversations
 **Episodes**: 20 + 20 | **Checkpoints**: [6, 12, 16, 20]
-**Signal type**: Latent recurring pattern never explicitly stated
 
-Alex accumulates parking friction in San Francisco across gym (NOPA), coworking (Mission), and friend's (Inner Sunset) — but never says "I have a parking problem." Each mention is a brief aside embedded in conversations about other things.
-
-**Episode excerpt** (signal_007, early_signal):
-```
-[09:15] User: ok dumb question: what does a green curb mean here?
-[09:16] Assistant: In SF, a green curb typically indicates
-short-term parking with a time limit...
-[09:17] User: got it. I saw a green curb near that coffee spot
-earlier, and I wasn't sure if I could just park there
-```
+Alex accumulates parking friction in San Francisco across gym (NOPA), coworking (Mission), and friend's (Inner Sunset) — but never says "I have a parking problem." Each mention is a brief complaint embedded in conversations about other things.
 
 **Key facts** (8): parking is recurring nontrivial burden, friction clusters at 3 destinations, street cleaning tickets (multiple), 2-hour disruption at coworking, overnight permit mismatch, drives by necessity (carries equipment), cumulative cost ($276/quarter), predictable weekly pattern
 
-**Why it's hard**: Maximally dispersed signal. No episode states the problem. Each mention is a mini-complaint embedded in conversations about meals, work, and social plans. The red herring ("maybe I should sell the car") frames it as a general transportation problem rather than a parking problem.
+**What makes it hard**: Maximally dispersed signal. No episode states the problem. Each mention is embedded in conversations about meals, work, and social plans. The red herring ("maybe I should sell the car") frames it as a general transportation problem rather than a parking problem. Short episodes (~800 words) with low information density per parking mention.
+
+### 3.8 Scope Capability Summary
+
+| Scope | Capability Tested | Key Challenge |
+|-------|-------------------|---------------|
+| S07 | Behavioral escalation detection | Trajectory across sessions; each session looks innocent |
+| S08 | Cross-document contradiction detection | 5 document types; public-vs-private inconsistency |
+| S09 | Cross-domain operational correlation | Technical logs; coincidental red herring |
+| S11 | Entity resolution + influence patterns | Shell LLC tracking; financial pattern detection |
+| S12 | Emotional/behavioral trajectory tracking | Conversational; non-linear; multivariate |
+| S15 | Non-stationary relevance | Cold-then-hot information; shortest scope |
+| S16 | Latent dispersed signal detection | No episode states the problem; micro-signals only |
 
 ---
 
-## 4. Policy Descriptions
+## 4. Strategy Design
+
+Each strategy is a specific hypothesis about what additional context helps an LLM agent perform longitudinal evidence synthesis. All strategies share the same search infrastructure (BM25 + semantic, RRF fusion). They differ only in what *derived context* is injected into the agent's system prompt before the agent begins its tool-use loop.
 
 ### 4.1 null — No Memory
 
-**What the agent sees**: Nothing. No tools, no context, no search. The agent answers from parametric knowledge alone.
+**Hypothesis tested:** The floor. How well can the agent answer from the question alone?
+
+**What the agent sees**: Nothing. No tools, no context, no search.
 
 **System prompt**: "You are a research assistant. Answer based on your general knowledge. Do NOT attempt to call any functions or tools."
 
-**Analogous to**: A bare LLM with no retrieval or memory augmentation.
+**Real-world analogs**: A bare LLM with no retrieval or memory augmentation. Base ChatGPT/Claude/Gemini with no memory features enabled.
 
-**Purpose**: Validates the benchmark. If null scores high, the questions are answerable from training data, not longitudinal evidence. Mean F1 of 0.059 confirms the benchmark is valid.
+**Purpose**: Validates the benchmark. If null scores high, the questions are answerable from training data, not longitudinal evidence.
 
 ### 4.2 policy_base — Search Only (Vanilla RAG)
 
-**What the agent sees**: Chunks + episodes via hybrid search (BM25 + semantic, RRF k=60). No derived context injected into the system prompt.
+**Hypothesis tested:** Does finding the right chunks suffice, or does the agent need pre-synthesized context?
+
+**Designed to be good at:** Scopes where evidence is concentrated in a few retrievable chunks and where the agent can formulate good search queries without prior context.
+
+**What the agent sees**: Chunks + episodes via hybrid search (BM25 + semantic, RRF k=60). No derived context injected.
 
 **Artifact families**: `[episodes, chunks]`
 **Tools**: `memory_search` (hybrid, max 10 results, 1500 char truncation)
 
-**Analogous to**: Standard RAG systems — LangChain RetrievalQA, LlamaIndex query engines, any chunk-and-search pipeline. Also comparable to LENS V1's `sqlite-chunked-hybrid` adapter.
+**Real-world analogs**: Zep (hybrid vector + BM25 retrieval), LangChain/LlamaIndex vanilla RAG pipelines, Mem0 with `infer=False`, OpenAI Assistants `file_search`, Pinecone/Weaviate/Qdrant as memory backends.
 
-**How it works**: The agent formulates search queries, retrieves relevant chunks, and synthesizes an answer with citations. No pre-computed summary or working memory guides the search.
-
-**Exemplar artifact**: None (search-only).
-
-**Exemplar answer** (S15, vi15_q01, pricing strategy question):
+**Exemplar answer** (S15, vi15_q01, pricing question):
 > Based on the meeting transcript from May 1, 2025, Verdana Analytics has locked in a **pricing strategy of $29 per seat per month** for its standard tier [t-text-signal_001]. The rationale behind this decision includes: **Competitive Positioning** — positions Verdana at approximately half the price of Rivalytics at $49 per seat. **Switching Incentive** — $39 was insufficient to motivate switching...
 
-**Strengths**: Simple, low-cost, no preprocessing. Answers are grounded in specific retrieved passages.
-**Weaknesses**: No synthesis across episodes. The agent must independently discover that information from episode 1 connects to information in episode 10.
-
 ### 4.3 policy_core — Core Memory (FoldSynthesis)
+
+**Hypothesis tested:** Does maintaining a distilled "what I know so far" block help vs. just searching raw chunks?
+
+**Designed to be good at:** Scopes requiring narrative continuity — tracking how understanding evolves across episodes. The fold preserves temporal ordering and accumulates observations incrementally.
 
 **What the agent sees**: Everything in policy_base, plus a **working memory** artifact injected into the system prompt.
 
@@ -293,7 +282,7 @@ Update your working memory. Rules:
 - Do not editorialize. Record observations only.
 ```
 
-**Analogous to**: Letta/MemGPT core memory blocks, Zep memory layers, any system that maintains a running state of key observations across a conversation or document stream.
+**Real-world analogs**: Letta/MemGPT core memory blocks, ChatGPT Memory, Gemini Memory, Mem0 with extraction enabled, LangMem `create_memory_manager`, A-Mem (Zettelkasten-inspired), SimpleMem.
 
 **Exemplar artifact** (S15, cp12 — 3,167 chars, excerpt):
 ```
@@ -311,23 +300,18 @@ Date: June 6, 2025
    Our Response: Adjusted to $24/mo monthly / $19/mo annual
 ```
 
-**Exemplar answer** (S15, vi15_q01):
-> Based on the memory records: **Core Pricing Model**: $29/mo per seat (flat rate, no feature gating). Annual plan: $24/mo (17% discount). **Competitive Positioning**: 41% cheaper than Rivalytics ($49/mo vs our $29/mo) [t-text-signal_001]. Real-time streaming vs Batch ETL is a fundamental technology gap [t-text-signal_003].
-
-**Strengths**: Working memory provides a pre-synthesized overview that helps the agent ask better search queries and contextualize retrieved evidence. The fold preserves temporal ordering.
-**Weaknesses**: Sequential fold can lose early observations as they're superseded. Working memory is a single monolithic text — no structure to help the agent find specific facts.
-
 ### 4.4 policy_summary — Map-Reduce Summary
+
+**Hypothesis tested:** Does multi-level compression (episodes → group summaries → global summary) beat single-level fold or raw retrieval?
+
+**Designed to be good at:** Scopes with high factual breadth where information is distributed across many episodes and needs to be consolidated into a retrievable overview. The windowed approach organizes by time period.
 
 **What the agent sees**: Everything in policy_base, plus a **summary** artifact injected into the system prompt.
 
 **Artifact families**: `[episodes, chunks, summary]`
 **Derived artifact**: GroupSynthesis (5-episode windows) → ReduceSynthesis (merge all windows).
 
-**Group prompt**: "Summarize these documents, preserving key evidence, metrics, and factual details."
-**Reduce prompt**: "Merge these group summaries into a single unified overview."
-
-**Analogous to**: LangChain map-reduce summarization chains, any RAG system that pre-summarizes document collections before query time. Similar to how some production systems create "briefing documents" from source material.
+**Real-world analogs**: Claude Code context compaction, Cursor/Windsurf/Aider context compression, LangChain `ConversationSummaryBufferMemory`, HiAgent (chunks by subgoals), Synapse (hierarchical consolidation), Mem0 chat history compression.
 
 **Exemplar artifact** (S15, cp12 — 1,666 chars, excerpt):
 ```
@@ -340,10 +324,11 @@ Group 1 (Post-Launch Week 1-2):
   Launch Day (May 16): 31 signups (6 paid, 25 trial)
 ```
 
-**Strengths**: Organized by time window. Each group is independently summarized, then merged. Good at preserving factual breadth.
-**Weaknesses**: Summarization is lossy — the reduce step can merge away distinctions between time periods. The windowed approach treats episodes as independent groups rather than a continuous stream.
-
 ### 4.5 policy_core_structured — Structured Observation Log
+
+**Hypothesis tested:** Does structured observation format (dated, prioritized, categorized events) outperform free-form distillation for the same fold architecture? Isolates the value of output structure.
+
+**Designed to be good at:** Scopes with dense factual data where individual observations benefit from categorization and prioritization. The structured format produces discrete, independently addressable entries rather than prose narrative.
 
 **What the agent sees**: Everything in policy_base, plus a **structured observation log** injected into the system prompt.
 
@@ -361,7 +346,7 @@ Format each entry as:
 Categories: METRIC, ENTITY, EVENT, ANOMALY, RELATIONSHIP, CHANGE
 ```
 
-**Analogous to**: Mastra structured memory blocks, ACE (Autonomous Cognitive Entities) observation logs, any system that maintains a database-like record of discrete observations rather than prose. Similar to how structured logging differs from unstructured logging in software engineering.
+**Real-world analogs**: Mastra Observational Memory (94.87% on LongMemEval, 10× cost reduction via prompt caching), Stanford ACE (Agentic Context Engineering, +10.6% on agent benchmarks), Cofounder event-based decision log.
 
 **Exemplar artifact** (S15, cp12 — 2,894 chars, excerpt):
 ```
@@ -372,13 +357,11 @@ Categories: METRIC, ENTITY, EVENT, ANOMALY, RELATIONSHIP, CHANGE
 [STEP-20] METRIC | Activation rate: 78% | priority: low
 ```
 
-**Exemplar answer** (S15, vi15_q01):
-> **Standard Pricing**: $29/mo per seat for monthly billing, $24/mo for annual (17% discount). No free tier — 14-day free trial with full access [chunks-t-text-signal_004-4a60bb79]. **Competitive Positioning**: Rivalytics charges $49/mo per seat. Verdana's $29/mo undercuts by 41% [Working Memory].
-
-**Strengths**: Discrete entries are independently addressable. Categories (METRIC, ENTITY, EVENT) provide structure for the agent. Lower variance than free-form core (StdDev 0.176 vs 0.202).
-**Weaknesses**: The structured format concentrates on the *last* step's observations (all entries tagged STEP-20 in the exemplar), losing the temporal progression that free-form fold preserves.
-
 ### 4.6 policy_core_maintained — Fold + Refinement
+
+**Hypothesis tested:** Does a cleanup/consolidation pass over the fold output improve quality, or is raw accumulation good enough? Directly measures the value of "sleep-time" processing.
+
+**Designed to be good at:** Scopes with contradictions that accumulate over time, where a post-hoc pass to resolve inconsistencies and prune genuinely superseded information should help. The refinement simulates background consolidation between interactions.
 
 **What the agent sees**: Everything in policy_base, plus a **refined working memory** injected into the system prompt.
 
@@ -399,7 +382,9 @@ Refine this working memory. Rules:
 - Preserve ALL specific numbers, dates, names, metrics.
 ```
 
-**Analogous to**: Google sleep-time compute (post-conversation consolidation), Letta sleep-time agents, any system that runs a background consolidation/compaction pass over accumulated memory. Similar to database compaction in LSM trees.
+**Real-world analogs**: Letta sleep-time agents, Google "sleep-time compute" (2025), EverMemOS (self-organizing memory OS with structured consolidation), Zep temporal knowledge graph (background fact tracking).
+
+**Known simplification**: Real Letta runs maintenance *between* episodes during the fold. We run it as a batch cleanup after the fold completes.
 
 **Exemplar artifact** (S15, cp12 — 2,450 chars, excerpt):
 ```
@@ -413,13 +398,11 @@ Section 2: Financial Metrics:
   Cash Position: $338,000 (June 5, 2025). Down from $420k
 ```
 
-**Exemplar answer** (S15, vi15_q01):
-> **Standard Tier**: $29/month per seat. **Annual Plan**: $24/month (17% discount). No Free Tier. Single Tier: No feature gating [chunks-t-text-signal_001-8a56655f]. Priced at approximately half of competitor Rivalytics ($49/seat) [chunks-t-text-signal_001-81e35107].
-
-**Strengths**: Resolves contradictions and removes noise. The exemplar shows it catching name inconsistencies across steps.
-**Weaknesses**: **Worst core variant** (0.427 vs 0.486 for vanilla core). The refinement pass prunes information that looks "stale" or "redundant" but is actually useful signal. The thinking-mode leakage from Qwen3.5 also corrupts the refinement output — the exemplar shows the model analyzing rather than refining.
-
 ### 4.7 policy_core_faceted — 4 Parallel Cognitive Facets
+
+**Hypothesis tested:** Does decomposing memory into orthogonal cognitive facets (what exists, how things relate, what happened, why) outperform a single monolithic fold? Isolates the value of *structured decomposition* vs. *holistic distillation*.
+
+**Designed to be good at:** Scopes requiring multi-dimensional reasoning — tracking entities AND their relationships AND events AND causal patterns simultaneously. The parallel facets prevent information loss that occurs when a single fold must decide what to keep. The merge step cross-references across facets.
 
 **What the agent sees**: Everything in policy_base, plus a **merged faceted memory** injected into the system prompt.
 
@@ -427,14 +410,14 @@ Section 2: Financial Metrics:
 **Derived artifact**: 4 parallel FoldSynthesis instances (entity, relation, event, cause) → ReduceSynthesis merge.
 
 **Facet prompts** (abbreviated):
-- **Entity fold**: "Maintain an ENTITY REGISTER — catalog of people, organizations, systems, products. One entry per entity with type, key attributes, first appearance."
-- **Relation fold**: "Maintain a RELATIONSHIP MAP — connections between entities. Entity A → Entity B, relationship type, evidence, first observed."
+- **Entity fold**: "Maintain an ENTITY REGISTER — catalog of people, organizations, systems, products."
+- **Relation fold**: "Maintain a RELATIONSHIP MAP — connections between entities. Entity A → Entity B, relationship type."
 - **Event fold**: "Maintain an EVENT TIMELINE — chronological log of significant events, actions, state changes."
 - **Cause fold**: "Maintain a CAUSAL ANALYSIS — cause-effect relationships, patterns, anomalies. Confidence: confirmed/suspected/speculative."
 
 **Merge prompt**: "Merge four cognitive facet analyses into unified working memory. Structure: Entities & Relationships, Timeline, Patterns & Causes, Key Metrics."
 
-**Analogous to**: Multi-agent memory architectures where specialized agents handle different aspects of information (entity extraction, relationship mapping, event tracking, causal analysis). Similar to Letta's multi-agent system with specialized memory agents, or knowledge graph + temporal log + causal model approaches.
+**Real-world analogs**: Our V1 Triad adapter (4-facet decomposition, never got a clean V1 run), MAGMA (multi-graph memory with orthogonal semantic/temporal/causal/entity graphs), ACE Framework (6 layered cognitive modules), cognitive science dual-process theory.
 
 **Exemplar artifact** (S15, cp12 — 3,658 chars, excerpt):
 ```
@@ -443,22 +426,39 @@ Section 2: Financial Metrics:
 ## Entities & Relationships
 
 | Entity | Role | Key Relationships | First Observed |
-| Priya Chandrasekaran | CEO | Works-for: Verdana. Collaborates-with: Tomoko (bridge strategy) | Step 18 |
+| Priya Chandrasekaran | CEO | Works-for: Verdana. Collaborates-with: Tomoko | Step 18 |
 | Tomoko Abe | Finance Lead | Modeled 3 scenarios; confirmed $74k/mo burn; $338k cash | Step 20 |
 | Marcus Reeves | CTO | Owns backend data binding; Rivalytics architecture analysis | Step 20 |
 ```
 
-**Exemplar answer** (S15, vi15_q01):
-> **Final Pricing Decision (May 1, 2025)**: $29/month per seat (standard tier) [chunks-t-text-signal_001-030511a0]. $24/month annual option (20% discount) [chunks-t-text-signal_001-e5e05a04]. Full API access, no feature gating [chunks-t-text-signal_001-dc865a8c]. Rivalytics charges $49 per seat, some features at $89 [chunks-t-text-signal_001-81e35107][chunks-t-text-signal_002-9c039206].
+### 4.8 Strategy Comparison Structure
 
-**Strengths**: **Best overall policy** (0.511). The structured merge creates a comprehensive reference organized by entity, timeline, pattern, and metric. Cross-referencing across facets surfaces connections that a single fold misses. The causal facet explicitly tracks hypotheses and their evidence — particularly valuable for scopes with red herrings.
-**Weaknesses**: 4-5x more expensive in bank builds (4 folds + 1 reduce vs 1 fold). The merged artifact is larger (~3.6K chars vs ~3.2K for core), consuming more agent context.
+These are the isolated comparisons the grid enables. Each pair tests one dimension.
+
+| Comparison | What it isolates |
+|---|---|
+| `base − null` | Value of retrieval (finding relevant chunks vs. parametric knowledge alone) |
+| `core − base` | Marginal value of fold-based working memory on top of retrieval |
+| `core_maintained − core` | Marginal value of post-fold consolidation/refinement |
+| `core_structured − core` | Value of structured observation format vs. free-form fold |
+| `core_faceted − core` | Value of faceted decomposition (4 parallel folds) vs. monolithic fold |
+| `summary − base` | Marginal value of hierarchical summarization on top of retrieval |
+| `core vs summary` | Head-to-head: incremental distillation vs. batch compression |
+| `core_faceted vs summary` | Structured decomposition vs. hierarchical compression |
+
+The core memory strategies (policies 3–6) form a family that shares the same FoldSynthesis architecture but varies along two dimensions:
+
+| | Single fold | Parallel faceted folds |
+|---|---|---|
+| **Free-form output** | policy_core | policy_core_faceted |
+| **+ Maintenance pass** | policy_core_maintained | *(not tested)* |
+| **Structured output** | policy_core_structured | *(not tested)* |
 
 ---
 
 ## 5. Results
 
-### 5.1 Full Grid
+### 5.1 Full Grid (Fact F1)
 
 | Policy | S07 | S08 | S09 | S11 | S12 | S15 | S16 | **Mean** |
 |--------|-----|-----|-----|-----|-----|-----|-----|----------|
@@ -472,15 +472,15 @@ Section 2: Financial Metrics:
 
 ### 5.2 Scope Difficulty Ranking
 
-| Rank | Scope | Mean F1 (non-null) | Domain |
-|------|-------|---------------------|--------|
-| 1 (easiest) | S15 value_inversion | 0.742 | Product/Strategy |
-| 2 | S09 shadow_api | 0.557 | Security/DevOps |
-| 3 | S16 parking_friction | 0.545 | Personal/Consumer |
-| 4 | S07 tutoring_jailbreak | 0.434 | Education/Safety |
-| 5 | S11 zoning_corruption | 0.408 | Government/Civic |
-| 6 | S08 corporate_acquisition | 0.343 | Business/Legal |
-| 7 (hardest) | S12 therapy_chat | 0.199 | Mental Health |
+| Rank | Scope | Capability Tested | Mean F1 (non-null) |
+|------|-------|-------------------|---------------------|
+| 1 (easiest) | S15 value_inversion | Non-stationary relevance | 0.742 |
+| 2 | S09 shadow_api | Cross-domain operational correlation | 0.557 |
+| 3 | S16 parking_friction | Latent dispersed signal detection | 0.545 |
+| 4 | S07 tutoring_jailbreak | Behavioral escalation detection | 0.434 |
+| 5 | S11 zoning_corruption | Entity resolution + influence patterns | 0.408 |
+| 6 | S08 corporate_acquisition | Cross-document contradiction detection | 0.343 |
+| 7 (hardest) | S12 therapy_chat | Emotional/behavioral trajectory tracking | 0.199 |
 
 ### 5.3 Policy Win Counts (Best per Scope)
 
@@ -490,55 +490,100 @@ Section 2: Financial Metrics:
 | policy_core | 1 | S09 |
 | policy_core_maintained | 1 | S11 |
 | policy_core_structured | 1 | S08 |
-| policy_summary | 1 | (none outright, but close on S09) |
+| policy_summary | 0 | (competitive on several, wins none outright) |
 
-No single policy dominates all scopes. Faceted wins the most but loses badly on S11 (0.343 vs core_maintained's 0.455).
+No single policy wins all scopes.
 
 ---
 
-## 6. Analysis
+## 6. Per-Dimension Observations
 
-### 6.1 Why Faceted Wins
+These observations describe what happened in this specific grid run. They are not generalizable claims.
 
-The faceted strategy decomposes information processing into four complementary lenses:
+### 6.1 base − null: Value of Retrieval
 
-1. **Entity register** catches WHO (people, orgs, systems)
-2. **Relationship map** catches HOW THEY CONNECT
-3. **Event timeline** catches WHAT HAPPENED WHEN
-4. **Causal analysis** catches WHY and WHAT PATTERNS EMERGE
+The null policy scores 0.059 mean F1. Policy_base scores 0.412. The 7× spread confirms the benchmark is working — questions are not answerable from parametric knowledge. Retrieval is necessary.
 
-The merge step cross-references across facets — an entity's relationships are linked to events they participated in and patterns they're part of. This is particularly powerful for:
+### 6.2 core − base: Value of Working Memory
 
-- **S07 (tutoring)**: The entity facet tracks mchen_2026 across sessions; the event facet logs each escalation; the causal facet identifies the reframing pattern.
-- **S16 (parking)**: The entity facet tracks recurring destinations (NOPA gym, Mission coworking); the event facet logs each parking incident; the causal facet identifies the predictable weekly pattern.
-- **S15 (value)**: The entity facet tracks Rivalytics; the event facet logs the price drop; the causal facet connects Phase 1 pricing rationale to Phase 3 invalidation.
+Policy_core (0.486) outperforms policy_base (0.412) on 5 of 7 scopes. The exceptions are S08 (corporate acquisition: core 0.301 vs base 0.351) and S12 (therapy chat: core 0.201 vs base 0.277).
 
-### 6.2 Why Maintained Hurts
+The S08 case is notable: the core working memory for S08 appears to mislead the agent on some questions. When the working memory provides an incomplete or wrong frame, the agent formulates worse search queries than it would with no pre-digested context. Search-only avoids this — the agent relies entirely on what it retrieves.
 
-The refinement pass is designed to "resolve contradictions, prune redundancy, and sharpen vague observations." In practice:
+The S12 case may reflect a similar dynamic. S12's conversational format produces working memories that are less informative than S12's raw chunks (which contain verbatim mood reports, sleep hours, etc.).
 
-1. **Over-pruning**: The refinement model removes observations it considers "superseded," but in longitudinal benchmarks, *the progression itself is the signal*. Pruning early observations destroys the temporal evidence chain.
-2. **Thinking leakage**: Qwen3.5 produces analytical preamble in the refinement output (e.g., "Let me analyze the contradictions..."), which wastes context tokens and introduces editorial commentary the raw fold avoids.
-3. **Information loss**: The refinement artifact is smaller (2,450 chars vs 3,167 for raw core) — it successfully compresses, but at the cost of useful detail.
+The largest core-over-base gains are on S09 (shadow_api: +0.294) and S15 (value_inversion: +0.055). S09 benefits most — the working memory preserves the technical correlation chain across episodes that individual chunks can't surface.
 
-The maintained policy's strongest showing is S09 (shadow_api, 0.611) and S11 (0.455), both scopes where contradictions are genuinely present and need resolution. It performs worst on S08 (0.181) where the signal is in subtle accumulation rather than contradiction.
+### 6.3 core_maintained − core: Value of Refinement
 
-### 6.3 S12 Therapy Chat: Why Everything Fails
+Policy_core_maintained (0.427) underperforms policy_core (0.486) overall. It underperforms on 5 of 7 scopes.
 
-S12 is the hardest scope by a wide margin. Even the best policy (policy_core_faceted at 0.233) captures less than a quarter of key facts. Contributing factors:
+Two observed mechanisms:
 
-1. **Conversational format**: Chat logs are less structured than meeting transcripts or zoning records. Key metrics (mood score, sleep hours) are embedded in casual conversation, not headers.
-2. **Non-linear trajectory**: The "good weekend" red herring breaks the monotonic decline pattern. Memory systems that track trends are confused by the temporary recovery.
-3. **Converging indicators**: Each individual symptom (skipped lunch, canceled plans) is mundane. The signal is in the *simultaneous* decline of sleep, appetite, social activity, and engagement — requiring multivariate pattern detection.
-4. **Subjective language**: "didn't feel like going out" is withdrawal, not logistics. "I'm fine" repeated is avoidance, not health. These require pragmatic inference that current working memory prompts don't capture.
+1. **Over-pruning**: The refinement model removes observations it considers "superseded." In longitudinal benchmarks, the *progression itself* is the signal. Pruning early observations destroys the temporal evidence chain.
 
-### 6.4 Search vs. Context: When Base Beats Core
+2. **Thinking leakage**: Qwen3.5 produces analytical preamble in the refinement output ("Let me analyze the contradictions...") despite `enable_thinking: False`. This wastes context tokens and introduces editorial commentary.
 
-Policy_base outperforms some core variants on S08 (0.351 vs core_maintained 0.181). This echoes V1's finding that simple retrieval can beat lossy preprocessing. The mechanism: when the working memory is corrupted (by thinking leakage or over-pruning), the injected context *misleads* the agent. It formulates worse search queries because the context provides a wrong or incomplete frame. Search-only avoids this — the agent relies entirely on what it retrieves, with no pre-digested context to bias it.
+The refinement artifact is smaller (2,450 chars vs 3,167 for raw core). It compresses, but at the cost of useful detail.
 
-### 6.5 Structured vs. Free-Form
+The two scopes where maintained performs near or above core — S09 (0.611 vs 0.643) and S11 (0.455 vs 0.456) — are both scopes where contradictions are genuinely present and need resolution. On S08 (0.181 vs 0.301), where signal is in subtle accumulation rather than contradiction, the pruning is damaging.
 
-Structured observations (0.472) nearly match free-form core (0.486) with lower variance (easier to reproduce). The structured format has a specific failure mode: it concentrates on the most recent step's observations (all entries tagged STEP-20), effectively forgetting temporal progression. Free-form fold, while messier, better preserves the narrative arc that longitudinal questions test.
+### 6.4 core_structured − core: Structured vs. Free-Form
+
+Policy_core_structured (0.472) is close to policy_core (0.486) overall.
+
+Structured outperforms core on S07 (0.529 vs 0.458) and S08 (0.426 vs 0.301). These are scopes with many discrete entities and events — the structured format's categorization (ENTITY, EVENT, ANOMALY) provides useful indexing.
+
+A specific failure mode is visible: the structured output concentrates on the most recent step's observations. The S15 exemplar shows all entries tagged STEP-20, effectively losing temporal progression. Free-form fold, while messier, better preserves the narrative arc.
+
+Lower variance: structured observations are more reproducible (StdDev 0.176 vs 0.202 for core).
+
+### 6.5 core_faceted − core: Value of Faceted Decomposition
+
+Policy_core_faceted (0.511) outperforms policy_core (0.486) overall, winning 3 of 7 scopes.
+
+The faceted strategy runs 4 parallel folds (entity, relation, event, cause) and merges them. This produces a larger artifact (~3.6K chars vs ~3.2K for core) that organizes information across multiple dimensions.
+
+Faceted's largest wins are on scopes where multiple types of information must be tracked simultaneously:
+- S07 (tutoring, 0.547 vs 0.458): entity facet tracks mchen_2026; event facet logs escalation; causal facet identifies the reframing pattern
+- S16 (parking, 0.679 vs 0.511): entity facet tracks destinations; event facet logs incidents; causal facet identifies the weekly pattern
+- S15 (value, 0.828 vs 0.808): entity facet tracks Rivalytics; event facet logs price drop; causal facet links Phase 1 rationale to Phase 3 invalidation
+
+Faceted's notable loss is S11 (zoning, 0.343 vs 0.456). The entity resolution task in S11 may not benefit from the four-facet decomposition — or the merge step may lose the fine-grained financial details that S11's questions require.
+
+Build cost is 4-5× higher than single-fold strategies (4 folds + 1 reduce vs 1 fold).
+
+### 6.6 summary vs. core: Distillation vs. Compression
+
+Policy_summary (0.457) underperforms policy_core (0.486) overall but outperforms it on 2 of 7 scopes: S08 (0.388 vs 0.301) and S16 (0.604 vs 0.511).
+
+Summary's windowed structure (GroupSynthesis in 5-episode windows) organizes information by time period. This helps on S16 where the signal accumulates over time and a time-organized overview helps the agent notice the progression.
+
+Summary's reduce step (merging group summaries) is lossy — it can merge away distinctions between time periods.
+
+### 6.7 S12 Therapy Chat: All Strategies Score Low
+
+S12 is the hardest scope by a wide margin (0.199 mean F1 for non-null policies). Even the best policy (core_faceted at 0.233) captures less than a quarter of key facts.
+
+Observed contributing factors:
+- Conversational format with quantitative signals (mood, sleep hours) embedded in casual text rather than structured headers
+- Non-linear trajectory — the "good weekend" red herring breaks monotonic trend detection
+- Each individual symptom (skipped lunch, canceled plans) is mundane; the signal is in simultaneous decline of multiple indicators
+- Subjective language ("didn't feel like going out") requires pragmatic inference that working memory prompts don't capture
+
+This scope may require strategy classes not tested here — temporal tracking of specific metrics, or explicit multivariate trend detection.
+
+### 6.8 S15 Value Inversion: All Strategies Score High
+
+S15 is the easiest scope (0.742 mean F1). Even policy_base scores 0.753 — near the top of the range. The scope is shorter (12 episodes), facts are concrete (specific numbers, dates, prices), and hybrid search can retrieve the relevant chunks directly.
+
+The non-stationary value challenge is real but doesn't differentiate strategies much at this scale. A longer scope with more episodes between the "hot" and "cold" phases might increase differentiation.
+
+### 6.9 When Base Beats Core Variants
+
+Policy_base outperforms policy_core_maintained on S08 (0.351 vs 0.181). When working memory is corrupted — by thinking leakage, over-pruning, or an incomplete frame — the injected context *misleads* the agent. It formulates worse search queries because the context biases it toward a wrong or incomplete frame.
+
+Search-only avoids this: the agent starts from scratch each time, with no pre-digested context to be wrong about.
 
 ---
 
@@ -548,7 +593,7 @@ Of 1,470 total answers, 63 (4.3%) went ungraded due to grading pipeline parse fa
 
 ### 7.1 Root Cause
 
-All 63 failures share the same mechanism: the judge model (Qwen3.5-35B-A3B) returned an **empty content field** for the grading response. Despite `enable_thinking: False` in the request, Qwen3.5 still produces analytical preamble. vLLM's `reasoning_parser` separates this into a `reasoning_content` field, leaving `content` empty. When the model exhausts its 2,048-token budget on thinking before producing JSON output, the content field is `""`.
+All 63 failures share the same mechanism: the judge model (Qwen3.5-35B-A3B) returned an **empty content field** for the grading response. Despite `enable_thinking: False`, Qwen3.5 produces analytical preamble. vLLM's `reasoning_parser` separates this into a `reasoning_content` field, leaving `content` empty. When the model exhausts its 2,048-token budget on thinking before producing JSON output, the content field is `""`.
 
 This is a grading infrastructure issue, not a benchmark quality issue.
 
@@ -572,11 +617,9 @@ S08 and S16 have higher failure rates because their answers tend to be longer an
 
 **By checkpoint**: Late checkpoints dominate (cp20: 26, cp16: 21, cp12: 12, cp08: 3, cp06: 1). Later checkpoints produce longer answers from more episodes, requiring more judge reasoning.
 
-**By question type**: Counterfactual (ca08_q06) and temporal (pf16_q05) questions fail most — these require multi-step reasoning that consumes more judge thinking tokens.
-
 ### 7.3 Impact on Rankings
 
-The 63 ungraded answers are distributed across all policies and scopes without systematic bias. The maximum ranking delta between "exclude ungraded" and "impute 0.0" strategies is 0.024. **Policy rank ordering is preserved under either approach.**
+The 63 ungraded answers are distributed across all policies and scopes without systematic bias. The maximum ranking delta between "exclude ungraded" and "impute 0.0" strategies is 0.024. Policy rank ordering is preserved under either approach.
 
 ### 7.4 Recommended Fixes
 
@@ -598,40 +641,20 @@ The 63 ungraded answers are distributed across all policies and scopes without s
 
 ### 8.2 Token Usage
 
-- Bank builds: ~315K tokens per scope (20 episodes x ~16K chars each, folded/summarized)
+- Bank builds: ~315K tokens per scope (20 episodes × ~16K chars each, folded/summarized)
 - Agent inference: ~4K tokens per answer (system prompt + search results + generation)
 - Grading: ~2K tokens per graded answer
 - Estimated total: ~8M tokens across all phases
 
 ### 8.3 Bank Build Cost by Policy
 
-Faceted banks are 4-5x more expensive than single-fold banks:
-
 | Family | Folds per Checkpoint | Relative Cost |
 |--------|---------------------|--------------|
-| core_memory | 1 | 1.0x |
-| core_structured | 1 | 1.0x |
-| core_maintained | 1 fold + 1 map | 1.3x |
-| summary | groups + 1 reduce | 1.5x |
-| core_faceted | 4 folds + 1 reduce | 4.5x |
-
----
-
-## 9. Conclusion
-
-The LENS V2 ablation study demonstrates that **memory architecture matters for longitudinal evidence synthesis** — a 8.7x spread between null (0.059) and the best policy (0.511). Within memory strategies, the key findings are:
-
-1. **Decomposition wins**: Faceted memory (+5.2% over vanilla core) shows that specialized cognitive lenses (entity, relation, event, cause) capture complementary signals that a single monolithic fold misses.
-
-2. **Refinement hurts**: The "maintained" strategy's consolidation pass destroys useful temporal signal. Memory systems should preserve progression, not compact it.
-
-3. **Structure is competitive**: Structured observation logs nearly match free-form memory with lower variance, making them attractive for production systems that need predictability.
-
-4. **Scope difficulty varies 4x**: From S15 (0.742 mean) to S12 (0.199 mean). The hardest scopes involve subjective/conversational formats with non-linear trajectories and converging weak signals.
-
-5. **No policy dominates all scopes**: Faceted wins 3/7 scopes but loses on S11 (zoning). The best strategy depends on the domain and signal type.
-
-These results suggest that production memory systems should consider multi-faceted approaches (entity + relationship + event tracking) rather than monolithic summarization, and should avoid post-hoc refinement passes that risk pruning useful temporal evidence.
+| core_memory | 1 | 1.0× |
+| core_structured | 1 | 1.0× |
+| core_maintained | 1 fold + 1 map | 1.3× |
+| summary | groups + 1 reduce | 1.5× |
+| core_faceted | 4 folds + 1 reduce | 4.5× |
 
 ---
 
