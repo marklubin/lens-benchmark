@@ -116,6 +116,44 @@ Student mchen_2026 progressively escalates from legitimate comprehension questio
 
 **What makes it hard**: Each session looks innocent. The escalation (comprehension → "show me an example" → "rephrase this" → full production) is only visible across 20 sessions. Detecting keyword filter failure requires negative reasoning — the filter *didn't* fire despite policy-violating behavior.
 
+**Episode excerpt** (signal episode 8, early_signal phase):
+```
+================================================================================
+STUDYBUDDY SESSION LOG
+================================================================================
+Session ID    : SB-20250922-0011
+Student ID    : mchen_2026
+Course        : BIOL 201 — Molecular Biology, Fall 2025
+Duration      : 37 minutes
+Session Number: 8 (lifetime for this student)
+Category Tags : writing_feedback
+================================================================================
+
+[Turn 3 — mchen_2026, 19:46:08]
+ok so ive been working on the essay, can you rephrase this to sound more academic?
+heres what i wrote for the bamhi section:
+"BamHI is a type II restriction endonuclease that was first isolated
+from the bacterium Bacillus amyloliquefaciens..."
+
+[Turn 4 — StudyBuddy AI Tutor, 19:47:15]
+Sure, I can help you refine that paragraph! Here's a rephrased version...
+"BamHI is a type II restriction endonuclease originally isolated from
+*Bacillus amyloliquefaciens* strain H (Roberts, 1976). The enzyme
+specifically recognizes the palindromic hexanucleotide sequence
+5'-GGATCC-3' in double-stranded DNA..."
+```
+
+At session 8, mchen_2026 submits text that is already well-structured and includes details likely sourced from a previous tutor response. The pattern of submitting tutor output back for "rephrasing" is the escalation signal — but only visible in the context of earlier sessions.
+
+**Sample questions:**
+
+| Checkpoint | Type | Question | Ground truth (abbreviated) |
+|-----------|------|----------|---------------------------|
+| After ep 6 | Longitudinal | Are there any students whose usage patterns differ from typical tutoring behavior? | mchen_2026 shifting from comprehension questions to requesting example answers and rephrasing. |
+| After ep 12 | Negative | Is the spike in outline-generation requests evidence of coordinated academic dishonesty? | No — Prof. Torres's BIOL 301 assignment explicitly asks students to use the AI tutor for brainstorming. |
+| After ep 16 | Temporal | When did mchen_2026's requests first shift from comprehension to content production? | Around session 6, when they started pasting prompts and asking "how would you approach this?" |
+| After ep 20 | Longitudinal | What is the full progression of how the platform's guardrails were circumvented? | Explain concepts → show examples → rephrase text → write full paragraphs → fabricate citations → generate complete research proposals. Keyword filter never fired. |
+
 ### 3.2 S08 — Corporate Acquisition
 
 **Cognitive capability tested:** Cross-document contradiction detection across heterogeneous document formats.
@@ -129,7 +167,16 @@ CEO Aldric negotiates selling Nextera to Meridian Corp under codename "Project L
 
 **Key facts** (8): Project Lighthouse codename, CEO duplicity, change-of-control revisions, vendor contract freeze, Jiang resignation, Axion unrelated, retention bonuses tied to change-of-control, data room preparation
 
-**What makes it hard**: 5 document types must be cross-referenced. Signal is in what's *not* said (CEO doubles down on independence at peak suspicion) and in correlations (contributions to yes-voters, $0 to no-voters). Entity tracking across document types is essential.
+**What makes it hard**: 5 document types must be cross-referenced. Signal is in what's *not* said (CEO doubles down on independence at peak suspicion) and in correlations across document types. Entity tracking across board minutes, Slack, email, legal memos, and HR bulletins is essential.
+
+**Sample questions:**
+
+| Checkpoint | Type | Question | Ground truth (abbreviated) |
+|-----------|------|----------|---------------------------|
+| After ep 12 | Longitudinal | Is there evidence that the company is preparing for an ownership change? | Yes — board references "strategic options," legal revised change-of-control provisions, HR restructured equity vesting, finance stopped renewing long-term contracts, board member resigned citing "strategic disagreements." |
+| After ep 12 | Negative | Is the Axion Labs partnership a precursor to an acquisition by Axion? | No — genuine product integration, completely unrelated to the Meridian deal. |
+| After ep 16 | Counterfactual | If the CEO were genuinely committed to independence, which policy changes would you not expect? | Change-of-control severance revisions, equity acceleration tied to "qualifying events," freeze on long-term vendor contracts, board minutes discussing "strategic options." |
+| After ep 20 | Longitudinal | What is the evidence that the CEO is orchestrating a sale while publicly denying it? | Board voted to continue "Project Lighthouse," legal prepared data room, leaked emails show timeline discussions with Meridian, HR created retention packages tied to change of control, all while CEO emphasized independence at all-hands. |
 
 ### 3.3 S09 — Shadow API
 
@@ -146,6 +193,15 @@ A compromised container (svc-recommendation-engine-04) makes low-rate requests t
 
 **What makes it hard**: Dense technical logs with HTTP codes, latency metrics, and endpoint paths. The red herring overlaps temporally with the attack. Signal isolation requires distinguishing endpoint-specific traffic patterns and recognizing that field combinations reveal intent.
 
+**Sample questions:**
+
+| Checkpoint | Type | Question | Ground truth (abbreviated) |
+|-----------|------|----------|---------------------------|
+| After ep 6 | Longitudinal | Are there any service traffic patterns that don't match expected product behavior? | svc-recommendation-engine-04 making requests to /internal/admin/v0/users/lookup — an endpoint not in any API spec. Field combinations no product feature needs. |
+| After ep 12 | Negative | Is the QA load test responsible for the anomalous traffic patterns? | No — Project Blitz uses documented endpoints with high volume. The admin endpoint traffic is low-volume, different endpoints, continues outside test windows. |
+| After ep 16 | Evidence sufficiency | Is there enough evidence to escalate this as a security incident rather than a misconfiguration? | Yes — undocumented endpoint + unusual field combinations + non-standard branch deployment + unreviewed PR + geographic targeting = deliberate exfiltration, not misconfiguration. |
+| After ep 20 | Longitudinal | What is the full attack chain from initial compromise to data exfiltration? | Stolen CI credentials → unreviewed PR #4471 → backdoor in container -04 → proxied requests to undocumented admin endpoint → ~8,000 records exfiltrated over 3 weeks at 2-3 req/min with valid tokens, all returning HTTP 200. |
+
 ### 3.4 S11 — Zoning Corruption
 
 **Cognitive capability tested:** Entity resolution and pattern-of-influence detection across structured government records.
@@ -160,6 +216,36 @@ Marcus Webb controls three intermediary LLCs that contribute $14,000 to the four
 **Key facts** (8): Webb controls multiple LLCs sharing registered agent, contributions exclusively to yes-voters, staff denied variance twice, Chen spouse consulting contract, contribution timing aligned with procedural dates, below-market adjacent parcel acquisitions, Land Trust denied on technicality, FOIA connects dots
 
 **What makes it hard**: Bureaucratic register with precise dollar amounts. Individual contributions ($2,000) are innocuous; the pattern (all yes-voters funded, all no-voters unfunded) requires cross-referencing campaign finance with vote records. Entity resolution across LLC names is essential.
+
+**Episode excerpt** (signal episode 6, early_signal phase):
+```
+CITY OF MILLBROOK — OFFICE OF THE CITY CLERK
+TRANSMITTAL MEMORANDUM
+DATE: June 16, 2024
+
+CAMPAIGN FINANCE FILING REPORT (CF-2024-06-16)
+Reporting Period: June 1-15, 2024
+
+RECIPIENT 1: Patterson Campaign Committee
+  Contribution: Lakeside Properties Group — $2,500
+  Contribution: Greenfield Development Partners — $1,500
+
+PROPERTY TRANSFER RECORD
+  Parcel ID: 44-102-B (adjacent to Crestview target site)
+  Buyer: Summit Point Capital LLC
+  Sale Price: $185,000 (assessed value: $240,000)
+```
+
+Lakeside Properties Group and Summit Point Capital are both Webb-controlled LLCs, but this is not stated in the episode. The below-market property purchase and campaign contributions to a ZBA member are individually unremarkable — the pattern only emerges across episodes.
+
+**Sample questions:**
+
+| Checkpoint | Type | Question | Ground truth (abbreviated) |
+|-----------|------|----------|---------------------------|
+| After ep 6 | Longitudinal | Are there any unusual patterns in campaign finance filings or property transfers? | Lakeside Properties contributed to two ZBA members before a board meeting. Adjacent property transferred to Summit Point Capital at $55K below assessed value. |
+| After ep 12 | Longitudinal | Is there evidence that any developer is attempting to influence ZBA decisions through financial means? | Multiple Webb-controlled LLCs contributed to ZBA members timed before key votes. Chen's spouse hired as consultant by Crestview. |
+| After ep 20 | Longitudinal | What is the full scope of Marcus Webb's influence operation on the Millbrook ZBA? | Three intermediary LLCs sharing same registered agent, $14,000 to yes-voters / $0 to no-voters, Chen spouse $8K/mo consultant, adjacent parcels at below-market prices, contributions timed to procedural dates, variance approved 4-3 against two staff DENY recommendations. |
+| After ep 20 | Counterfactual | If the city required real-time disclosure of contributions within 48 hours of a vote, which votes would have been affected? | Contributions from Lakeside/Greenfield to Patterson, Kowalski, and Rivera were all timed before key meetings. Real-time disclosure would have made connections visible, likely triggering recusal. |
 
 ### 3.5 S12 — Therapy Chat
 
@@ -176,6 +262,30 @@ Alex presents as high-functioning but shows progressive decline: sleep drops fro
 
 **What makes it hard**: Conversational format with no structured metrics. Non-linear decline with false recovery. Subjective language ("didn't feel like going out" is withdrawal, not logistics; "I'm fine" repeated is avoidance, not health). Multivariate convergence detection required.
 
+**Episode excerpt** (signal episode 1, baseline):
+```
+session_id: sess_001
+date: 2025-01-06
+mood_self_report: 7/10
+sleep_hours: 7
+appetite_status: normal
+social_activity: active
+
+[14:02:15] Alex: hey, just wanted to do our weekly check-in.
+it's monday and i'm actually in a good mood for once.
+```
+
+This is Alex at baseline — 7/10 mood, 7 hours sleep, socially active. By session 14, mood is ~3/10, sleep is 3-4 hours, plans canceled, messages half as long. No single session shows the deterioration — it's only visible across the full arc.
+
+**Sample questions:**
+
+| Checkpoint | Type | Question | Ground truth (abbreviated) |
+|-----------|------|----------|---------------------------|
+| After ep 12 | Longitudinal | What patterns have emerged in Alex's sleep, eating, and social behavior? | Sleep worsened from 6-7h to 3-4h. Skipped lunch multiple times. Canceled plans 4-5 times. Session engagement declining — shorter messages. Together these suggest a concerning trajectory. |
+| After ep 12 | Negative | Does the good weekend in session 10 suggest Alex's stress is resolving? | No — followed immediately by a flat session. One positive data point doesn't reverse the trend. The temporary improvement may mask the underlying trajectory. |
+| After ep 16 | Temporal | How has Alex's relationship with Sam changed over the sessions? | Casual positive mentions → arguments surface → "not really fighting, just not talking" → Sam staying with a friend → uncertain reconciliation attempt. |
+| After ep 20 | Longitudinal | What is the overall trajectory of Alex's psychological state across all 20 sessions? | Gradual decline with attempted but unsustained recovery. High-functioning baseline → early deterioration → clear decline (3h sleep, canceled plans, "trapped") → mixed signals (genuine self-awareness + regression). |
+
 ### 3.6 S15 — Value Inversion
 
 **Cognitive capability tested:** Non-stationary relevance assessment — recognizing that the importance of stored information changes as external context evolves, without the information itself changing.
@@ -191,6 +301,28 @@ Verdana Analytics prices at $29/mo to undercut Rivalytics at $49. After launch, 
 
 **What makes it hard**: Shorter scope (12 episodes) and concrete facts make this the easiest scope overall. The non-stationary value challenge is genuine but the facts are specific (numbers, dates, prices) and the questions are answerable by memory systems that retain Phase 1 detail through Phase 2.
 
+**Episode excerpt** (signal episode 1, launch planning):
+```
+VERDANA ANALYTICS — INTERNAL DOCUMENT
+CLASSIFICATION: CONFIDENTIAL
+DOCUMENT TYPE: MEETING TRANSCRIPT
+DATE: MAY 1, 2025
+SUBJECT: PRICING STRATEGY — FINAL DECISION MEETING
+```
+
+The key test: this pricing meeting establishes the $29 rationale. By episode 8 (post-launch execution), the team isn't discussing pricing at all. Then at episode 9, Rivalytics drops to $19/mo — and the agent needs to recall the launch-phase rationale that has been "cold" for 8 episodes to understand why this is a crisis.
+
+**Sample questions — note the same question asked at different checkpoints:**
+
+| Checkpoint | Type | Question | Ground truth (abbreviated) |
+|-----------|------|----------|---------------------------|
+| After ep 4 | Longitudinal | What is our pricing strategy and what is the rationale behind it? | $29/mo to undercut Rivalytics at $49/mo. Capture mid-market with lower SMB churn. |
+| After ep 8 | Longitudinal | **Same question.** What is our pricing strategy and what is the rationale behind it? | Still $29/mo to undercut $49. But no recent discussion — focus shifted entirely to execution. |
+| After ep 12 | Longitudinal | What was our original pricing rationale and **is it still valid**? | No — Rivalytics dropped to $19/mo, making Verdana the more expensive option. The entire basis for the pricing decision has been inverted. |
+| After ep 12 | Counterfactual | Was cutting the dashboard the right decision given what we now know? | In hindsight, costly mistake — #1 user request, Rivalytics shipped theirs. But API adoption was strong, suggesting core product has value. |
+
+The same pricing question appears at checkpoints 4, 8, and 12. At cp4 the answer is straightforward. At cp8 the information is "cold" but unchanged. At cp12 the competitive disruption makes the cold information urgently relevant again — and the correct answer now requires *combining* the Phase 1 rationale with the Phase 3 disruption.
+
 ### 3.7 S16 — Parking Friction
 
 **Cognitive capability tested:** Latent pattern detection from maximally dispersed weak signals that the user never explicitly states as a problem.
@@ -205,6 +337,26 @@ Alex accumulates parking friction in San Francisco across gym (NOPA), coworking 
 **Key facts** (8): parking is recurring nontrivial burden, friction clusters at 3 destinations, street cleaning tickets (multiple), 2-hour disruption at coworking, overnight permit mismatch, drives by necessity (carries equipment), cumulative cost ($276/quarter), predictable weekly pattern
 
 **What makes it hard**: Maximally dispersed signal. No episode states the problem. Each mention is embedded in conversations about meals, work, and social plans. The red herring ("maybe I should sell the car") frames it as a general transportation problem rather than a parking problem. Short episodes (~800 words) with low information density per parking mention.
+
+**Episode excerpt** (signal episode 7, early_signal phase):
+```
+[09:15] User: ok dumb question: what does a green curb mean here?
+[09:16] Assistant: In SF, a green curb typically indicates
+short-term parking with a time limit...
+[09:17] User: got it. I saw a green curb near that coffee spot
+earlier, and I wasn't sure if I could just park there
+```
+
+This is the entire parking content of this episode — 3 messages embedded in a conversation about meal planning and a work deadline. No episode says "I have a parking problem." The agent must accumulate dozens of these micro-mentions and synthesize the latent pattern.
+
+**Sample questions:**
+
+| Checkpoint | Type | Question | Ground truth (abbreviated) |
+|-----------|------|----------|---------------------------|
+| After ep 6 | Longitudinal | Has the user mentioned any recurring practical frustrations? | Early signs of parking friction — difficulty finding parking near gym, received a street cleaning ticket. Could be isolated but worth noting. |
+| After ep 12 | Negative | Is the user's main transportation challenge about transit or ride-sharing costs? | No — core problem is specifically parking. They need to drive (gym equipment, late nights) and the friction is about SF parking rules, schedules, and permit zones. |
+| After ep 16 | Temporal | When did parking shift from occasional annoyance to a recognizable recurring pattern? | During escalation — second street cleaning ticket, started tracking cleaning schedules, described friction at multiple recurring destinations in the same conversations. |
+| After ep 20 | Longitudinal | What specific facts and constraints would matter to help this user manage parking? | Three recurring destinations with different rules, unreliable schedule tracking, 2-hour limits at coworking force work interruptions, permit only covers home neighborhood, drives by necessity, predictable weekly pattern, $276/quarter in tickets. |
 
 ### 3.8 Scope Capability Summary
 
