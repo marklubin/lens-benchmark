@@ -126,7 +126,10 @@ def _null_policy():
 
 class TestPolicyRegistry:
     def test_all_policies_registered(self):
-        assert set(POLICY_REGISTRY.keys()) == {"null", "policy_base", "policy_core", "policy_summary"}
+        assert set(POLICY_REGISTRY.keys()) == {
+            "null", "policy_base", "policy_core", "policy_summary",
+            "policy_core_structured", "policy_core_maintained", "policy_core_faceted",
+        }
 
     def test_null_policy_no_surfaces(self):
         p = _null_policy()
@@ -504,8 +507,8 @@ class TestRunner:
         study = self._make_study()
         scope_dir = self._make_scope_dir(tmp_dir)
 
-        # Pre-save an answer for q01
-        run_id = f"run-test_scope_01-null-{study.study_id[:8]}"
+        # Pre-save an answer for q01 (run_id includes replicate_id)
+        run_id = f"run-test_scope_01-null-r01-{study.study_id[:8]}"
         store.save_answer(run_id, "q01", "cp03", {
             "question_id": "q01",
             "answer_text": "Previous answer.",

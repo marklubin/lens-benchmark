@@ -78,11 +78,62 @@ def make_summary_policy(version: str) -> PolicyManifest:
     )
 
 
+def make_core_structured_policy(version: str) -> PolicyManifest:
+    """Core structured policy — base search + structured observation log in system prompt."""
+    return PolicyManifest(
+        policy_manifest_id=f"policy_core_structured-{version}",
+        policy_id="policy_core_structured",
+        visible_artifact_families=["episodes", "chunks", "core_structured"],
+        query_surfaces=["keyword", "semantic"],
+        fusion=FusionConfig(method="rrf", parameters={"k": 60}),
+        retrieval_caps=RetrievalCaps(
+            max_results=_DEFAULT_MAX_RESULTS,
+            max_context_tokens=_DEFAULT_MAX_CONTEXT_TOKENS,
+        ),
+        version=version,
+    )
+
+
+def make_core_maintained_policy(version: str) -> PolicyManifest:
+    """Core maintained policy — base search + refined core memory in system prompt."""
+    return PolicyManifest(
+        policy_manifest_id=f"policy_core_maintained-{version}",
+        policy_id="policy_core_maintained",
+        visible_artifact_families=["episodes", "chunks", "core_maintained"],
+        query_surfaces=["keyword", "semantic"],
+        fusion=FusionConfig(method="rrf", parameters={"k": 60}),
+        retrieval_caps=RetrievalCaps(
+            max_results=_DEFAULT_MAX_RESULTS,
+            max_context_tokens=_DEFAULT_MAX_CONTEXT_TOKENS,
+        ),
+        version=version,
+    )
+
+
+def make_core_faceted_policy(version: str) -> PolicyManifest:
+    """Core faceted policy — base search + merged faceted memory in system prompt."""
+    return PolicyManifest(
+        policy_manifest_id=f"policy_core_faceted-{version}",
+        policy_id="policy_core_faceted",
+        visible_artifact_families=["episodes", "chunks", "core_faceted"],
+        query_surfaces=["keyword", "semantic"],
+        fusion=FusionConfig(method="rrf", parameters={"k": 60}),
+        retrieval_caps=RetrievalCaps(
+            max_results=_DEFAULT_MAX_RESULTS,
+            max_context_tokens=_DEFAULT_MAX_CONTEXT_TOKENS,
+        ),
+        version=version,
+    )
+
+
 POLICY_REGISTRY: dict[str, type] = {
     "null": make_null_policy,
     "policy_base": make_base_policy,
     "policy_core": make_core_policy,
     "policy_summary": make_summary_policy,
+    "policy_core_structured": make_core_structured_policy,
+    "policy_core_maintained": make_core_maintained_policy,
+    "policy_core_faceted": make_core_faceted_policy,
 }
 
 

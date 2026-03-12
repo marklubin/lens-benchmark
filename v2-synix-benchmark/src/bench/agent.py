@@ -106,6 +106,7 @@ class AgentHarness:
         max_turns: int = DEFAULT_MAX_TURNS,
         max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = 0.0,
     ) -> None:
         self._broker = broker
         self._runtime = runtime
@@ -113,6 +114,7 @@ class AgentHarness:
         self._max_turns = max_turns
         self._max_tool_calls = max_tool_calls
         self._max_tokens = max_tokens
+        self._temperature = temperature
 
     def answer(self, question_prompt: str, question_id: str = "") -> AgentAnswer:
         """Run the agent to answer a single question.
@@ -151,6 +153,7 @@ class AgentHarness:
                 "model": self._model,
                 "messages": messages,
                 "max_tokens": self._max_tokens,
+                "temperature": self._temperature,
             }
             if tools:
                 kwargs["tools"] = tools

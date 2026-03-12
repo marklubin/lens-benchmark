@@ -121,21 +121,24 @@ class BenchmarkRuntime:
         """
         families = self._policy.visible_artifact_families
 
-        if "core_memory" in families:
-            try:
-                art = self._release.artifact("core-memory")
-                return _strip_think(art.content)
-            except Exception:
-                logger.warning("core-memory artifact not found in release")
-                return None
+        # Check for derived artifacts in priority order
+        # (a policy should only have one of these, but check all)
+        artifact_map = {
+            "core_memory": "core-memory",
+            "core_structured": "core-structured",
+            "core_maintained": "core-maintained",
+            "core_faceted": "core-faceted",
+            "summary": "summary",
+        }
 
-        if "summary" in families:
-            try:
-                art = self._release.artifact("summary")
-                return _strip_think(art.content)
-            except Exception:
-                logger.warning("summary artifact not found in release")
-                return None
+        for family_key, artifact_label in artifact_map.items():
+            if family_key in families:
+                try:
+                    art = self._release.artifact(artifact_label)
+                    return _strip_think(art.content)
+                except Exception:
+                    logger.warning("%s artifact not found in release", artifact_label)
+                    return None
 
         return None
 

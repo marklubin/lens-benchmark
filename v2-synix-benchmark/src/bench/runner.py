@@ -57,6 +57,8 @@ class StudyRunner:
         families: list[str] | None = None,
         max_turns: int = 10,
         max_tool_calls: int = 20,
+        temperature: float = 0.0,
+        replicate_id: str = "r01",
     ) -> None:
         self._study = study
         self._store = store
@@ -66,6 +68,8 @@ class StudyRunner:
         self._families = families or ["chunks", "core_memory", "summary"]
         self._max_turns = max_turns
         self._max_tool_calls = max_tool_calls
+        self._temperature = temperature
+        self._replicate_id = replicate_id
         self._event_writer = EventWriter(store, study.study_id)
         self._bank_builder = BankBuilder(store, broker, work_dir / "banks")
 
@@ -125,7 +129,7 @@ class StudyRunner:
         self._store.save_policy(policy)
 
         config = _config_hash(policy_id, scope.scope_id, self._study.study_id)
-        run_id = f"run-{scope.scope_id}-{policy_id}-{self._study.study_id[:8]}"
+        run_id = f"run-{scope.scope_id}-{policy_id}-{self._replicate_id}-{self._study.study_id[:8]}"
 
         # Check for existing run (resume)
         existing = self._store.get_run(run_id)
@@ -138,7 +142,7 @@ class StudyRunner:
             study_id=self._study.study_id,
             scope_id=scope.scope_id,
             policy_id=policy_id,
-            replicate_id="r01",
+            replicate_id=self._replicate_id,
             policy_manifest_id=policy.policy_manifest_id,
             bank_manifest_ids=bank_ids,
             config_hash=config,
@@ -184,6 +188,7 @@ class StudyRunner:
                 model=self._study.agent_model,
                 max_turns=self._max_turns,
                 max_tool_calls=self._max_tool_calls,
+                temperature=self._temperature,
             )
 
             questions = scope.questions_at(checkpoint)

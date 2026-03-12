@@ -86,6 +86,24 @@ def _make_pipeline(
 
         add_core_memory(pipeline, depends_on=episodes)
 
+    # Optional: core structured via FoldSynthesis (structured observation prompt)
+    if "core_structured" in families:
+        from bench.families.core_structured import add_core_structured
+
+        add_core_structured(pipeline, depends_on=episodes)
+
+    # Optional: core maintained via FoldSynthesis + MapSynthesis refinement
+    if "core_maintained" in families:
+        from bench.families.core_maintained import add_core_maintained
+
+        add_core_maintained(pipeline, depends_on=episodes)
+
+    # Optional: core faceted via 4 parallel FoldSynthesis + ReduceSynthesis merge
+    if "core_faceted" in families:
+        from bench.families.core_faceted import add_core_faceted
+
+        add_core_faceted(pipeline, depends_on=episodes)
+
     # Optional: summary via GroupSynthesis + ReduceSynthesis
     if "summary" in families:
         from bench.families.summary import add_summary
