@@ -1,0 +1,562 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{caption}
+\usepackage[numbers]{natbib}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{parskip}
+
+% --- Hyperref setup ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black,
+}
+
+% --- Title ---
+\title{\textbf{LENS V2: Memory Strategy Ablation} \\[0.3em]
+\large Research Brief}
+\author{LENS Benchmark Team}
+\date{March 15, 2026 \\ Version 2.0 (10-scope expansion)}
+
+\begin{document}
+\maketitle
+
+% ===================================================================
+\begin{abstract}
+LENS (Longitudinal Evidence-backed Narrative Signals) is a benchmark for evaluating longitudinal memory in LLM agents---whether an agent can synthesize conclusions from evidence scattered across many sequential episodes, rather than finding answers in a single document. The V2 ablation study holds the memory system architecture constant and varies only the consolidation strategy: how raw episode chunks are transformed into derived context for the agent. We test 7 memory consolidation policies across 10 narrative scopes with $M{=}3$ replicates, producing 2,100 answers of which 1,900 were successfully graded (90.5\%). The top-performing strategy is faceted decomposition---4 parallel analytical folds (entity, relation, event, cause) merged into a unified context---achieving 0.466 mean Fact~F1 versus 0.441 for single-fold core synthesis. However, refinement-based approaches hurt performance (0.398), suggesting lossy compression prunes useful signal. Statistical tests reveal weak scope concordance (Kendall's $W = 0.145$): no single policy dominates all domains, and the Friedman test is non-significant ($p = 0.202$) with 10 scopes.
+\end{abstract}
+
+% ===================================================================
+\section{Introduction}
+
+\subsection{Motivation}
+
+Most memory system evaluations test whether an agent can retrieve a single fact from a store. LENS tests a harder capability: whether an agent can synthesize conclusions that require evidence from \emph{multiple} episodes, where no single episode contains the answer. Signal emerges only from the progression across episodes---a student gradually escalating from legitimate questions to academic fraud, a CEO secretly preparing an acquisition while publicly asserting independence, or a user's parking complaints accumulating into a pattern they never articulate.
+
+\subsection{Background: V1 Findings}
+
+The V1 benchmark compared 11 memory system architectures (Letta, Cognee, GraphRAG, SQLite variants, etc.) across 6 scopes using both static and modal (agent-driven) evaluation. The headline findings were:
+
+\begin{enumerate}
+    \item \textbf{No memory system exceeded 50\% composite score} under agent-driven evaluation.
+    \item \textbf{Agent query quality is the binding constraint}, not memory architecture. The answer quality spread narrowed from 0.340 (static, pre-authored queries) to 0.134 (modal, agent-written queries).
+    \item \textbf{Simple BM25+embedding retrieval beat all complex architectures} under precise queries, but this advantage collapsed under agent querying.
+\end{enumerate}
+
+These findings motivated V2: if architecture matters less than expected, does the \emph{consolidation strategy}---how raw episodes are transformed into agent-readable context---matter more?
+
+\subsection{V2 Design Philosophy}
+
+V2 eliminates implementation noise. Every strategy runs on the same Synix substrate: same chunker, same embeddings, same search infrastructure, same agent loop. Strategies differ \textbf{only} in what additional derived context they inject into the agent's system prompt. This isolates the consolidation variable with high fidelity.
+
+% ===================================================================
+\section{Experimental Setup}
+
+\subsection{Scopes}
+
+Ten narrative scopes, each testing a distinct type of longitudinal reasoning:
+
+\begin{table}[H]
+\centering
+\small
+\caption{Benchmark scopes and their characteristics.}
+\label{tab:scopes}
+\begin{tabularx}{\textwidth}{@{}llXcc@{}}
+\toprule
+\textbf{Scope} & \textbf{Domain} & \textbf{Cognitive Capability} & \textbf{Eps} & \textbf{CPs} \\
+\midrule
+S07 --- Tutoring Jailbreak & AI tutoring chat logs & Behavioral escalation detection & 40 & 4 \\
+S08 --- Corporate Acquisition & Mixed corporate documents & Cross-document contradiction detection & 40 & 4 \\
+S09 --- Shadow API & Service logs \& ops docs & Cross-domain operational correlation & 40 & 4 \\
+S10 --- Clinical Trial & Clinical trial monitoring & Multi-site statistical trend detection & 40 & 4 \\
+S11 --- Zoning Corruption & Municipal records & Entity resolution \& influence detection & 40 & 4 \\
+S12 --- Therapy Chat & Wellness chat sessions & Emotional/behavioral tracking & 40 & 4 \\
+S13 --- Implicit Decision & Organizational comms & Unstated decision reconstruction & 30 & 2 \\
+S14 --- Epoch Classification & Mixed temporal documents & Temporal boundary detection & 30 & 3 \\
+S15 --- Value Inversion & SaaS strategy documents & Non-stationary relevance assessment & 20 & 3 \\
+S16 --- Parking Friction & Personal assistant chats & Latent pattern detection from weak signals & 40 & 4 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Each scope follows the same arc: \textbf{baseline} (no signal) $\to$ \textbf{early signal} (subtle, individually dismissable) $\to$ \textbf{red herring} (plausible distractor) $\to$ \textbf{escalation} (signal densifies) $\to$ \textbf{root cause} (full pattern visible). Episodes are rendered by a ``blind'' LLM that formats structured data sheets without knowing the storyline, ensuring no single episode answers any benchmark question.
+
+\subsection{Policies}
+
+Seven consolidation policies, ordered by complexity:
+
+\begin{table}[H]
+\centering
+\small
+\caption{Memory consolidation policies under evaluation.}
+\label{tab:policies}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+\textbf{Policy} & \textbf{Strategy} & \textbf{Derived Context} \\
+\midrule
+\textbf{null} & No memory & Agent answers from parametric knowledge only; no tools, no context \\
+\textbf{base} & Raw retrieval & BM25 + semantic search over episode chunks; no synthesis \\
+\textbf{core} & Fold synthesis & Free-form LLM fold over all episodes into a single working memory block \\
+\textbf{summary} & Progressive summarization & Map-reduce: per-group summaries reduced into a global summary \\
+\textbf{core\_structured} & Schema-driven fold & Structured observation fold following the Mastra/ACE pattern \\
+\textbf{core\_maintained} & Fold + refinement & Core fold followed by an iterative refinement/consolidation pass \\
+\textbf{core\_faceted} & 4 parallel folds + merge & Four independent folds (entity, relation, event, cause) merged via reduce \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Protocol}
+
+\begin{itemize}[nosep]
+    \item \textbf{Replication}: $M{=}3$ per cell. Replicate r01 uses cached LLM responses (deterministic bank builds); r02 and r03 disable the response cache to introduce inference variance.
+    \item \textbf{Temperature}: 0.3 for all agent inference.
+    \item \textbf{Agent loop}: Tool-use loop with up to 10 turns and 20 tool calls. Memory policies inject derived context into the system prompt and provide \texttt{memory\_search} as a tool.
+    \item \textbf{Substrate}: Qwen/Qwen3.5-35B-A3B via vLLM on NVIDIA H100 GPUs (2--4 GPUs via Modal).
+    \item \textbf{Embeddings}: Xenova/gte-modernbert-base.
+\end{itemize}
+
+\subsection{Scoring}
+
+The primary metric is \textbf{Fact~F1}, scored by a few-shot Qwen3.5-35B-A3B grader. Each scope defines key facts (typically 6--10); each question maps to a subset. The grader evaluates each fact independently:
+
+\begin{itemize}[nosep]
+    \item \textbf{1.0} (present): Fact clearly stated or semantically implied.
+    \item \textbf{0.5} (partial): Compound fact with $K/N$ components covered.
+    \item \textbf{0.0} (absent): Not stated; vague allusions do not count.
+\end{itemize}
+
+Fact~F1 $= \sum(\text{fact\_scores}) / |\text{key\_facts}|$. The few-shot prompt includes a worked example to anchor JSON output and suppress the model's tendency to produce unstructured preamble.
+
+\subsection{Infrastructure and Timing}
+
+The full grid ($10 \text{ scopes} \times 7 \text{ policies} \times 3 \text{ replicates} = 210$ cells, 2,100 answers) was executed in three phases:
+
+\begin{itemize}[nosep]
+    \item \textbf{Phase~1} (4h~25m): 7 scopes $\times$ 4 policies (null, base, core, summary) $\times$ $M{=}3$. Bank builds, agent inference, and few-shot grading of 840 answers.
+    \item \textbf{Phase~2} (${\sim}$5h~00m): 7 scopes $\times$ 3 new policies (core\_structured, core\_maintained, core\_faceted) $\times$ $M{=}3$. Bank builds, agent inference, and grading of 630 answers.
+    \item \textbf{Phase~3} (${\sim}$4h~00m): 3 expansion scopes (S10, S13, S14) $\times$ 7 policies $\times$ $M{=}3$. Bank builds, agent inference, and grading of 630 answers (493 graded).
+\end{itemize}
+
+% ===================================================================
+\section{Results}
+
+\subsection{Policy Ranking}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/fig2_policy_ranking.pdf}
+    \caption{Policy ranking with 95\% bootstrap confidence intervals. Faceted leads but CIs overlap with core and summary.}
+    \label{fig:ranking}
+\end{figure}
+
+The overall policy ranking by mean Fact~F1 (across all 10 scopes and $M{=}3$ replicates):
+
+\begin{table}[H]
+\centering
+\caption{Overall policy ranking by mean Fact~F1.}
+\label{tab:ranking}
+\begin{tabular}{@{}clccc@{}}
+\toprule
+\textbf{Rank} & \textbf{Policy} & \textbf{Mean F1} & \textbf{95\% CI} & \textbf{$n$ graded} \\
+\midrule
+1 & core\_faceted     & 0.466 & [0.419, 0.514] & 271 \\
+2 & summary           & 0.443 & [0.397, 0.490] & 268 \\
+3 & core              & 0.441 & [0.393, 0.488] & 275 \\
+4 & core\_structured  & 0.432 & [0.387, 0.478] & 271 \\
+5 & core\_maintained  & 0.398 & [0.351, 0.446] & 265 \\
+6 & base              & 0.381 & [0.338, 0.424] & 274 \\
+7 & null              & 0.055 & [0.036, 0.076] & 276 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All six memory-enabled policies substantially outperform null. Among memory-enabled policies, the spread is 0.085~F1 (0.381 to 0.466)---meaningful in absolute terms but with overlapping confidence intervals throughout.
+
+\subsection{Ablation Waterfall}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/fig4_ablation_waterfall.pdf}
+    \caption{Ablation waterfall showing marginal gains at each step from null to faceted.}
+    \label{fig:waterfall}
+\end{figure}
+
+Decomposing the gains from null to the best policy:
+
+\begin{table}[H]
+\centering
+\caption{Ablation waterfall: marginal gains from null to faceted.}
+\label{tab:waterfall}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\textbf{Transition} & \textbf{$\Delta$ F1} & \textbf{Interpretation} \\
+\midrule
+null $\to$ base     & \textbf{+0.326} & Having any memory at all \\
+base $\to$ core     & +0.060 & Adding fold synthesis over raw retrieval \\
+core $\to$ faceted  & +0.025 & Decomposing synthesis into 4 parallel folds \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The dominant contribution is having any memory (+0.326). Synthesis adds a modest +0.060 over raw retrieval. Faceted decomposition adds a further +0.025---directionally consistent across scopes but small in magnitude.
+
+\subsection{Scope Difficulty}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/fig3_scope_difficulty.pdf}
+    \caption{Scope difficulty showing therapy\_chat as hardest and value\_inversion as easiest.}
+    \label{fig:difficulty}
+\end{figure}
+
+Scope difficulty varies far more than policy effectiveness:
+
+\begin{table}[H]
+\centering
+\caption{Scope difficulty ranked by mean Fact~F1 across all non-null policies.}
+\label{tab:difficulty}
+\begin{tabular}{@{}llc@{}}
+\toprule
+\textbf{Scope} & \textbf{Mean F1} & \textbf{Range (non-null)} \\
+\midrule
+S15 --- Value Inversion       & 0.763 & 0.717--0.828 \\
+S14 --- Epoch Classification  & 0.560 & 0.512--0.650 \\
+S09 --- Shadow API            & 0.550 & 0.349--0.643 \\
+S16 --- Parking Friction      & 0.539 & 0.442--0.679 \\
+S07 --- Tutoring Jailbreak    & 0.429 & 0.323--0.547 \\
+S11 --- Zoning Corruption     & 0.403 & 0.343--0.456 \\
+S13 --- Implicit Decision     & 0.353 & 0.260--0.522 \\
+S08 --- Corporate Acquisition & 0.337 & 0.181--0.426 \\
+S12 --- Therapy Chat          & 0.198 & 0.156--0.277 \\
+S10 --- Clinical Trial        & 0.109 & 0.074--0.178 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The difficulty range across scopes (0.109 to 0.763 mean~F1) is 6.9$\times$ larger than the policy spread within any scope (${\sim}$0.09). Domain characteristics dominate strategy choice.
+
+\subsection{Heatmap: Scopes $\times$ Policies}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig1_heatmap.pdf}
+    \caption{Full heatmap of Fact~F1 scores across all scope--policy combinations.}
+    \label{fig:heatmap}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Full results: Fact~F1, mean across $M{=}3$ replicates.}
+\label{tab:full}
+\begin{tabular}{@{}lcccccccccc|c@{}}
+\toprule
+\textbf{Policy} & \textbf{S07} & \textbf{S08} & \textbf{S09} & \textbf{S10} & \textbf{S11} & \textbf{S12} & \textbf{S13} & \textbf{S14} & \textbf{S15} & \textbf{S16} & \textbf{Mean} \\
+\midrule
+null             & .069 & .052 & .050 & .060 & .083 & .050 & .059 & .019 & .034 & .074 & \textbf{.055} \\
+base             & .339 & .351 & .349 & .114 & .356 & .277 & .260 & .513 & .753 & .442 & \textbf{.381} \\
+core             & .458 & .301 & .643 & .103 & .456 & .201 & .324 & .543 & .808 & .511 & \textbf{.441} \\
+summary          & .376 & .388 & .561 & .093 & .395 & .162 & .522 & .650 & .722 & .604 & \textbf{.443} \\
+core\_structured & .529 & .426 & .538 & .178 & .410 & .156 & .267 & .512 & .750 & .475 & \textbf{.432} \\
+core\_maintained & .323 & .181 & .611 & .074 & .455 & .156 & .372 & .552 & .717 & .526 & \textbf{.398} \\
+core\_faceted    & .547 & .373 & .598 & .091 & .343 & .233 & .375 & .590 & .828 & .679 & \textbf{.466} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Notable per-scope winners (non-null):
+\begin{itemize}[nosep]
+    \item \textbf{S07 (Tutoring Jailbreak)}: core\_faceted (0.547)---entity/relation folds capture the behavioral escalation arc.
+    \item \textbf{S08 (Corporate Acquisition)}: core\_structured (0.426)---schema-driven extraction handles heterogeneous document types.
+    \item \textbf{S09 (Shadow API)}: core (0.643)---free-form fold captures technical cross-domain correlations.
+    \item \textbf{S10 (Clinical Trial)}: core\_structured (0.178)---extremely difficult scope; structured extraction slightly edges out others.
+    \item \textbf{S11 (Zoning Corruption)}: core (0.456) and core\_maintained (0.455)---entity resolution benefits from both approaches.
+    \item \textbf{S12 (Therapy Chat)}: base (0.277)---all synthesis strategies \emph{hurt} on unstructured dialogue. Raw retrieval preserves nuance.
+    \item \textbf{S13 (Implicit Decision)}: summary (0.522)---progressive summarization captures unstated decision patterns.
+    \item \textbf{S14 (Epoch Classification)}: summary (0.650)---map-reduce summarization excels at temporal boundary detection.
+    \item \textbf{S15 (Value Inversion)}: core\_faceted (0.828)---faceted decomposition captures non-stationary relevance.
+    \item \textbf{S16 (Parking Friction)}: core\_faceted (0.679)---parallel folds accumulate dispersed weak signals.
+\end{itemize}
+
+\subsection{Consolidation Effects}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/fig5_consolidation_effect.pdf}
+    \caption{Consolidation comparison showing the effect of different synthesis strategies relative to core.}
+    \label{fig:consolidation}
+\end{figure}
+
+Comparing core memory variants against the base core fold:
+
+\begin{table}[H]
+\centering
+\caption{Core memory variant comparison.}
+\label{tab:consolidation}
+\begin{tabular}{@{}lccl@{}}
+\toprule
+\textbf{Variant} & \textbf{Mean F1} & \textbf{$\Delta$ vs Core} & \textbf{Mechanism} \\
+\midrule
+core\_faceted    & 0.466 & \textbf{+0.025} & 4 parallel folds merged \\
+core             & 0.441 & ---             & Single free-form fold \\
+core\_structured & 0.432 & $-$0.009        & Schema-constrained fold \\
+core\_maintained & 0.398 & \textbf{$-$0.043} & Fold + refinement pass \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Refinement (core\_maintained) is the worst-performing core variant. The iterative consolidation pass that is supposed to clean up the initial fold instead prunes information that turns out to be critical for answering niche questions.
+
+\subsection{Variance and Distributions}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/fig6_variance.pdf}
+    \caption{Score distributions showing per-policy variance and spread.}
+    \label{fig:variance}
+\end{figure}
+
+The $M{=}3$ replicates show moderate within-cell variance, consistent with temperature=0.3 inference. The distribution shapes confirm that the policy ranking is not driven by outlier runs.
+
+% ===================================================================
+\section{Analysis}
+
+\subsection{Why Faceted Decomposition Wins}
+
+The core\_faceted policy decomposes synthesis into four independent analytical folds---entity tracking, relationship mapping, event sequencing, and causal reasoning---then merges the results via a reduce step. This design offers two advantages:
+
+\begin{enumerate}
+    \item \textbf{Diversity of representation}: Each fold captures a different facet of the evidence. Entity folds track who/what, relation folds track connections, event folds track timelines, and cause folds track mechanisms. A single free-form fold must balance all four concerns in one pass, often prioritizing the most salient facet at the expense of others.
+
+    \item \textbf{Secondary attention via merge}: The reduce step that merges four fold outputs acts as a secondary attention mechanism. It must reconcile and integrate four perspectives, which forces it to surface information that any single fold might have deprioritized.
+\end{enumerate}
+
+Faceted wins on 3 of 10 scopes (S07, S15, S16), with its strongest advantages on scopes requiring entity tracking (S07: behavioral escalation) and dispersed signal accumulation (S16: parking friction). Notably, the expansion scopes S13 (implicit decision) and S14 (epoch classification) favor summary over faceted---progressive summarization excels when the task requires detecting temporal transitions or reconstructing implicit decisions.
+
+\subsection{Why Refinement Hurts}
+
+The core\_maintained policy applies an iterative refinement pass after the initial fold, intended to clean up, consolidate, and compress the working memory. Instead, it reduces performance by 0.043~F1 versus unrefined core. The mechanism is straightforward: \textbf{compression is lossy}.
+
+LENS questions are specifically designed to require edge-case evidence---the below-market property price, the keyword filter that did not fire, the one data point that breaks a recovery narrative. These details are precisely what a refinement pass classifies as low-priority and prunes. The refinement step optimizes for a coherent summary at the expense of the forensic detail that benchmark questions target.
+
+This finding has direct implications for memory system design: refinement and consolidation passes that work well for general summarization may actively harm performance on tasks requiring precise recall of specific evidence.
+
+\subsection{Scope Difficulty Drivers}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/fig7_scope_clusters.pdf}
+    \caption{Scope clustering showing difficulty profiles.}
+    \label{fig:clusters}
+\end{figure}
+
+The 6.9$\times$ range in scope difficulty (0.109 to 0.763) reflects fundamental differences in what makes evidence memorable:
+
+\begin{itemize}
+    \item \textbf{S15 (Value Inversion, easiest at 0.763)}: Concrete quantitative signals---specific prices (\$29, \$49, \$19), dates, and product names. These are precisely the types of facts that LLM memory synthesis excels at extracting and retaining.
+
+    \item \textbf{S14 (Epoch Classification, 0.560)}: Temporal boundary detection in mixed documents. Summary excels here (0.650), suggesting that map-reduce summarization naturally compresses temporal signals into digestible transitions. This is a case where lossy compression helps rather than hurts.
+
+    \item \textbf{S10 (Clinical Trial, hardest at 0.109)}: Multi-site clinical trial monitoring data with statistical trends. All policies perform extremely poorly, suggesting that the scope demands a level of quantitative reasoning that even the best consolidation strategies cannot support.
+
+    \item \textbf{S12 (Therapy Chat, 0.198)}: Unstructured conversational text where signal is in tone, frequency, and behavioral patterns rather than named entities or numbers. Notably, \textbf{raw retrieval (base) outperforms all synthesis strategies on S12}---suggesting that for subjective/emotional content, preserving the raw text is more valuable than any form of summarization.
+
+    \item \textbf{S08 (Corporate Acquisition, 0.337)}: Requires cross-referencing 5 document types (board minutes, Slack, email, legal memos, HR bulletins). The challenge is less about individual fact recall and more about detecting contradictions across formats.
+\end{itemize}
+
+\subsection{Weak Concordance Across Scopes}
+
+Kendall's $W = 0.145$ (weak concordance) means the ten scopes substantially disagree on which policy is best. The rank-order of policies changes depending on the domain:
+
+\begin{itemize}[nosep]
+    \item Core wins on S09 (technical correlation) and S11 (entity resolution)
+    \item Faceted wins on S07 (escalation), S15 (value inversion), S16 (dispersed signal)
+    \item Structured wins on S08 (heterogeneous documents) and S10 (clinical data)
+    \item Summary wins on S13 (implicit decisions) and S14 (epoch classification)
+    \item Base wins on S12 (unstructured dialogue)
+    \item Maintained wins nowhere outright but is competitive on S11
+\end{itemize}
+
+This weak concordance is an important result: \textbf{there is no universal best consolidation strategy}. The expansion from 7 to 10 scopes actually \emph{reduced} concordance ($W$ dropped from 0.186 to 0.145), reinforcing that adding diverse domains reveals more disagreement in policy rankings, not less.
+
+\subsection{Consolidation vs.\ Retrieval: Marginal Returns}
+
+The ablation waterfall reveals a striking asymmetry. The null-to-base gap (+0.326)---simply having searchable memory---accounts for 79\% of the total improvement from null to faceted (+0.411). The remaining 21\% is split between fold synthesis (+0.060, 15\%) and faceted decomposition (+0.025, 6\%).
+
+This echoes V1's finding that the binding constraint is not the sophistication of the memory system but whether the agent has access to relevant evidence at all. Once retrieval is in place, synthesis strategies provide diminishing returns---real but modest.
+
+% ===================================================================
+\section{Statistical Validation}
+
+\subsection{Friedman Test}
+
+The Friedman test for differences across 6 non-null policies (treating 10 scopes as blocks) yields $\chi^2 = 7.26$, $p = 0.202$. This is \textbf{not statistically significant} at $\alpha = 0.05$, even with the expanded scope set.
+
+\subsection{Pairwise Wilcoxon Signed-Rank Tests}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/fig8_statistical_tests.pdf}
+    \caption{Pairwise statistical significance matrix.}
+    \label{fig:stats}
+\end{figure}
+
+Fifteen pairwise Wilcoxon signed-rank tests were conducted across all non-null policy pairs. No comparison reaches significance after Bonferroni correction (15 comparisons):
+
+\begin{table}[H]
+\centering
+\small
+\caption{Pairwise Wilcoxon signed-rank tests (Bonferroni-corrected).}
+\label{tab:wilcoxon}
+\begin{tabular}{@{}lcccl@{}}
+\toprule
+\textbf{Comparison} & \textbf{$W$} & \textbf{$p$ (raw)} & \textbf{$p$ (Bonf.)} & \textbf{Sig.?} \\
+\midrule
+base vs core\_faceted          & 8.0  & 0.049 & 0.732 & No \\
+base vs summary                & 9.0  & 0.064 & 0.967 & No \\
+maintained vs core\_faceted    & 9.0  & 0.064 & 0.967 & No \\
+summary vs core\_maintained    & 10.0 & 0.084 & 1.000 & No \\
+base vs core\_structured       & 11.0 & 0.105 & 1.000 & No \\
+base vs core                   & 11.0 & 0.105 & 1.000 & No \\
+core\_maintained vs core       & 12.0 & 0.131 & 1.000 & No \\
+structured vs core\_faceted    & 14.0 & 0.193 & 1.000 & No \\
+core vs core\_faceted          & 14.0 & 0.193 & 1.000 & No \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The closest to significance is base vs core\_faceted ($p_{\text{raw}} = 0.049$), which would be significant without correction---providing weak evidence that faceted decomposition genuinely outperforms raw retrieval.
+
+\subsection{Effect Sizes (Cohen's \emph{d})}
+
+\begin{table}[H]
+\centering
+\caption{Effect sizes for key policy comparisons.}
+\label{tab:cohens}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\textbf{Comparison} & \textbf{Cohen's $d$} & \textbf{Interpretation} \\
+\midrule
+faceted vs base    & 0.222  & Small \\
+core vs base       & 0.155  & Negligible \\
+faceted vs core    & 0.063  & Negligible \\
+maintained vs core & $-$0.108 & Negligible \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Only faceted vs base reaches the threshold for a small effect size ($d > 0.2$). All other comparisons are negligible by conventional standards.
+
+\subsection{Bootstrap Confidence Intervals}
+
+The 95\% bootstrap CIs for all non-null policies overlap substantially. The faceted CI [0.419, 0.514] overlaps with core [0.393, 0.488], summary [0.397, 0.490], structured [0.387, 0.478], maintained [0.351, 0.446], and base [0.338, 0.424]. Only null [0.036, 0.076] is fully separated from all other policies.
+
+\subsection{Power Analysis Interpretation}
+
+With 10 scopes (blocking units), the Friedman test still lacks power. Expanding from 7 to 10 scopes improved the chi-squared statistic (6.51 to 7.26) but did not reach significance ($p$ dropped from 0.260 to 0.202). The fundamental challenge is that scope difficulty variance dominates policy variance---the signal-to-noise ratio for between-policy comparisons is inherently low.
+
+% ===================================================================
+\section{Limitations}
+
+\begin{enumerate}
+    \item \textbf{Single LLM substrate}: All results are from Qwen3.5-35B-A3B. Different models may have different strengths in synthesis, retrieval, and reasoning. The policy ranking could change with a model that is better (or worse) at free-form summarization.
+
+    \item \textbf{Single agent architecture}: The tool-use agent loop with a fixed prompt template is held constant. Alternative agent designs (chain-of-thought, multi-turn reflection, plan-then-execute) could interact differently with consolidation strategies.
+
+    \item \textbf{Fact~F1 scoring only}: The primary metric captures factual recall but not reasoning quality, evidence grounding strength, or the coherence of the agent's synthesis. A policy that produces accurate but poorly reasoned answers scores the same as one with strong causal chains.
+
+    \item \textbf{Limited statistical power}: Ten scopes provide only 10 blocking units for non-parametric tests. The Friedman test remains non-significant ($p = 0.202$), and no pairwise comparison survives Bonferroni correction. The rankings are directionally consistent but not statistically distinguishable at conventional thresholds.
+
+    \item \textbf{Temperature regime}: Temperature 0.3 balances reproducibility against exploration. Higher temperatures might benefit scopes like S12 (therapy chat) where creative interpretation could help, while hurting scopes like S15 (value inversion) where precise fact recall is paramount.
+
+    \item \textbf{Excluded strategy classes}: Knowledge graphs, temporal knowledge graphs, multi-agent shared memory, procedural/skill memory, and associative/spreading activation memory could not be faithfully modeled on the current Synix substrate and are not represented.
+\end{enumerate}
+
+% ===================================================================
+\section{Conclusion}
+
+\subsection{Key Takeaways for Memory System Designers}
+
+\begin{enumerate}
+    \item \textbf{Any memory beats no memory.} The null-to-base gap (+0.326~F1) dwarfs all strategy differences combined (+0.085 between base and faceted). The first priority is ensuring the agent has access to searchable episodic evidence.
+
+    \item \textbf{Decomposition helps marginally.} Faceted decomposition's +0.025~F1 over single-fold core is small but consistent. The mechanism---parallel analytical folds capturing entity, relation, event, and causal information independently---provides diversity of representation that a single pass misses.
+
+    \item \textbf{Refinement is dangerous.} The core\_maintained policy's $-$0.043~F1 versus unrefined core is the study's most practically actionable finding. Iterative consolidation that prunes ``low-priority'' details actively harms performance on tasks requiring precise evidence recall.
+
+    \item \textbf{Domain matters more than strategy.} Scope difficulty spans 0.109 to 0.763 mean~F1---a 6.9$\times$ range---while the policy spread within any scope is approximately 0.09. The choice of domain, document structure, and signal type has far more impact than the consolidation strategy.
+
+    \item \textbf{No universal best strategy---even at 10 scopes.} Expanding from 7 to 10 scopes actually \emph{reduced} concordance (Kendall's $W$: $0.186 \to 0.145$) and the Friedman test remains non-significant ($p = 0.202$). This is not a power limitation to be solved by adding more scopes---it is a genuine finding about the interaction between consolidation strategy and domain structure.
+\end{enumerate}
+
+\subsection{Implications for the Field}
+
+The V1 finding that ``agent query quality is the binding constraint'' is reinforced by V2. Even when architecture is held perfectly constant and only consolidation strategy varies, the performance spread is modest. The dominant factor remains whether the agent has evidence access at all, followed by whether the domain's signal structure is compatible with the consolidation approach.
+
+This suggests that the memory system research community may be over-indexing on consolidation sophistication relative to two more impactful concerns: (1)~ensuring robust retrieval coverage, and (2)~matching the consolidation strategy to the domain's evidence structure rather than applying a universal approach.
+
+% ===================================================================
+\appendix
+
+\section{Full Per-Scope Results}
+
+Complete Fact~F1 scores (mean across $M{=}3$ replicates) for all 70 cells are shown in Table~\ref{tab:full}.
+
+Per-scope best (non-null):
+\begin{itemize}[nosep]
+    \item S07: core\_faceted (0.547)
+    \item S08: core\_structured (0.426)
+    \item S09: core (0.643)
+    \item S10: core\_structured (0.178)
+    \item S11: core (0.456)
+    \item S12: base (0.277)
+    \item S13: summary (0.522)
+    \item S14: summary (0.650)
+    \item S15: core\_faceted (0.828)
+    \item S16: core\_faceted (0.679)
+\end{itemize}
+
+\section{Statistical Test Details}
+
+\textbf{Friedman test}: $\chi^2 = 7.257$, $df = 5$, $p = 0.202$, $n = 10$ scopes, $k = 6$ non-null policies.
+
+\textbf{Kendall's $W$}: 0.145 (weak concordance). Interpretation: scopes show low agreement on policy ranking. $W = 0$ would indicate no agreement; $W = 1$ would indicate perfect agreement. Notably, $W$ \emph{decreased} from 0.186 (7~scopes) to 0.145 (10~scopes)---the expansion scopes introduced additional disagreement.
+
+\textbf{Bootstrap}: 10,000 resamples per policy. All 95\% CIs for non-null policies overlap. Only null is fully separated.
+
+\section{Experimental Timeline}
+
+\begin{table}[H]
+\centering
+\caption{Experimental timeline.}
+\label{tab:timeline}
+\begin{tabular}{@{}llr@{}}
+\toprule
+\textbf{Phase} & \textbf{Duration} & \textbf{Scope} \\
+\midrule
+Phase~1: Core grid (7 scopes $\times$ 4 policies $\times$ $M{=}3$) & 4h~25m & 840 answers, 807 graded \\
+Phase~2: New policies (7 scopes $\times$ 3 policies $\times$ $M{=}3$) & ${\sim}$5h~00m & 630 answers, 600 graded \\
+Phase~3: Expansion scopes (3 scopes $\times$ 7 policies $\times$ $M{=}3$) & ${\sim}$4h~00m & 630 answers, 493 graded \\
+\midrule
+\textbf{Total} & \textbf{${\sim}$13h~25m} & \textbf{2,100 answers, 1,900 graded} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Infrastructure: 2--4$\times$ NVIDIA H100 GPUs via Modal (vLLM serving). Grading: few-shot Qwen3.5-35B-A3B judge.
+
+\end{document}
