@@ -8,6 +8,14 @@
 
 This guide covers submitting validated benchmark results for the LENS leaderboard.
 
+### V1 vs. V2 Submissions
+
+**V1 (adapter benchmark)**: Submit a memory adapter evaluated across 6 scopes (S07-S12) using the 9-metric scoring system. Follow the full guide below.
+
+**V2 (policy ablation)**: Submit a memory consolidation policy evaluated across benchmark scopes using Fact F1 scoring (per-fact binary grading by few-shot Qwen3.5-35B-A3B judge, then F1 across all key facts). V2 measures strategy effectiveness rather than retrieval architecture. See the V2 results in [LEADERBOARD.md](../../LEADERBOARD.md) for the current format.
+
+The rest of this guide covers the V1 adapter submission process.
+
 ---
 
 ## 1. Prerequisites

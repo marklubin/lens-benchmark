@@ -220,6 +220,8 @@ Your adapter should beat null on most metrics. Key things to check:
 - `fact_recall` > null baseline (you're finding relevant information)
 - `evidence_coverage` > 0 (retrieved episodes include required evidence)
 
+**Note**: These metrics apply to V1 adapter evaluation. V2 policy evaluation uses Fact F1 (per-fact binary grading, then F1 across all key facts per question). See the Scoring section in [README.md](../../README.md) for details on both systems.
+
 ### Unit Tests
 
 Write tests for your adapter's specific logic:

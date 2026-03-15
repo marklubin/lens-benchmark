@@ -27,11 +27,20 @@ def _strip_think(text: str) -> str:
     # XML think tags
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     # Plain-text thinking preamble — often starts with "Thinking Process:" or
-    # "Thinking:" followed by numbered steps, then the actual content
-    # Look for the actual content after the thinking section
-    m = re.match(r"(?:Thinking(?:\s+Process)?:\s*\n(?:.*?\n)*?\n)(.*)", text, re.DOTALL)
-    if m and m.group(1).strip():
-        text = m.group(1).strip()
+    # "Thinking:" followed by numbered steps, then the actual content.
+    # Find the first blank line (\n\n) after the header and take everything after it.
+    # Previous regex (?:.*?\n)*?\n caused catastrophic backtracking under re.DOTALL.
+    m = re.match(r"Thinking(?:\s+Process)?:\s*\n", text)
+    if m:
+        rest = text[m.end():]
+        # Find the first blank line (paragraph break) in the thinking section
+        blank = rest.find("\n\n")
+        if blank != -1 and rest[blank + 2:].strip():
+            text = rest[blank + 2:].strip()
+        elif rest.strip():
+            # No blank line found — the entire content is thinking preamble
+            # or the preamble is just the header; keep as-is
+            text = rest.strip()
     return text
 
 

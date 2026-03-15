@@ -69,7 +69,7 @@ uv run lens score --run output/s01_sqlite/ --judge-model your-model-name
 ```
 
 The scorer produces:
-- `scores.json` — per-question scores across all 9 metrics
+- `scores.json` — per-question scores (V1: 9 metrics across 3 tiers; V2: Fact F1)
 - `scorecard.json` — aggregate scores by tier and composite
 
 ## 6. Generate Report

@@ -1,14 +1,32 @@
 # LENS Benchmark: Project Status Report
 
-**Last Updated**: 2026-03-03 (session 32d)
-**Scoring Pipeline**: v3.2 (naive baseline advantage replaces longitudinal_advantage, per-question timing)
-**Agent LLM**: Qwen3.5-35B-A3B (Modal vLLM) / Claude Sonnet (Anthropic, Letta runs) / GPT-OSS-120B (Cerebras) / Qwen3-235B-A22B (Together AI)
-**Judge LLM**: Qwen3.5-35B-A3B (Modal) / GPT-OSS-120B (Cerebras, session 23)
-**Token Cap**: 32,768 (standard) / 16,384 (constrained-16k) / 8,192 (constrained-8k) / 4,096 (constrained-4k) / 2,048 (constrained-2k)
-**Dataset**: 6 numeric scopes (01-06) + 3 narrative scopes (07-09, **120 episodes generated, 633K words**) + 3 CDR scopes (10-12, **120 episodes, clinical/zoning/therapy**), 144+30+30 questions, 720+60+60 signal episodes + 540+60+60 distractor episodes
-**Unit Tests**: 1040 passing
-**Adapters Under Evaluation**: 8 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti) + 6 new (hierarchical, hierarchical-hybrid, hopping, graphrag-light, **letta-v4**, **letta-entity**). ~~hindsight~~ removed — see session 19 notes.
-**Total Runs**: 21 scope-01 systems + 30 sweep runs + 48 constrained (Phase 1+2) + 12 Phase 3 runs + **90 Phase 5 runs scored (of 96 attempted)** + **9 narrative scope runs (Phase 6)** + **6 letta-v4 runs** + **6 letta-entity runs** + **21 CDR static-driver runs** + **24 CDR modal-driver runs (Phase 7b)**
+**Last Updated**: 2026-03-15 (session 34)
+**Scoring Pipeline**: v3.2 (V1: 9-metric composite) / V2: Fact F1 (few-shot Qwen grader)
+**Agent LLM**: Qwen3.5-35B-A3B (Modal vLLM)
+**Judge LLM**: Qwen3.5-35B-A3B (Modal, few-shot Fact F1)
+**Dataset**: 16 scopes total (S01-S06 numeric, S07-S16 narrative/CDR)
+**Unit Tests**: 1040 (V1) + 216 (V2)
+
+### Active Benchmark: V2 Memory Strategy Ablation
+
+**V2 Grid**: 10 scopes (S07-S16) x 7 policies x M=3 = 1,900 graded answers out of 2,100 generated (90.5%).
+
+| Rank | Policy | Mean Fact F1 | n |
+|------|--------|-------------|---|
+| 1 | policy_core_faceted | 0.466 | 271 |
+| 2 | policy_summary | 0.443 | 268 |
+| 3 | policy_core | 0.441 | 275 |
+| 4 | policy_core_structured | 0.432 | 271 |
+| 5 | policy_core_maintained | 0.398 | 265 |
+| 6 | policy_base | 0.381 | 274 |
+| 7 | null | 0.055 | 276 |
+
+**Key V2 findings**: Faceted decomposition (4 parallel folds) wins. Refinement hurts (-0.043 vs core). Weak scope concordance (W=0.145) — no universal winner. Summary rises to rank 2 with 10 scopes (leads on S13, S14).
+
+### V1: Adapter Benchmark (Concluded)
+
+**Adapters Evaluated**: 11 (null, sqlite-chunked-hybrid, compaction, letta, letta-sleepy, mem0-raw, cognee, graphiti, hierarchical, hopping, graphrag-light, letta-v4, letta-entity)
+**Total V1 Runs**: 90 Phase 5 + 60 Phase 6 + 45 CDR + 42 static-driver + assorted earlier phases
 
 ---
 
@@ -1175,6 +1193,7 @@ Updated from Phase 5 analysis (chunked-hybrid NBA, 6 scopes with distractors):
 
 | Date | Session | Key Changes |
 |------|---------|-------------|
+| 2026-03-15 | V2 10-scope expansion (session 34) | Expanded V2 grid from 7 to 10 scopes: ran S10 (clinical_trial), S13 (implicit_decision), S14 (epoch_classification) through full grid (7 policies x M=3). 1,900 graded answers total. S10 near-floor (max 0.178). S13/S14 favor summary (0.522, 0.650) over faceted. Kendall's W dropped 0.186->0.145 (weaker concordance). Regenerated all 8 analysis figures, research brief, HTML, and docs for 10-scope numbers. |
 | 2026-03-03 | Letta family completion (session 32d) | **All 4 Letta adapters fully evaluated on S07-12**: letta-entity S10-S12 (0.428/0.000/0.559), letta-v4 S12 (0.000). Standard letta leads (0.606 mean, 12/12 scopes), letta-sleepy 2nd (0.572), letta-v4 3rd (0.375), letta-entity 4th (0.349). Qwen as Letta internal LLM produces no episode citations → evidence_grounding=0 on multiple runs. letta-entity has systematic ep_ prefix doubling bug in citations. Model quality > memory architecture confirmed. |
 | 2026-03-03 | Gap-fill + Phase 7 report (session 32c) | Completed gap-fill runs: graphrag-light S07-09 (0.690/0.550/0.540), triadv1-pairs S07-09 (0.000 citation bug), letta-v4 S10-11 (0.282/0.281). Full 6-scope matrix for 6 adapters. sqlite-chunked-hybrid leads (0.718), letta 2nd (0.665). Generated comprehensive LaTeX report: `results/final_brief/lens_phase7_report.tex` (14 pages, 11 tables). Scaled Modal to min_containers=0. |
 | 2026-03-03 | CDR modal-driver sweep (session 32b) | **24/24 CDR modal-driver runs scored** — 8 adapters × 3 scopes. graphrag-light leads (0.555), hopping 2nd (0.526). Modal driver degrades 5-10% vs static for 5/6 adapters (mean -0.043). Fixed triadv1-pairs hang (timeout+notebook cap+episode truncation). Scaled Modal to 8×H100 for parallel sweep, then back to 0. |

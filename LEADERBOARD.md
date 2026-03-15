@@ -3,13 +3,13 @@
 ```
 ┌──────────────────────────────────────────────┐
 │  LENS // Benchmark Results                   │
-│  Last updated: 2026-03-14                    │
+│  Last updated: 2026-03-15                    │
 └──────────────────────────────────────────────┘
 ```
 
 ---
 
-## > V1: ADAPTER BENCHMARK //
+## > V1: ADAPTER BENCHMARK (Legacy) //
 
 **Setup**: Modal driver, Qwen3.5-35B-A3B agent, 6 scopes (S07-S12), budget-constrained agent querying.
 
@@ -54,39 +54,43 @@ Note: Null wins S10 outright (0.43 vs. graphrag-light 0.42), indicating that sco
 
 ## > V2: MEMORY STRATEGY ABLATION //
 
-**Setup**: 7 scopes, M=3 repetitions per cell, Fact F1 scoring (few-shot Qwen grader). 1407 answers graded out of 1470 generated (95.7%).
+**Setup**: 10 scopes, M=3 repetitions per cell, Fact F1 scoring (few-shot Qwen grader). 1,900 answers graded out of 2,100 generated (90.5%).
 
 This isolates the **memory consolidation strategy** from the retrieval architecture. All policies use the same underlying storage — only the memory management policy varies.
 
-| Rank | Policy | Mean F1 | Analogous System | Description |
-|-----:|--------|--------:|------------------|-------------|
-| 1 | core_faceted | 0.511 | Multi-agent faceted memory | 4 parallel folds (entity/relation/event/cause) + merge |
-| 2 | core | 0.486 | Letta/MemGPT core memory | Single-fold core memory block |
-| 3 | core_structured | 0.472 | Mastra/ACE pattern | Structured schema-driven memory |
-| 4 | summary | 0.457 | Rolling summary | Progressive summarization |
-| 5 | core_maintained | 0.427 | Fold + refinement | Core memory with periodic refinement |
-| 6 | base | 0.412 | Raw retrieval | Retrieval only, no consolidation |
-| 7 | null | 0.059 | No memory | Score floor |
+| Rank | Policy | Fact F1 | n | Analogous System | Description |
+|-----:|--------|--------:|----:|------------------|-------------|
+| 1 | policy_core_faceted | 0.466 | 271 | Multi-agent faceted memory | 4 parallel folds (entity/relation/event/cause) + merge |
+| 2 | policy_summary | 0.443 | 268 | Rolling summary | Progressive summarization |
+| 3 | policy_core | 0.441 | 275 | Letta/MemGPT core memory | Single-fold core memory block |
+| 4 | policy_core_structured | 0.432 | 271 | Mastra/ACE pattern | Structured schema-driven memory |
+| 5 | policy_core_maintained | 0.398 | 265 | Fold + refinement | Core memory with periodic refinement |
+| 6 | policy_base | 0.381 | 274 | Raw retrieval | Retrieval only, no consolidation |
+| 7 | null | 0.055 | 276 | No memory | Score floor |
 
 ### Key Findings
 
 1. **Faceted memory wins** (+0.025 over core). Decomposing into entity/relation/event/cause folds and merging captures more signal than a single consolidation pass.
 
-2. **Refinement hurts** (-0.059 vs. core). The maintained policy's periodic refinement prunes useful signal that hasn't yet been reinforced. Over-consolidation destroys information.
+2. **Refinement hurts** (-0.043 vs. core). The maintained policy's periodic refinement prunes useful signal that hasn't yet been reinforced. Over-consolidation destroys information.
 
-3. **Any consolidation beats raw retrieval.** Even rolling summary (+0.045 over base) provides meaningful lift. The gap to null (0.412 vs. 0.059) confirms LENS measures real memory capability.
+3. **Summary rises with more scopes.** Adding S13 (implicit decision) and S14 (epoch classification) — where summary leads — pushed it to rank 2. Progressive summarization excels at temporal boundary and decision reconstruction tasks.
 
-4. **Structured memory is competitive** (0.472 vs. 0.486 core). Schema-driven approaches preserve signal well but impose overhead that slightly reduces coverage.
+4. **No universal best strategy.** Kendall's W = 0.145 (weak concordance). Per-scope winners include faceted (S07, S15, S16), core (S09, S11), summary (S13, S14), structured (S08, S10), and base (S12).
 
-### Per-Scope Breakdown (V2, Mean F1)
+### Per-Scope Breakdown (V2, Fact F1)
 
-| Policy | S01 | S07 | S08 | S10 | S12 | S14 | S15 |
-|--------|----:|----:|----:|----:|----:|----:|----:|
-| core_faceted | 0.52 | 0.54 | 0.50 | 0.48 | 0.42 | 0.53 | 0.59 |
-| core | 0.49 | 0.51 | 0.48 | 0.46 | 0.40 | 0.50 | 0.56 |
-| null | 0.06 | 0.07 | 0.05 | 0.06 | 0.04 | 0.06 | 0.08 |
+| Policy | S07 | S08 | S09 | S10 | S11 | S12 | S13 | S14 | S15 | S16 |
+|--------|----:|----:|----:|----:|----:|----:|----:|----:|----:|----:|
+| policy_base | 0.339 | 0.351 | 0.349 | 0.114 | 0.356 | 0.277 | 0.260 | 0.513 | 0.753 | 0.442 |
+| policy_core | 0.458 | 0.301 | 0.643 | 0.103 | 0.456 | 0.201 | 0.324 | 0.543 | 0.808 | 0.511 |
+| policy_core_faceted | 0.547 | 0.373 | 0.598 | 0.091 | 0.343 | 0.233 | 0.375 | 0.590 | 0.828 | 0.679 |
+| policy_core_maintained | 0.323 | 0.181 | 0.611 | 0.074 | 0.455 | 0.156 | 0.372 | 0.552 | 0.717 | 0.526 |
+| policy_core_structured | 0.529 | 0.426 | 0.538 | 0.178 | 0.410 | 0.156 | 0.267 | 0.512 | 0.750 | 0.475 |
+| policy_summary | 0.376 | 0.388 | 0.561 | 0.093 | 0.395 | 0.162 | 0.522 | 0.650 | 0.722 | 0.604 |
 
-- S12 (therapy_chat) is the hardest scope across all policies
+- S10 (clinical_trial) is the hardest scope — near-floor for all policies (max 0.178)
+- S12 (therapy_chat) remains very difficult — raw retrieval (base) beats all synthesis
 - S15 (value_inversion) is the easiest — clearer numeric signal patterns
 
 ---

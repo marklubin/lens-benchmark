@@ -43,17 +43,17 @@ Modal driver, Qwen3.5-35B-A3B agent, 6 scopes (S07-S12):
 
 ### V2: Memory Strategy Ablation
 
-7 scopes, M=3 repetitions, Fact F1:
+10 scopes, M=3 repetitions, Fact F1:
 
 | Rank | Policy | Fact F1 | n |
 |-----:|--------|--------:|----:|
-| 1 | policy_core_faceted | 0.511 | 200 |
-| 2 | policy_core | 0.486 | 201 |
-| 3 | policy_core_structured | 0.472 | 202 |
-| 4 | policy_summary | 0.457 | 200 |
-| 5 | policy_core_maintained | 0.427 | 198 |
-| 6 | policy_base | 0.412 | 202 |
-| 7 | null | 0.059 | 204 |
+| 1 | policy_core_faceted | 0.466 | 271 |
+| 2 | policy_summary | 0.443 | 268 |
+| 3 | policy_core | 0.441 | 275 |
+| 4 | policy_core_structured | 0.432 | 271 |
+| 5 | policy_core_maintained | 0.398 | 265 |
+| 6 | policy_base | 0.381 | 274 |
+| 7 | null | 0.055 | 276 |
 
 ---
 
