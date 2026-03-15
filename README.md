@@ -1,18 +1,6 @@
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│   ██╗     ███████╗███╗   ██╗███████╗                               │
-│   ██║     ██╔════╝████╗  ██║██╔════╝                               │
-│   ██║     █████╗  ██╔██╗ ██║███████╗                               │
-│   ██║     ██╔══╝  ██║╚██╗██║╚════██║                               │
-│   ███████╗███████╗██║ ╚████║███████║                               │
-│   ╚══════╝╚══════╝╚═╝  ╚═══╝╚══════╝                               │
-│                                                                     │
-│   Longitudinal Evidence-backed Narrative Signals                    │
-│   A benchmark for agent memory systems                              │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="lens_benchmark_logo_transparent.svg" alt="LENS Benchmark" width="600">
+</p>
 
 ![Tests](https://img.shields.io/badge/tests-1040_passing-22c55e?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.11+-3b82f6?style=flat-square)
@@ -57,15 +45,15 @@ Modal driver, Qwen3.5-35B-A3B agent, 6 scopes (S07-S12):
 
 7 scopes, M=3 repetitions, Fact F1:
 
-| Rank | Policy | Mean F1 | Analogous System |
-|-----:|--------|--------:|------------------|
-| 1 | core_faceted | 0.511 | Multi-agent faceted memory |
-| 2 | core | 0.486 | Letta/MemGPT core memory |
-| 3 | core_structured | 0.472 | Mastra/ACE structured memory |
-| 4 | summary | 0.457 | Rolling summary |
-| 5 | core_maintained | 0.427 | Fold + refinement |
-| 6 | base | 0.412 | Raw retrieval |
-| 7 | null | 0.059 | No memory |
+| Rank | Policy | Fact F1 | n |
+|-----:|--------|--------:|----:|
+| 1 | policy_core_faceted | 0.511 | 200 |
+| 2 | policy_core | 0.486 | 201 |
+| 3 | policy_core_structured | 0.472 | 202 |
+| 4 | policy_summary | 0.457 | 200 |
+| 5 | policy_core_maintained | 0.427 | 198 |
+| 6 | policy_base | 0.412 | 202 |
+| 7 | null | 0.059 | 204 |
 
 ---
 
@@ -225,7 +213,13 @@ docs/                Documentation and guides
 
 ## > SCORING //
 
-Nine metrics across three tiers:
+### V2 Scoring (Current)
+
+V2 uses **Fact F1**: each ground-truth key fact is graded as present or absent in the agent's answer by a few-shot Qwen3.5-35B-A3B judge. Precision, recall, and F1 are computed across all key facts per question, then averaged across questions and scopes. This is more granular than holistic answer quality — it measures whether specific atomic claims were recovered from memory.
+
+### V1 Scoring (Legacy)
+
+V1 uses nine metrics across three tiers:
 
 **Tier 1 — Mechanical** (no LLM judge):
 - `evidence_grounding` (10%) — cited ref_ids that exist in the vault
