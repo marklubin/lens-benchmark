@@ -17,6 +17,23 @@
 \usepackage{microtype}
 \usepackage{enumitem}
 \usepackage{parskip}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, fit, calc}
+\usepackage{fancyvrb}
+\usepackage{tcolorbox}
+\tcbuselibrary{listings,breakable,skins}
+
+% --- tcolorbox styles for traces ---
+\newtcolorbox{tracebox}[1][]{
+    colback=gray!5, colframe=gray!60, fonttitle=\bfseries\small,
+    left=4pt, right=4pt, top=2pt, bottom=2pt,
+    boxrule=0.5pt, arc=2pt, breakable, #1
+}
+\newtcolorbox{artifactbox}[1][]{
+    colback=blue!3, colframe=blue!40, fonttitle=\bfseries\small,
+    left=4pt, right=4pt, top=2pt, bottom=2pt,
+    boxrule=0.5pt, arc=2pt, breakable, #1
+}
 
 % --- Hyperref setup ---
 \hypersetup{
@@ -558,5 +575,516 @@ Phase~3: Expansion scopes (3 scopes $\times$ 7 policies $\times$ $M{=}3$) & ${\s
 \end{table}
 
 Infrastructure: 2--4$\times$ NVIDIA H100 GPUs via Modal (vLLM serving). Grading: few-shot Qwen3.5-35B-A3B judge.
+
+% ===================================================================
+\section{Policy Pipeline Diagrams and Exemplar Traces}
+\label{app:traces}
+
+This appendix makes each policy's data flow transparent by showing (1)~a pipeline diagram of how raw episodes are transformed into agent context, and (2)~real artifact excerpts and agent answers from S15 (Value Inversion), checkpoint~4, replicate~r01.
+
+\textbf{Running example.} S15 tracks a SaaS startup (Verdana Analytics) deciding on pricing strategy. Across 4 signal episodes and 4 distractors, the agent must synthesize pricing decisions (\$29/seat), competitive positioning (vs.\ Rivalytics at \$49), go-to-market timeline, and infrastructure constraints. The question used below is \texttt{vi15\_q01}: \emph{``What is our pricing strategy and what is the rationale behind it?''}
+
+\subsection{Raw Episode Input (Common to All Policies)}
+
+All policies begin with the same raw episodes. Each episode is a structured document (meeting transcript, status report, etc.) rendered by a ``blind'' LLM from a data sheet. A typical episode opening:
+
+\begin{tracebox}[title=Episode signal\_001 (excerpt --- 31{,}166 chars total)]
+\small\ttfamily
+VERDANA ANALYTICS --- INTERNAL DOCUMENT\\
+CLASSIFICATION: CONFIDENTIAL\\
+DOCUMENT TYPE: MEETING TRANSCRIPT\\
+DATE: MAY 1, 2025\\
+SUBJECT: PRICING STRATEGY --- FINAL DECISION MEETING\\
+\\
+ATTENDEES:\\
+- Priya Chandrasekaran (CEO)\\
+- Marcus Okafor (CTO)\\
+- Derek Huang (VP Sales)\\
+- Tomoko Abe (Finance Lead)\\
+\textrm{[\ldots]}\\
+\\
+TOMOKO ABE: I've modeled three scenarios. Rivalytics is at\\
+\$49 per seat per month. Scenario A: \$39/mo, 20\% below.\\
+Scenario B: \$29/mo, 41\% below. Scenario C: \$19/mo, 61\%\\
+below. [\ldots]\\
+\\
+PRIYA CHANDRASEKARAN: Let's go with B. \$29 per seat.\\
+Lock it.
+\end{tracebox}
+
+Episodes are chunked into 1{,}000-character windows with 100-char overlap, producing ${\sim}$288 chunks across 8 episodes (4 signal + 4 distractor) at checkpoint~4.
+
+% -----------------------------------------------------------------
+\subsection{Policy: null}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=1.8cm,
+    every node/.style={font=\small},
+    box/.style={rectangle, draw, rounded corners=3pt, minimum width=2.8cm, minimum height=0.8cm, align=center},
+    io/.style={box, fill=orange!15},
+    proc/.style={box, fill=gray!15},
+    >=Stealth
+]
+\node[io] (q) {Question};
+\node[proc, right=of q] (agent) {Agent LLM\\(no tools)};
+\node[io, right=of agent] (a) {Answer};
+\draw[->] (q) -- (agent);
+\draw[->] (agent) -- (a);
+\node[below=0.3cm of agent, font=\scriptsize\itshape, text=gray] {parametric knowledge only};
+\end{tikzpicture}
+\end{center}
+
+The null policy provides no memory, no tools, and no context. The agent answers from parametric knowledge alone.
+
+\begin{tracebox}[title=null --- Agent Answer (0 tool calls)]
+\small
+I lack sufficient information to answer this question. I do not have access to your company's internal data or specific business strategies. Please provide more context about your organization or product.
+\end{tracebox}
+
+\textbf{Result}: Fact~F1 = 0.034 (near-zero --- agent cannot answer domain-specific questions from general knowledge).
+
+% -----------------------------------------------------------------
+\subsection{Policy: base (Raw Retrieval)}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=1.2cm and 1.6cm,
+    every node/.style={font=\small},
+    box/.style={rectangle, draw, rounded corners=3pt, minimum width=2.5cm, minimum height=0.7cm, align=center},
+    io/.style={box, fill=orange!15},
+    proc/.style={box, fill=blue!10},
+    store/.style={cylinder, draw, shape border rotate=90, minimum width=1.8cm, minimum height=1cm, fill=green!10, font=\small, align=center},
+    >=Stealth
+]
+\node[io] (eps) {Episodes\\(8 docs)};
+\node[proc, right=of eps] (chunk) {Chunk\\(1K / 100 overlap)};
+\node[store, right=of chunk] (idx) {Search\\Index};
+\node[io, below=1.5cm of eps] (q) {Question};
+\node[proc, right=of q] (agent) {Agent LLM\\+ tools};
+\node[io, right=of agent] (a) {Answer};
+
+\draw[->] (eps) -- (chunk);
+\draw[->] (chunk) -- (idx);
+\draw[->] (q) -- (agent);
+\draw[->] (agent) -- (a);
+\draw[<->, dashed] (agent) -- node[right, font=\scriptsize] {\texttt{memory\_search}} (idx);
+\end{tikzpicture}
+\end{center}
+
+The base policy provides hybrid search (BM25 + semantic) over raw episode chunks. No synthesis is performed. The agent calls \texttt{memory\_search(query)} and receives up to 10 results, each truncated to 1{,}500 characters.
+
+\begin{tracebox}[title=base --- Agent Answer (1 tool call)]
+\small
+Based on the meeting transcript from May 1, 2025, Verdana Analytics has locked in a \textbf{pricing strategy of \$29 per seat per month} for its standard tier [t-text-signal\_001].
+
+The rationale behind this decision includes the following key points:
+
+\textbullet\ \textbf{Competitive Positioning:} The strategy positions Verdana at approximately half the price of its main competitor, Rivalytics, which charges \$49 per seat [\ldots]
+\end{tracebox}
+
+\textbf{Result}: Fact~F1 = 0.753. One tool call retrieves the pricing meeting transcript directly. Raw retrieval is highly effective when the answer is concentrated in a single episode.
+
+% -----------------------------------------------------------------
+\subsection{Policy: core (Fold Synthesis)}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=1.0cm and 1.4cm,
+    every node/.style={font=\small},
+    box/.style={rectangle, draw, rounded corners=3pt, minimum width=2.5cm, minimum height=0.7cm, align=center},
+    io/.style={box, fill=orange!15},
+    proc/.style={box, fill=blue!10},
+    derived/.style={box, fill=violet!15},
+    store/.style={cylinder, draw, shape border rotate=90, minimum width=1.6cm, minimum height=0.9cm, fill=green!10, font=\small, align=center},
+    >=Stealth
+]
+% Build phase
+\node[io] (eps) {Episodes};
+\node[proc, right=of eps] (chunk) {Chunk};
+\node[store, right=of chunk] (idx) {Search\\Index};
+\node[proc, below=0.8cm of chunk] (fold) {FoldSynthesis\\(sequential)};
+\node[derived, right=of fold] (mem) {Core\\Memory};
+
+\draw[->] (eps) -- (chunk);
+\draw[->] (chunk) -- (idx);
+\draw[->] (eps) |- (fold);
+\draw[->] (fold) -- (mem);
+
+% Query phase
+\node[io, below=1.8cm of eps] (q) {Question};
+\node[proc, right=2.8cm of q] (agent) {Agent LLM\\+ tools};
+\node[io, right=of agent] (a) {Answer};
+
+\draw[->] (q) -- (agent);
+\draw[->] (agent) -- (a);
+\draw[<->, dashed] (agent) -- (idx);
+\draw[->, dotted, thick] (mem) -- node[right, font=\scriptsize] {system prompt} (agent);
+\end{tikzpicture}
+\end{center}
+
+The core policy sequentially folds all episodes into a single working memory artifact. Each fold step reads the current memory + the next episode and produces an updated memory. The final artifact is injected into the agent's system prompt as ``Working Memory.''
+
+\begin{artifactbox}[title=core-memory artifact (3{,}104 chars --- excerpt)]
+\small
+\textbf{Working Memory Update: Step 8 (May 10, 2025)}
+
+\textbf{1. Launch Decision \& Timeline}
+\begin{itemize}[nosep,leftmargin=1em]
+\item Decision: GO (Unanimous). Launch Date: May 15, 2025.
+\item Go-Live: Website at 12:00 AM ET; Product Hunt at 9:00 AM ET.
+\item Code Freeze: API endpoints May 13; RBAC/UI May 12; Docs May 12.
+\end{itemize}
+
+\textbf{2. Product Scope (v1.0)}
+\begin{itemize}[nosep,leftmargin=1em]
+\item Shipping: Core API (real-time streaming), 14 native connectors, RBAC, SDKs (Python 0.9.1, JS 0.9.0), Webhooks, CSV/JSON Export (100K row limit).
+\item Deferred (Q2): Dashboard Builder (July 14/15), Custom Alerting (July 30).
+\end{itemize}
+
+\textbf{3. Infrastructure}
+\begin{itemize}[nosep,leftmargin=1em]
+\item AWS us-east-1 + eu-west-1. 3x t3.xlarge per region. API p99: 340ms.
+\item Bank Balance: \$420k. Burn: \$74k/mo. Runway: 5.7 months.
+\end{itemize}
+\end{artifactbox}
+
+\begin{tracebox}[title=core --- Agent Answer (1 tool call)]
+\small
+Based on the memory records, here is our pricing strategy and the rationale behind it:
+
+\textbf{Core Pricing Model:}
+\textbullet\ \textbf{\$29/mo per seat} (flat rate, no feature gating)
+\textbullet\ \textbf{Annual plan: \$24/mo per seat} (17\% discount)
+\textbullet\ \textbf{14-day free trial} (no credit card required)
+\textbullet\ \textbf{No free tier} [t-text-signal\_001]
+
+\textbf{Competitive Positioning:}
+\textbullet\ Rivalytics charges \$49/mo per seat [\ldots] [t-text-signal\_003]
+\end{tracebox}
+
+\textbf{Result}: Fact~F1 = 0.808. The working memory provides a pre-synthesized overview, allowing the agent to recall pricing details, annual discount, and competitive rationale in a single coherent answer citing both search results and injected context.
+
+% -----------------------------------------------------------------
+\subsection{Policy: summary (Progressive Summarization)}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=0.9cm and 1.4cm,
+    every node/.style={font=\small},
+    box/.style={rectangle, draw, rounded corners=3pt, minimum width=2.5cm, minimum height=0.7cm, align=center},
+    io/.style={box, fill=orange!15},
+    proc/.style={box, fill=blue!10},
+    derived/.style={box, fill=violet!15},
+    store/.style={cylinder, draw, shape border rotate=90, minimum width=1.6cm, minimum height=0.9cm, fill=green!10, font=\small, align=center},
+    >=Stealth
+]
+% Build phase
+\node[io] (eps) {Episodes};
+\node[proc, right=of eps] (chunk) {Chunk};
+\node[store, right=of chunk] (idx) {Search\\Index};
+\node[proc, below=0.8cm of eps] (grp) {GroupSynthesis\\(windows of 5)};
+\node[derived, right=of grp] (grps) {Group\\Summaries};
+\node[proc, right=of grps] (red) {ReduceSynthesis\\(merge)};
+\node[derived, right=of red] (sum) {Summary};
+
+\draw[->] (eps) -- (chunk);
+\draw[->] (chunk) -- (idx);
+\draw[->] (eps) |- (grp);
+\draw[->] (grp) -- (grps);
+\draw[->] (grps) -- (red);
+\draw[->] (red) -- (sum);
+
+% Query phase
+\node[io, below=1.6cm of eps] (q) {Question};
+\node[proc, right=2.8cm of q] (agent) {Agent LLM\\+ tools};
+\node[io, right=of agent] (a) {Answer};
+
+\draw[->] (q) -- (agent);
+\draw[->] (agent) -- (a);
+\draw[<->, dashed] (agent) -- (idx);
+\draw[->, dotted, thick] (sum) |- (agent);
+\end{tikzpicture}
+\end{center}
+
+The summary policy uses a two-stage map-reduce: episodes are grouped into windows of 5, each group is summarized independently, then all group summaries are merged into a single unified summary. This hierarchical approach preserves temporal structure while compressing content.
+
+\begin{tracebox}[title=summary --- Agent Answer (1 tool call)]
+\small
+Based on the meeting transcript from May 1, 2025:
+
+\textbf{Pricing Strategy:} Final Decision: \textbf{\$29 per seat per month} [t-text-signal\_001]
+
+\textbf{Competitive Positioning:}
+\textbullet\ Rivalytics is priced at \$49/seat/month for their standard tier
+\textbullet\ \$29 positions Verdana at 41\% below --- ``my CFO notices this'' meaningful [\ldots]
+\end{tracebox}
+
+\textbf{Result}: Fact~F1 = 0.722. Summary excels on scopes requiring temporal boundary detection (S14: 0.650) and implicit decision reconstruction (S13: 0.522), but slightly underperforms core on S15 where precise per-meeting details matter more than temporal overview.
+
+% -----------------------------------------------------------------
+\subsection{Policy: core\_structured (Schema-Driven Fold)}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=1.0cm and 1.4cm,
+    every node/.style={font=\small},
+    box/.style={rectangle, draw, rounded corners=3pt, minimum width=2.5cm, minimum height=0.7cm, align=center},
+    io/.style={box, fill=orange!15},
+    proc/.style={box, fill=blue!10},
+    derived/.style={box, fill=violet!15},
+    store/.style={cylinder, draw, shape border rotate=90, minimum width=1.6cm, minimum height=0.9cm, fill=green!10, font=\small, align=center},
+    >=Stealth
+]
+\node[io] (eps) {Episodes};
+\node[proc, right=of eps] (chunk) {Chunk};
+\node[store, right=of chunk] (idx) {Search\\Index};
+\node[proc, below=0.8cm of chunk] (fold) {FoldSynthesis\\(structured schema)};
+\node[derived, right=of fold] (mem) {Structured\\Observations};
+
+\draw[->] (eps) -- (chunk);
+\draw[->] (chunk) -- (idx);
+\draw[->] (eps) |- (fold);
+\draw[->] (fold) -- (mem);
+
+\node[io, below=1.8cm of eps] (q) {Question};
+\node[proc, right=2.8cm of q] (agent) {Agent LLM\\+ tools};
+\node[io, right=of agent] (a) {Answer};
+
+\draw[->] (q) -- (agent);
+\draw[->] (agent) -- (a);
+\draw[<->, dashed] (agent) -- (idx);
+\draw[->, dotted, thick] (mem) -- node[right, font=\scriptsize] {system prompt} (agent);
+\end{tikzpicture}
+\end{center}
+
+Identical topology to core, but the fold prompt enforces a structured observation log format: each entry is a discrete, dated, categorized line rather than free-form prose.
+
+\begin{artifactbox}[title=core-structured artifact (excerpt)]
+\small\ttfamily
+[STEP-1] ENTITY | Priya Chandrasekaran, CEO | priority: high\\{}
+[STEP-1] METRIC | Rivalytics price: \$49/seat/mo | priority: high\\{}
+[STEP-1] EVENT | Pricing locked at \$29/seat/mo | priority: high\\{}
+[STEP-2] METRIC | Break-even: month 4 at \$29 | priority: medium\\{}
+[STEP-3] CHANGE | Annual discount: \$24/mo (17\%) | priority: high\\{}
+[STEP-8] EVENT | GO decision, launch May 15 | priority: high\\{}
+[STEP-8] METRIC | Day 1: 6 accounts x 10 seats = \$1,740 MRR | priority: high\\{}
+[STEP-8] ANOMALY | Webhook drop rate 2\% under load | priority: high
+\end{artifactbox}
+
+\textbf{Result}: Fact~F1 = 0.750. Structured extraction wins on heterogeneous document scopes (S08: 0.426, S10: 0.178) where schema-driven parsing handles varied formats better than free-form fold.
+
+% -----------------------------------------------------------------
+\subsection{Policy: core\_maintained (Fold + Refinement)}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=0.9cm and 1.2cm,
+    every node/.style={font=\small},
+    box/.style={rectangle, draw, rounded corners=3pt, minimum width=2.5cm, minimum height=0.7cm, align=center},
+    io/.style={box, fill=orange!15},
+    proc/.style={box, fill=blue!10},
+    refine/.style={box, fill=red!10},
+    derived/.style={box, fill=violet!15},
+    store/.style={cylinder, draw, shape border rotate=90, minimum width=1.6cm, minimum height=0.9cm, fill=green!10, font=\small, align=center},
+    >=Stealth
+]
+\node[io] (eps) {Episodes};
+\node[proc, right=of eps] (chunk) {Chunk};
+\node[store, right=of chunk] (idx) {Search\\Index};
+\node[proc, below=0.8cm of eps] (fold) {FoldSynthesis\\(same as core)};
+\node[derived, right=of fold] (raw) {Raw\\Memory};
+\node[refine, right=of raw] (ref) {MapSynthesis\\(refinement)};
+\node[derived, right=of ref] (mem) {Refined\\Memory};
+
+\draw[->] (eps) -- (chunk);
+\draw[->] (chunk) -- (idx);
+\draw[->] (eps) |- (fold);
+\draw[->] (fold) -- (raw);
+\draw[->] (raw) -- (ref);
+\draw[->] (ref) -- (mem);
+
+\node[io, below=1.8cm of eps] (q) {Question};
+\node[proc, right=3.2cm of q] (agent) {Agent LLM\\+ tools};
+\node[io, right=of agent] (a) {Answer};
+
+\draw[->] (q) -- (agent);
+\draw[->] (agent) -- (a);
+\draw[<->, dashed] (agent) -- (idx);
+\draw[->, dotted, thick] (mem) |- (agent);
+\end{tikzpicture}
+\end{center}
+
+The maintained policy adds a refinement pass after the initial fold. The refinement prompt instructs the LLM to resolve contradictions, remove redundancy, prune stale information, and sharpen vague observations. This is the \textbf{only policy that actively compresses} the working memory.
+
+\begin{artifactbox}[title=core-maintained artifact (excerpt --- after refinement)]
+\small
+\textbf{Launch:} GO decision (May 10). Launch May 15. Website 12:00 AM ET,
+Product Hunt 9:00 AM ET. Code freeze: API May 13, RBAC/UI May 12.
+
+\textbf{Pricing:} \$29/mo per seat. Annual \$24/mo (17\% discount). 14-day trial,
+no free tier. Day 1: 6 accounts $\times$ 10 seats = \$1,740 MRR.
+Bank balance \$420k, burn \$74k/mo, runway 5.7 months.
+Break-even month 8 (200 accounts).
+
+\textbf{Product:} v1.0 ships API-first, 14 connectors, RBAC. Dashboard
+deferred to Q2 (July). Known: 2\% webhook drop rate under load.
+\end{artifactbox}
+
+Note how refinement produces a cleaner, more compressed memory compared to the raw core fold. But this compression prunes details like the per-scenario breakdown (\$39/\$29/\$19 comparison), the churn model (10\% target, ``feature gap churn'' on row~28), and infrastructure specifics (p99: 340ms, DB pool: 22\%) that may be needed for niche questions.
+
+\textbf{Result}: Fact~F1 = 0.717. The \textbf{worst-performing core variant} ($-$0.043 vs.\ core). Refinement optimizes for coherence at the expense of the forensic detail that benchmark questions target. This is the study's most practically actionable finding.
+
+% -----------------------------------------------------------------
+\subsection{Policy: core\_faceted (4 Parallel Folds + Merge)}
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=0.7cm and 1.0cm,
+    every node/.style={font=\small},
+    box/.style={rectangle, draw, rounded corners=3pt, minimum width=2.2cm, minimum height=0.65cm, align=center},
+    io/.style={box, fill=orange!15},
+    proc/.style={box, fill=blue!10},
+    facet/.style={box, fill=teal!15, minimum width=2.0cm},
+    derived/.style={box, fill=violet!15},
+    store/.style={cylinder, draw, shape border rotate=90, minimum width=1.4cm, minimum height=0.8cm, fill=green!10, font=\small, align=center},
+    >=Stealth
+]
+% Build phase - top row
+\node[io] (eps) {Episodes};
+\node[proc, right=1.5cm of eps] (chunk) {Chunk};
+\node[store, right=of chunk] (idx) {Search\\Index};
+
+\draw[->] (eps) -- (chunk);
+\draw[->] (chunk) -- (idx);
+
+% Four parallel folds
+\node[facet, below=1.0cm of eps, xshift=-0.5cm] (f1) {Entity\\Fold};
+\node[facet, right=0.3cm of f1] (f2) {Relation\\Fold};
+\node[facet, right=0.3cm of f2] (f3) {Event\\Fold};
+\node[facet, right=0.3cm of f3] (f4) {Cause\\Fold};
+
+% Merge
+\node[proc, below=0.8cm of $(f2)!0.5!(f3)$] (merge) {ReduceSynthesis\\(merge 4 facets)};
+\node[derived, below=0.7cm of merge] (mem) {Unified Faceted Memory};
+
+\draw[->] (eps) |- (f1);
+\draw[->] (eps) |- (f2);
+\draw[->] (eps) |- (f3);
+\draw[->] (eps) |- (f4);
+\draw[->] (f1) -- (merge);
+\draw[->] (f2) -- (merge);
+\draw[->] (f3) -- (merge);
+\draw[->] (f4) -- (merge);
+\draw[->] (merge) -- (mem);
+
+% Query phase
+\node[io, below=0.8cm of mem, xshift=-2.5cm] (q) {Question};
+\node[proc, right=1.5cm of q] (agent) {Agent LLM\\+ tools};
+\node[io, right=1.5cm of agent] (a) {Answer};
+
+\draw[->] (q) -- (agent);
+\draw[->] (agent) -- (a);
+\draw[<->, dashed] (agent.north) -- ++(0, 0.3) -| (idx);
+\draw[->, dotted, thick] (mem) -- (agent);
+\end{tikzpicture}
+\end{center}
+
+The faceted policy runs \textbf{four independent FoldSynthesis passes} in parallel, each with a specialized prompt targeting a different cognitive dimension:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Entity fold} --- Who/what: named entities, their types, attributes, first appearance.
+    \item \textbf{Relation fold} --- Connections: entity-to-entity relationships with evidence and directionality.
+    \item \textbf{Event fold} --- Timeline: chronological sequence of discrete events with metrics.
+    \item \textbf{Cause fold} --- Mechanisms: observed patterns, anomalies, causal links with confidence levels.
+\end{enumerate}
+
+A final ReduceSynthesis merges the four facet outputs into a unified working memory with cross-references.
+
+\begin{artifactbox}[title=Facet: Entity Register (excerpt)]
+\small
+\begin{tabular}{@{}llll@{}}
+\textbf{Entity} & \textbf{Type} & \textbf{Key Attributes} & \textbf{Step} \\
+Priya Chandrasekaran & Person & CEO, final decision-maker & 1 \\
+Marcus Okafor & Person & CTO, on-call rotation lead & 1 \\
+Rivalytics & Org & Competitor, \$49/seat/mo & 1 \\
+Verdana Analytics & Product & \$29/seat/mo, API-first & 1 \\
+\end{tabular}
+\end{artifactbox}
+
+\begin{artifactbox}[title=Facet: Event Timeline (excerpt)]
+\small
+\textbf{Step 1 | May 1, 2025 (08:47 AM)} --- Tomoko distributed pricing workbook (v7) via \#pricing-strategy.
+
+\textbf{Step 1 | May 1, 2025 (02:14 PM)} --- Haruto confirmed \$29/mo decision in Slack channel.
+
+\textbf{Step 8 | May 10, 2025} --- GO decision (unanimous). Launch date: May 15.
+Day 1 pipeline: 6 accounts $\times$ 10 seats = \$1,740 MRR.
+\end{artifactbox}
+
+\begin{artifactbox}[title=Facet: Causal Analysis (excerpt)]
+\small
+\textbf{Pattern:} \$29/mo price point drives competitive switching.\\
+\textbf{Cause:} 41\% below Rivalytics (\$49) clears the ``at least 30\% less'' threshold identified in competitive research (8/14 prospects).\\
+\textbf{Evidence:} Derek surveyed 14 Rivalytics customers; 8 would switch at 30\%+ discount.\\
+\textbf{Confidence:} Confirmed (Step 1 survey data + Step 8 pipeline commitment).
+\end{artifactbox}
+
+\begin{artifactbox}[title=Merged Faceted Memory (3{,}423 chars --- excerpt)]
+\small
+\textbf{Entities \& Relationships:}
+Verdana Analytics (SaaS startup) --- Priya Chandrasekaran (CEO), Marcus Okafor (CTO),
+Derek Huang (VP Sales). Competes with Rivalytics (\$49/seat).
+
+\textbf{Timeline:}
+May 1: Pricing locked at \$29/mo. May 10: GO decision (unanimous).
+May 15: Launch (website 12 AM, Product Hunt 9 AM).
+
+\textbf{Patterns \& Causes:}
+\$29 price drives switching --- 41\% below Rivalytics clears 30\% threshold.
+6 warm prospects committed for Day 1 (\$1,740 MRR).
+
+\textbf{Key Metrics:}
+Margins: 71\%. Break-even: month 8 (200 accounts). Runway: 5.7 months (\$420k balance, \$74k burn).
+\end{artifactbox}
+
+\begin{tracebox}[title=core\_faceted --- Agent Answer (1 tool call)]
+\small
+\textbf{Final Pricing Decision (May 1, 2025):}
+\textbullet\ \textbf{\$29/month} per seat (standard tier) [chunks-t-text-signal\_001-030511a0]
+\textbullet\ \textbf{\$24/month} annual option (20\% discount) [chunks-t-text-signal\_001-e5e05a04]
+\textbullet\ Full API access included with no feature gating [chunks-t-text-signal\_001-dc865a8c]
+
+\textbf{Rationale --- Competitive Positioning:}
+\textbullet\ Rivalytics charges \textbf{\$49 per seat} [chunks-t-text-signal\_001-81e35107]
+\textbullet\ \$29 is 41\% below --- clears the ``at least 30\% less'' switching threshold from competitive survey of 14 Rivalytics customers [\ldots]
+\end{tracebox}
+
+\textbf{Result}: Fact~F1 = 0.828 (best across all policies on S15). The four parallel facets capture entity relationships (who decided what), event timeline (when decisions were made), causal chains (why \$29), and key metrics (margins, MRR)---information that a single-pass fold may deprioritize. The merge step cross-references across facets, surfacing details that any single fold might miss.
+
+% -----------------------------------------------------------------
+\subsection{Summary: What Changes Between Policies}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Comparison of what each policy provides to the agent at question time.}
+\label{tab:policy-comparison}
+\begin{tabularx}{\textwidth}{@{}lccX@{}}
+\toprule
+\textbf{Policy} & \textbf{Search?} & \textbf{Context?} & \textbf{What the Agent Sees} \\
+\midrule
+null & No & No & System prompt only. No tools. \\
+base & Yes & No & \texttt{memory\_search} tool returns raw chunks. \\
+core & Yes & Yes & Working memory (free-form fold) + search. \\
+summary & Yes & Yes & Map-reduce summary + search. \\
+core\_structured & Yes & Yes & Structured observation log + search. \\
+core\_maintained & Yes & Yes & Refined (compressed) working memory + search. \\
+core\_faceted & Yes & Yes & Unified 4-facet memory (entity/relation/event/cause) + search. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Key observation}: The only difference between policies is the content injected into the system prompt. All non-null policies share the same search index, the same agent loop, and the same tool interface. This isolation is what makes the ablation scientifically meaningful---performance differences are attributable solely to the quality of the derived context.
 
 \end{document}
