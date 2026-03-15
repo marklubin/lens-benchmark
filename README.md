@@ -19,41 +19,38 @@ If a single episode can answer the question, the benchmark is broken. LENS ensur
 
 ---
 
-## > LEADERBOARD //
+## > RESULTS //
 
-Full results and methodology: [LEADERBOARD.md](LEADERBOARD.md)
+### V2: Memory Strategy Ablation (Current)
 
-### V1: Adapter Benchmark
+**Setup**: 10 scopes, 7 consolidation policies, M=3 repetitions, Fact F1 scoring. 2,100 answers generated, 1,900 graded (90.5%).
 
-Modal driver, Qwen3.5-35B-A3B agent, 6 scopes (S07-S12):
+V2 isolates the **memory consolidation strategy** from retrieval architecture. All policies use the same underlying storage, embeddings, search, and agent loop — only the memory management policy varies.
 
-| Rank | Adapter | Mean AQ | Category |
-|-----:|---------|--------:|----------|
-| 1 | graphrag-light | 0.462 | Graph |
-| 2 | sqlite-chunked-hybrid | 0.431 | Hybrid |
-| 3 | letta | 0.413 | Agent Memory |
-| 4 | hopping-hybrid | 0.408 | Hybrid |
-| 5 | hopping | 0.404 | Hop-based |
-| 6 | letta-sleepy | 0.404 | Agent Memory |
-| 7 | hierarchical-hybrid | 0.388 | Hybrid |
-| 8 | triadv1-pairs | 0.377 | Triad |
-| 9 | hierarchical | 0.369 | Hierarchical |
-| 10 | letta-v4 | 0.338 | Agent Memory |
-| 11 | null | 0.328 | Baseline |
+| Rank | Policy | Fact F1 | Description |
+|-----:|--------|--------:|-------------|
+| 1 | core_faceted | 0.466 | 4 parallel folds (entity/relation/event/cause) + merge |
+| 2 | summary | 0.443 | Progressive map-reduce summarization |
+| 3 | core | 0.441 | Single-fold working memory (Letta/MemGPT pattern) |
+| 4 | core_structured | 0.432 | Schema-driven structured observations (Mastra/ACE pattern) |
+| 5 | core_maintained | 0.398 | Core memory + iterative refinement |
+| 6 | base | 0.381 | Raw BM25 + semantic retrieval, no synthesis |
+| 7 | null | 0.055 | No memory (parametric knowledge only) |
 
-### V2: Memory Strategy Ablation
+**Key findings:**
+1. **Any memory beats no memory** — the null→base gap (+0.326) accounts for 79% of the total improvement
+2. **Faceted decomposition wins** — 4 parallel cognitive folds capture more signal than a single pass (+0.025 over core)
+3. **Refinement is dangerous** — iterative consolidation prunes useful signal (-0.043 vs core)
+4. **No universal best strategy** — Kendall's W = 0.145 (weak concordance); different scopes favor different policies
+5. **Domain matters more than strategy** — scope difficulty spans 0.109 to 0.763, a 6.9x range
 
-10 scopes, M=3 repetitions, Fact F1:
+Full results, per-scope breakdown, and statistical analysis: [LEADERBOARD.md](LEADERBOARD.md)
 
-| Rank | Policy | Fact F1 | n |
-|-----:|--------|--------:|----:|
-| 1 | policy_core_faceted | 0.466 | 271 |
-| 2 | policy_summary | 0.443 | 268 |
-| 3 | policy_core | 0.441 | 275 |
-| 4 | policy_core_structured | 0.432 | 271 |
-| 5 | policy_core_maintained | 0.398 | 265 |
-| 6 | policy_base | 0.381 | 274 |
-| 7 | null | 0.055 | 276 |
+Research brief (PDF with figures): [v2-synix-benchmark/studies/grid/brief/research_brief.pdf](v2-synix-benchmark/studies/grid/brief/research_brief.pdf)
+
+### V1: Adapter Benchmark (Legacy)
+
+V1 compared 11 memory system architectures (Letta, GraphRAG, SQLite variants, etc.) across 6 scopes. The headline finding was that agent query quality — not memory architecture — is the binding constraint. See [LEADERBOARD.md](LEADERBOARD.md) for V1 results and methodology.
 
 ---
 
@@ -65,32 +62,29 @@ Modal driver, Qwen3.5-35B-A3B agent, 6 scopes (S07-S12):
                     └──────┬──────┘
                            │
                     ┌──────▼──────┐
-                    │   Episodes  │    30 signal + 90 distractor
+                    │   Episodes  │    Signal + distractor episodes
                     └──────┬──────┘
                            │ stream chronologically
                     ┌──────▼──────┐
-                    │   Adapter   │    Your memory system
-                    │  .ingest()  │    implements MemoryAdapter
+                    │  Bank Build │    Chunk → embed → search index
+                    │  + Policy   │    + consolidation (fold/summary/faceted)
                     └──────┬──────┘
                            │ at checkpoints...
                     ┌──────▼──────┐
-                    │    Agent    │    Budget-constrained LLM
-                    │  .search()  │    interrogates memory via
-                    │  .retrieve()│    adapter's tool interface
+                    │    Agent    │    Tool-use LLM interrogates
+                    │  + Tools   │    memory via search + context
                     └──────┬──────┘
                            │
                     ┌──────▼──────┐
-                    │   Scorer    │    3-tier scoring
-                    │  tier1: mech│    mechanical → LLM judge
-                    │  tier2: llm │    → differential
-                    │  tier3: diff│
+                    │   Scorer    │    Fact F1 via few-shot
+                    │  (per-fact) │    LLM grading
                     └─────────────┘
 ```
 
-1. **Adapter wraps your memory system** — Implement `MemoryAdapter` with `search`, `retrieve`, and `get_capabilities`. The runner calls `ingest` to feed episodes.
-2. **Episodes stream chronologically** — 30 signal episodes follow a 5-phase narrative arc (baseline → early signal → red herring → escalation → root cause), interleaved with 90 format-matched distractors.
-3. **At checkpoints, an LLM agent interrogates memory** — A budget-constrained agent answers questions using only `memory_search`, `memory_retrieve`, and `memory_capabilities`. No direct access to raw episodes.
-4. **Three-tier scoring** — Mechanical metrics (fact recall, evidence grounding), LLM judge (pairwise answer quality), and differential metrics (longitudinal advantage over baseline).
+1. **Episodes stream chronologically** — Signal episodes follow a 5-phase narrative arc (baseline → early signal → red herring → escalation → root cause), interleaved with format-matched distractors.
+2. **Bank build applies consolidation policy** — Episodes are chunked and indexed. Depending on the policy, derived context is synthesized (fold, summary, faceted decomposition, etc.) and injected into the agent's system prompt.
+3. **At checkpoints, an LLM agent interrogates memory** — The agent answers questions using `memory_search` and injected context. No direct access to raw episodes.
+4. **Fact F1 scoring** — Each key fact is graded as present/partial/absent by a few-shot LLM judge. F1 is computed across all facts per question.
 
 ---
 
@@ -102,61 +96,11 @@ git clone https://github.com/synix-dev/lens-benchmark.git
 cd lens-benchmark
 uv sync --all-extras
 
-# Smoke test (null adapter, mock LLM)
-uv run lens smoke
-
 # Run tests
 uv run pytest tests/unit/ -v
 ```
 
-See [QUICKSTART.md](docs/guides/QUICKSTART.md) for a full walkthrough: running against a real adapter, scoring results, and generating reports.
-
----
-
-## > WRITE YOUR OWN ADAPTER //
-
-Subclass `MemoryAdapter` and implement five methods:
-
-```python
-from lens.adapters.base import MemoryAdapter, CapabilityManifest, SearchResult, Document
-from lens.adapters.registry import register_adapter
-
-@register_adapter("my-memory")
-class MyAdapter(MemoryAdapter):
-    def reset(self, scope_id: str) -> None:
-        self.store = {}
-
-    def ingest(self, episode_id: str, scope_id: str,
-               timestamp: str, text: str, meta: dict | None = None) -> None:
-        self.store[episode_id] = text
-
-    def search(self, query: str, filters: dict | None = None,
-               limit: int | None = None) -> list[SearchResult]:
-        results = []
-        for eid, text in self.store.items():
-            if query.lower() in text.lower():
-                results.append(SearchResult(ref_id=eid, text=text[:200], score=1.0))
-        return results[:limit or 10]
-
-    def retrieve(self, ref_id: str) -> Document | None:
-        text = self.store.get(ref_id)
-        return Document(ref_id=ref_id, text=text) if text else None
-
-    def get_capabilities(self) -> CapabilityManifest:
-        return CapabilityManifest(search_modes=["keyword"], max_results_per_search=10)
-```
-
-Full guide: [ADAPTER_GUIDE.md](docs/guides/ADAPTER_GUIDE.md)
-
----
-
-## > SUBMIT A RUN //
-
-1. Run the full benchmark (S07-S12) with your adapter
-2. Score results with the LENS scorer
-3. Open a PR with your scores and run artifacts
-
-Full guide: [SUBMISSION_GUIDE.md](docs/guides/SUBMISSION_GUIDE.md)
+See [QUICKSTART.md](docs/guides/QUICKSTART.md) for a full walkthrough.
 
 ---
 
@@ -164,7 +108,7 @@ Full guide: [SUBMISSION_GUIDE.md](docs/guides/SUBMISSION_GUIDE.md)
 
 Scopes define benchmark scenarios. Each scope has:
 - A domain (system logs, clinical notes, financial reports, ...)
-- A 5-phase narrative arc with signal distributed across 30 episodes
+- A 5-phase narrative arc with signal distributed across episodes
 - Key facts that require multi-episode synthesis
 - Questions at checkpoints testing longitudinal reasoning
 
@@ -190,6 +134,9 @@ src/lens/
   scorer/            3-tier scoring (mechanical, judge, differential)
 datasets/scopes/     16 scope specifications + generated artifacts
 tests/unit/          1040 unit tests
+v2-synix-benchmark/  V2 ablation study workspace
+  src/bench/         Bank builder, policies, agent, scorer, runtime
+  studies/grid/      Full grid results, figures, research brief
 docs/                Documentation and guides
 ```
 
@@ -199,44 +146,13 @@ docs/                Documentation and guides
 
 | Document | Description |
 |----------|-------------|
-| [Quick Start](docs/guides/QUICKSTART.md) | Install, run, score — end to end |
-| [Adapter Guide](docs/guides/ADAPTER_GUIDE.md) | Write and register a memory adapter |
+| [Quick Start](docs/guides/QUICKSTART.md) | Install and run |
 | [Scope Guide](docs/guides/SCOPE_GUIDE.md) | Design and build a benchmark scope |
-| [Submission Guide](docs/guides/SUBMISSION_GUIDE.md) | Submit a validated run for the leaderboard |
-| [Leaderboard](LEADERBOARD.md) | Current results and methodology |
+| [Leaderboard](LEADERBOARD.md) | V1 + V2 results and methodology |
+| [Research Brief](v2-synix-benchmark/studies/grid/brief/research_brief.pdf) | V2 ablation study (PDF) |
+| [Architecture](docs/architecture.md) | Core data flow and scoring internals |
+| [Methodology](docs/methodology.md) | Dataset generation and contamination prevention |
 | [Contributing](CONTRIBUTING.md) | How to contribute |
-| [Architecture](docs/architecture.md) | Core data flow, adapter system, scoring internals |
-| [Methodology](docs/methodology.md) | Dataset generation, contamination prevention |
-| [Calibration](docs/calibration.md) | Naive baseline calibration and key fact design |
-
----
-
-## > SCORING //
-
-### V2 Scoring (Current)
-
-V2 uses **Fact F1**: each ground-truth key fact is graded as present or absent in the agent's answer by a few-shot Qwen3.5-35B-A3B judge. Precision, recall, and F1 are computed across all key facts per question, then averaged across questions and scopes. This is more granular than holistic answer quality — it measures whether specific atomic claims were recovered from memory.
-
-### V1 Scoring (Legacy)
-
-V1 uses nine metrics across three tiers:
-
-**Tier 1 — Mechanical** (no LLM judge):
-- `evidence_grounding` (10%) — cited ref_ids that exist in the vault
-- `fact_recall` (10%) — ground-truth key facts found in answer
-- `evidence_coverage` (10%) — required evidence episodes retrieved
-- `budget_compliance` (10%) — budget violations penalty
-
-**Tier 2 — LLM Judge**:
-- `answer_quality` (15%) — pairwise vs. canonical ground truth
-- `insight_depth` (15%) — refs from 2+ distinct episodes
-- `reasoning_quality` (10%) — substantive answers with tool use
-
-**Tier 3 — Differential**:
-- `longitudinal_advantage` (15%) — synthesis questions minus control questions
-- `action_quality` (5%) — action recommendation quality
-
-Hard gate: `evidence_grounding` or `budget_compliance` below 0.5 zeros the composite.
 
 ---
 
@@ -245,7 +161,7 @@ Hard gate: `evidence_grounding` or `budget_compliance` below 0.5 zeros the compo
 ```bibtex
 @software{lens_benchmark,
   title  = {LENS: Longitudinal Evidence-backed Narrative Signals},
-  author = {LENS Contributors},
+  author = {Mark Lubin},
   year   = {2025},
   url    = {https://github.com/synix-dev/lens-benchmark}
 }
