@@ -1,12 +1,75 @@
-# LENS Benchmark
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                     │
+│   ██╗     ███████╗███╗   ██╗███████╗                               │
+│   ██║     ██╔════╝████╗  ██║██╔════╝                               │
+│   ██║     █████╗  ██╔██╗ ██║███████╗                               │
+│   ██║     ██╔══╝  ██║╚██╗██║╚════██║                               │
+│   ███████╗███████╗██║ ╚████║███████║                               │
+│   ╚══════╝╚══════╝╚═╝  ╚═══╝╚══════╝                               │
+│                                                                     │
+│   Longitudinal Evidence-backed Narrative Signals                    │
+│   A benchmark for agent memory systems                              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-**Longitudinal Evidence-backed Narrative Signals** — a benchmark for evaluating memory systems for AI agents.
+![Tests](https://img.shields.io/badge/tests-1040_passing-22c55e?style=flat-square)
+![Python](https://img.shields.io/badge/python-3.11+-3b82f6?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-06b6d4?style=flat-square)
+![Scopes](https://img.shields.io/badge/scopes-16-eab308?style=flat-square)
 
-Most retrieval benchmarks dump a static corpus and test search quality. Real memory systems receive information **incrementally** — a support ticket each day, a sensor reading each hour, a clinical note each week — and need to surface patterns that only become visible after enough data has accumulated. LENS tests this temporal dimension directly.
+---
 
-LENS streams timestamped episodes into your memory system chronologically, then pauses at checkpoints to ask questions that require synthesizing evidence scattered across many episodes. A budget-constrained LLM agent interrogates your system through its search/retrieve interface, and three tiers of scoring measure everything from basic evidence grounding to longitudinal reasoning advantage.
+## > WHAT IS LENS //
 
-## How It Works
+Most retrieval benchmarks dump a static corpus and test search quality. Real memory systems receive information **incrementally** — a support ticket each day, a sensor reading each hour, a clinical note each week — and must surface patterns that only emerge after enough data accumulates.
+
+LENS streams timestamped episodes into your memory system chronologically, pauses at checkpoints to ask questions requiring synthesis across many episodes, and scores whether your system enables longitudinal reasoning — not just keyword retrieval.
+
+If a single episode can answer the question, the benchmark is broken. LENS ensures signal only emerges from the *progression*.
+
+---
+
+## > LEADERBOARD //
+
+Full results and methodology: [LEADERBOARD.md](LEADERBOARD.md)
+
+### V1: Adapter Benchmark
+
+Modal driver, Qwen3.5-35B-A3B agent, 6 scopes (S07-S12):
+
+| Rank | Adapter | Mean AQ | Category |
+|-----:|---------|--------:|----------|
+| 1 | graphrag-light | 0.462 | Graph |
+| 2 | sqlite-chunked-hybrid | 0.431 | Hybrid |
+| 3 | letta | 0.413 | Agent Memory |
+| 4 | hopping-hybrid | 0.408 | Hybrid |
+| 5 | hopping | 0.404 | Hop-based |
+| 6 | letta-sleepy | 0.404 | Agent Memory |
+| 7 | hierarchical-hybrid | 0.388 | Hybrid |
+| 8 | triadv1-pairs | 0.377 | Triad |
+| 9 | hierarchical | 0.369 | Hierarchical |
+| 10 | letta-v4 | 0.338 | Agent Memory |
+| 11 | null | 0.328 | Baseline |
+
+### V2: Memory Strategy Ablation
+
+7 scopes, M=3 repetitions, Fact F1:
+
+| Rank | Policy | Mean F1 | Analogous System |
+|-----:|--------|--------:|------------------|
+| 1 | core_faceted | 0.511 | Multi-agent faceted memory |
+| 2 | core | 0.486 | Letta/MemGPT core memory |
+| 3 | core_structured | 0.472 | Mastra/ACE structured memory |
+| 4 | summary | 0.457 | Rolling summary |
+| 5 | core_maintained | 0.427 | Fold + refinement |
+| 6 | base | 0.412 | Raw retrieval |
+| 7 | null | 0.059 | No memory |
+
+---
+
+## > HOW IT WORKS //
 
 ```
                     ┌─────────────┐
@@ -14,194 +77,188 @@ LENS streams timestamped episodes into your memory system chronologically, then 
                     └──────┬──────┘
                            │
                     ┌──────▼──────┐
-                    │   Episodes  │    Timestamped text records
+                    │   Episodes  │    30 signal + 90 distractor
                     └──────┬──────┘
                            │ stream chronologically
                     ┌──────▼──────┐
-                    │   Adapter   │    Your memory system wrapper
-                    │  (ingest)   │
+                    │   Adapter   │    Your memory system
+                    │  .ingest()  │    implements MemoryAdapter
                     └──────┬──────┘
                            │ at checkpoints...
                     ┌──────▼──────┐
                     │    Agent    │    Budget-constrained LLM
-                    │  (search,   │    interrogates memory via
-                    │  retrieve)  │    adapter's tool interface
+                    │  .search()  │    interrogates memory via
+                    │  .retrieve()│    adapter's tool interface
                     └──────┬──────┘
                            │
                     ┌──────▼──────┐
                     │   Scorer    │    3-tier scoring
-                    │  (mechanical│    mechanical → LLM judge
-                    │   → judge   │    → differential
-                    │   → diff)   │
+                    │  tier1: mech│    mechanical → LLM judge
+                    │  tier2: llm │    → differential
+                    │  tier3: diff│
                     └─────────────┘
 ```
 
-1. **Adapter wraps your memory system** — You implement `MemoryAdapter` with `search`, `retrieve`, and `get_capabilities`. The runner calls `ingest` to feed episodes.
-2. **Episodes stream in chronologically** — The runner feeds timestamped episodes one at a time. Your adapter stores them however it wants.
-3. **At checkpoints, an LLM agent interrogates memory** — A budget-constrained agent receives each question and can only answer by calling `memory_search`, `memory_retrieve`, and `memory_capabilities`. It has no direct access to raw episodes.
-4. **Three-tier scoring** — Mechanical metrics (fact recall, evidence grounding), LLM judge (pairwise answer quality), and differential metrics (longitudinal advantage over baseline retrieval).
+1. **Adapter wraps your memory system** — Implement `MemoryAdapter` with `search`, `retrieve`, and `get_capabilities`. The runner calls `ingest` to feed episodes.
+2. **Episodes stream chronologically** — 30 signal episodes follow a 5-phase narrative arc (baseline → early signal → red herring → escalation → root cause), interleaved with 90 format-matched distractors.
+3. **At checkpoints, an LLM agent interrogates memory** — A budget-constrained agent answers questions using only `memory_search`, `memory_retrieve`, and `memory_capabilities`. No direct access to raw episodes.
+4. **Three-tier scoring** — Mechanical metrics (fact recall, evidence grounding), LLM judge (pairwise answer quality), and differential metrics (longitudinal advantage over baseline).
 
-## Quick Start
+---
+
+## > QUICK START //
 
 ```bash
-# Install
-pip install lens-bench
-# or with uv
-uv pip install lens-bench
+# Clone and install
+git clone https://github.com/synix-dev/lens-benchmark.git
+cd lens-benchmark
+uv sync --all-extras
 
-# Run smoke test (null adapter + mock LLM)
+# Smoke test (null adapter, mock LLM)
 uv run lens smoke
+
+# Run tests
+uv run pytest tests/unit/ -v
 ```
 
-## Writing an Adapter
+See [QUICKSTART.md](docs/guides/QUICKSTART.md) for a full walkthrough: running against a real adapter, scoring results, and generating reports.
 
-Subclass `MemoryAdapter` from `src/lens/adapters/base.py`:
+---
+
+## > WRITE YOUR OWN ADAPTER //
+
+Subclass `MemoryAdapter` and implement five methods:
 
 ```python
-from lens.adapters.base import (
-    MemoryAdapter,
-    CapabilityManifest,
-    SearchResult,
-    Document,
-)
+from lens.adapters.base import MemoryAdapter, CapabilityManifest, SearchResult, Document
+from lens.adapters.registry import register_adapter
 
-class MyMemoryAdapter(MemoryAdapter):
-    """Wrap your memory system for LENS evaluation."""
-
+@register_adapter("my-memory")
+class MyAdapter(MemoryAdapter):
     def reset(self, scope_id: str) -> None:
-        """Clear all state for a scope."""
-        ...
+        self.store = {}
 
     def ingest(self, episode_id: str, scope_id: str,
                timestamp: str, text: str, meta: dict | None = None) -> None:
-        """Ingest a single episode. Must complete within 200ms, no LLM calls."""
-        ...
+        self.store[episode_id] = text
 
     def search(self, query: str, filters: dict | None = None,
                limit: int | None = None) -> list[SearchResult]:
-        """Search memory for relevant information."""
-        ...
+        results = []
+        for eid, text in self.store.items():
+            if query.lower() in text.lower():
+                results.append(SearchResult(ref_id=eid, text=text[:200], score=1.0))
+        return results[:limit or 10]
 
     def retrieve(self, ref_id: str) -> Document | None:
-        """Retrieve a full document by reference ID."""
-        ...
+        text = self.store.get(ref_id)
+        return Document(ref_id=ref_id, text=text) if text else None
 
     def get_capabilities(self) -> CapabilityManifest:
-        """Declare search modes, filter fields, and extra tools."""
-        return CapabilityManifest(
-            search_modes=["semantic"],
-            max_results_per_search=10,
-        )
+        return CapabilityManifest(search_modes=["keyword"], max_results_per_search=10)
 ```
 
-The agent discovers your adapter's capabilities at runtime via `get_capabilities()` and adapts its strategy. Systems that expose richer interfaces (filter fields, date ranges, extra tools) get a natural advantage.
+Full guide: [ADAPTER_GUIDE.md](docs/guides/ADAPTER_GUIDE.md)
 
-Built-in adapters: `null` (returns empty results, used as baseline), `sqlite` (SQLite FTS + semantic search). External adapters can be registered via `lens.adapters` entry points.
+---
 
-## Running a Benchmark
+## > SUBMIT A RUN //
 
-```bash
-# Run benchmark with an adapter
-lens run --dataset data.json --adapter sqlite --out output/
+1. Run the full benchmark (S07-S12) with your adapter
+2. Score results with the LENS scorer
+3. Open a PR with your scores and run artifacts
 
-# Score the results
-lens score --run output/
+Full guide: [SUBMISSION_GUIDE.md](docs/guides/SUBMISSION_GUIDE.md)
 
-# Generate report
-lens report --run output/
+---
 
-# Compare two runs
-lens compare output1/ output2/
+## > CONTRIBUTE A SCOPE //
 
-# List available adapters and metrics
-lens adapters
-lens metrics
-```
+Scopes define benchmark scenarios. Each scope has:
+- A domain (system logs, clinical notes, financial reports, ...)
+- A 5-phase narrative arc with signal distributed across 30 episodes
+- Key facts that require multi-episode synthesis
+- Questions at checkpoints testing longitudinal reasoning
 
-## Scoring
+Current scopes span: cascading failures, financial irregularity, clinical signals, environmental drift, insider threats, market regimes, jailbreak detection, corporate acquisition, shadow APIs, clinical trials, zoning corruption, therapy chat, implicit decisions, epoch classification, value inversion, and parking friction.
 
-Nine metrics across three tiers, with a weighted composite score:
+Full guide: [SCOPE_GUIDE.md](docs/guides/SCOPE_GUIDE.md)
 
-### Tier 1 — Mechanical (no LLM judge)
+---
 
-| Metric | Weight | What it measures |
-|--------|--------|-----------------|
-| `evidence_grounding` | 10% | Fraction of cited ref_ids that exist in the episode vault (anti-hallucination) |
-| `fact_recall` | 10% | Fraction of ground-truth key facts found in the answer text |
-| `evidence_coverage` | 10% | Fraction of required evidence episodes actually retrieved |
-| `budget_compliance` | 10% | 1.0 minus 0.1 per budget violation (turns, tool calls, tokens, latency) |
-
-**Hard gate**: If `evidence_grounding` or `budget_compliance` falls below 0.5, the composite score is zeroed out. This prevents higher-tier scores from compensating for fundamental mechanical failures.
-
-### Tier 2 — LLM Judge
-
-| Metric | Weight | What it measures |
-|--------|--------|-----------------|
-| `answer_quality` | 15% | Pairwise comparison: candidate answer vs. canonical ground truth per key fact, position-debiased |
-| `insight_depth` | 15% | Fraction of questions where the agent cited refs from 2+ distinct episodes |
-| `reasoning_quality` | 10% | Fraction of questions with substantive answers (>50 chars) and tool use |
-
-### Tier 3 — Differential
-
-| Metric | Weight | What it measures |
-|--------|--------|-----------------|
-| `longitudinal_advantage` | 15% | Mean fact-recall for synthesis questions minus control questions. **The headline metric** — isolates the value of temporal memory. |
-| `action_quality` | 5% | Mean fact-recall for action recommendation questions |
-
-## Dataset Scopes
-
-Six scopes across different domains, each with 30 signal episodes + 90 distractor episodes and 24 questions:
-
-| Scope | Domain | Signal |
-|-------|--------|--------|
-| 01 Cascading Failure | System logs | API gateway cascading dependency failure |
-| 02 Financial Irregularity | Financial reports | Progressive revenue recognition manipulation |
-| 03 Clinical Signal | Clinical notes | Drug-drug interaction hepatotoxicity signal |
-| 04 Environmental Drift | Environmental monitoring | Upstream chromium contamination from unpermitted discharge |
-| 05 Insider Threat | Security logs | Systematic IP exfiltration by departing employee |
-| 06 Market Regime | Market analysis | Hidden equity-bond correlation breakdown from policy shift |
-
-Each scope follows a five-phase narrative arc: baseline → early signal → red herring → escalation → root cause. Signal is distributed across episodes so that no single episode answers any question — patterns only emerge from the progression.
-
-## Project Structure
+## > PROJECT STRUCTURE //
 
 ```
 src/lens/
-  adapters/       # Memory system adapters (base ABC, null, sqlite, registry)
-  agent/          # Agent harness, tool bridge, budget enforcement, LLM clients
-  cli/            # Click CLI (run, score, report, compare, smoke, etc.)
-  core/           # Data models (Episode, Question, GroundTruth, AgentAnswer, ScoreCard)
-  datagen/synix/  # Two-stage dataset generation pipeline
-  datasets/       # Dataset loading
-  matcher/        # Answer matching
-  report/         # Report generation
-  runner/         # Benchmark runner with EpisodeVault anticheat
-  scorer/         # 3-tier scoring (tier1, tier2, tier3, aggregate, judge)
-datasets/scopes/  # Dataset specifications and generated artifacts
-tests/unit/       # Unit tests
-docs/             # Detailed documentation
+  adapters/          MemoryAdapter ABC, null/sqlite builtins, registry
+  agent/             Agent harness, tool bridge, budget enforcement
+  cli/               Click CLI (run, score, report, smoke, ...)
+  core/              Episode, Question, GroundTruth, ScoreCard
+  datagen/synix/     Two-stage dataset generation pipeline
+  datasets/          Dataset loading
+  matcher/           Answer matching
+  report/            Report generation
+  runner/            Benchmark runner with EpisodeVault anticheat
+  scorer/            3-tier scoring (mechanical, judge, differential)
+datasets/scopes/     16 scope specifications + generated artifacts
+tests/unit/          1040 unit tests
+docs/                Documentation and guides
 ```
 
-## Documentation
+---
 
-- [Architecture deep-dive](docs/architecture.md) — Core data flow, adapter system, agent harness, runner, scoring internals
-- [Dataset methodology](docs/methodology.md) — Two-stage pipeline, contamination prevention, validation gates
-- [Calibration learnings](docs/calibration.md) — Naive baseline calibration process and key fact design rules
-- [Conceptual overview](docs/LENS_OVERVIEW.md) — What makes LENS different from static retrieval benchmarks
+## > DOCUMENTATION //
 
-## Development
+| Document | Description |
+|----------|-------------|
+| [Quick Start](docs/guides/QUICKSTART.md) | Install, run, score — end to end |
+| [Adapter Guide](docs/guides/ADAPTER_GUIDE.md) | Write and register a memory adapter |
+| [Scope Guide](docs/guides/SCOPE_GUIDE.md) | Design and build a benchmark scope |
+| [Submission Guide](docs/guides/SUBMISSION_GUIDE.md) | Submit a validated run for the leaderboard |
+| [Leaderboard](LEADERBOARD.md) | Current results and methodology |
+| [Contributing](CONTRIBUTING.md) | How to contribute |
+| [Architecture](docs/architecture.md) | Core data flow, adapter system, scoring internals |
+| [Methodology](docs/methodology.md) | Dataset generation, contamination prevention |
+| [Calibration](docs/calibration.md) | Naive baseline calibration and key fact design |
 
-```bash
-# Run tests
-uv run pytest tests/unit/ -v
+---
 
-# Build a dataset scope
-uv run synix build src/lens/datagen/synix/pipeline.py \
-  --source-dir datasets/scopes/01_cascading_failure \
-  --build-dir datasets/scopes/01_cascading_failure/generated \
-  -j 8 -vv
+## > SCORING //
 
-# Validate a build
-uv run synix validate src/lens/datagen/synix/pipeline.py \
-  --build-dir datasets/scopes/01_cascading_failure/generated --json
+Nine metrics across three tiers:
+
+**Tier 1 — Mechanical** (no LLM judge):
+- `evidence_grounding` (10%) — cited ref_ids that exist in the vault
+- `fact_recall` (10%) — ground-truth key facts found in answer
+- `evidence_coverage` (10%) — required evidence episodes retrieved
+- `budget_compliance` (10%) — budget violations penalty
+
+**Tier 2 — LLM Judge**:
+- `answer_quality` (15%) — pairwise vs. canonical ground truth
+- `insight_depth` (15%) — refs from 2+ distinct episodes
+- `reasoning_quality` (10%) — substantive answers with tool use
+
+**Tier 3 — Differential**:
+- `longitudinal_advantage` (15%) — synthesis questions minus control questions
+- `action_quality` (5%) — action recommendation quality
+
+Hard gate: `evidence_grounding` or `budget_compliance` below 0.5 zeros the composite.
+
+---
+
+## > CITATION //
+
+```bibtex
+@software{lens_benchmark,
+  title  = {LENS: Longitudinal Evidence-backed Narrative Signals},
+  author = {LENS Contributors},
+  year   = {2025},
+  url    = {https://github.com/synix-dev/lens-benchmark}
+}
 ```
+
+---
+
+## > LICENSE //
+
+[MIT](LICENSE)

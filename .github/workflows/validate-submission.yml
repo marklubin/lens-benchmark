@@ -1,0 +1,81 @@
+name: Validate Submission
+
+on:
+  pull_request:
+    paths:
+      - 'LEADERBOARD.md'
+      - 'submissions/**'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Check submission structure
+        run: |
+          # Find new/modified submission directories
+          SUBMISSIONS=$(git diff --name-only origin/main HEAD -- submissions/ | cut -d'/' -f2 | sort -u)
+
+          if [ -z "$SUBMISSIONS" ]; then
+            echo "No submission directories modified"
+            exit 0
+          fi
+
+          for adapter in $SUBMISSIONS; do
+            echo "Validating submission: $adapter"
+            DIR="submissions/$adapter"
+
+            # Check required files
+            if [ ! -f "$DIR/config.json" ]; then
+              echo "ERROR: Missing $DIR/config.json"
+              exit 1
+            fi
+
+            # Check all benchmark scopes present
+            for scope in S07 S08 S09 S10 S11 S12; do
+              if [ ! -d "$DIR/results/$scope" ]; then
+                echo "ERROR: Missing results for $scope in $DIR"
+                exit 1
+              fi
+              for file in answers.json scores.json scorecard.json; do
+                if [ ! -f "$DIR/results/$scope/$file" ]; then
+                  echo "ERROR: Missing $DIR/results/$scope/$file"
+                  exit 1
+                fi
+              done
+            done
+
+            echo "Submission $adapter: structure OK"
+          done
+
+      - name: Validate config schema
+        run: |
+          SUBMISSIONS=$(git diff --name-only origin/main HEAD -- submissions/ | cut -d'/' -f2 | sort -u)
+
+          for adapter in $SUBMISSIONS; do
+            python3 -c "
+          import json, sys
+          with open('submissions/$adapter/config.json') as f:
+              config = json.load(f)
+          required = ['adapter', 'agent_model', 'judge_model', 'lens_version', 'date']
+          missing = [k for k in required if k not in config]
+          if missing:
+              print(f'ERROR: Missing required fields in config.json: {missing}')
+              sys.exit(1)
+          print(f'Config for $adapter: OK')
+          "
+          done
+
+      - name: Run tests
+        run: uv run pytest tests/unit/ -v --tb=short
